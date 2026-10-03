@@ -1,0 +1,66 @@
+# 开机自启动:上电即拉起 LVGL 界面(P0 显示/触摸工作流的部署件)
+#
+# 部署(板上,root):
+#   sudo install -m 644 qrs-ui.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable qrs-ui.service
+#   sudo systemctl start qrs-ui.service      # 也可等下次上电自动起
+#
+# 看日志:  journalctl -u qrs-ui.service -f      (或 tail -f /var/log/qrs-ui.log)
+#
+# ── 三条设计约束,改之前先读 ────────────────────────────────────────────────
+#
+# ① ★ Restart=no 是**故意的,不要改成 on-failure**
+#    main.py 开场就是 board.open_monitor() → Overlay() → **重新下载位流**。
+#    本板 PL 侧 lcd_fb_reader 是活跃的 AXI 主机,一直在读 DDR 帧缓存;
+#    在它跑着的时候复位 fabric,会把它未完成的 HP0 读事务打断 ——
+#    2026-10-03 由此挂死过一次(ping 全丢,只能断电)。**一次上电只允许加载一次位流。**
+#    失败就让它失败,屏黑着是可观察的;自动重启会变成随机地锁死板子。
+#
+# ② 解释器必须写**全路径**,不能写 `python3`
+#    pynq 装在 venv 里,`/home/xilinx/pynq` 只是指向它的软链;
+#    `/usr/bin/python3` 能 import pynq **纯粹是因为 SSH 的 cwd 恰好在 /home/xilinx**。
+#    systemd 的 cwd 是 /,所以必须用 venv 自己的解释器:
+#      /usr/local/share/pynq-venv/lib/python3.8/site-packages/pynq  ← 真正的包
+#
+# ③ 环境变量必须在这里显式给
+#    systemd 不读 /etc/profile.d/。板子上的三个脚本(实测)是:
+#      /etc/profile.d/xrt_setup.sh   →  export XILINX_XRT=/usr
+#      /etc/profile.d/pynq_venv.sh   →  source /usr/local/share/pynq-venv/bin/activate
+#      /etc/profile.d/boardname.sh   →  export BOARD=$(cat /proc/device-tree/chosen/pynq_board)
+#    少 XILINX_XRT 会报 `RuntimeError: No Devices Found`(踩过)。
+
+[Unit]
+Description=QRS MOSFET C-V monitor - LCD + touch UI (PYNQ)
+Documentation=file:/home/hyp/Desktop/qrs_2026_fpga/docs/display_subsystem.md
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=root
+
+# 让 `python3 tools/xxx.py` 这类相对路径可用,同时与 SSH 会话的 cwd 保持一致
+WorkingDirectory=/home/xilinx/cv
+
+Environment=XILINX_XRT=/usr
+Environment=VIRTUAL_ENV=/usr/local/share/pynq-venv
+Environment=PYTHONUNBUFFERED=1
+Environment=PATH=/usr/local/share/pynq-venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+# -u:不缓冲,否则 journalctl 里看不到启动过程
+ExecStart=/usr/local/share/pynq-venv/bin/python3 -u /home/xilinx/cv/main.py
+
+# ★ 见文件头 ①:绝不允许自动重启
+Restart=no
+
+# c_ui 是 main.py 的子进程,C 界面要读 /dev/mem ⇒ 必须 root(这里整条链都是 root)
+StandardOutput=append:/var/log/qrs-ui.log
+StandardError=append:/var/log/qrs-ui.log
+
+# 停服务时给 main.py 留出切纯色 / 收子进程的时间
+TimeoutStopSec=20s
+KillMode=control-group
+
+[Install]
+WantedBy=multi-user.target

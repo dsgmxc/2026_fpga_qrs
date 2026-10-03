@@ -1,0 +1,5367 @@
+#include "ui_demo.h"
+
+#include <stddef.h>
+#include <stdint.h>
+#include <math.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "BSP/LCD/lcd_panel_config.h"
+#include "BSP/LVGL/lv_port_indev.h"
+#include "display_protocol.h"
+#include "engineering_parameters.h"
+#include "lvgl.h"
+#include "sweep_interpolation.h"
+
+LV_FONT_DECLARE(ui_font_cn_20);
+LV_FONT_DECLARE(ui_font_cn_28);
+
+#define UI_COLOR_BACKGROUND       0x07111fu
+#define UI_COLOR_SURFACE          0x0d1b2au
+#define UI_COLOR_SURFACE_LIGHT    0x13263au
+#define UI_COLOR_BORDER           0x24415cu
+#define UI_COLOR_TEXT             0xf4f8fcu
+#define UI_COLOR_TEXT_MUTED       0x8fa8c0u
+#define UI_COLOR_STATUS           0xc6d7e8u
+#define UI_COLOR_BLUE             0x2f80ffu
+#define UI_COLOR_CYAN             0x22d3eeu
+#define UI_COLOR_GREEN            0x2ce6a6u
+#define UI_COLOR_ORANGE           0xffb547u
+#define UI_COLOR_RED              0xff5d73u
+#define UI_COLOR_PURPLE           0xa78bfau
+#define UI_COLOR_PRESSED          0x1d3650u
+
+#define UI_COMMON_HEADER_HEIGHT   52
+#define UI_PAGE_MARGIN            24
+#define UI_SWEEP_MAX_POINTS       UI_DEMO_SWEEP_MAX_POINTS
+#define UI_SWEEP_RENDER_POINTS    401u
+#define UI_SWEEP_X_MIN_LOG_MILLI  (-1000)
+#define UI_SWEEP_X_MAX_LOG_MILLI  2000
+#define UI_SWEEP_DEFAULT_Y_MIN_LOG_MILLI 0
+#define UI_SWEEP_DEFAULT_Y_MAX_LOG_MILLI 4000
+#define UI_SWEEP_DRAWER_WIDTH     218
+#define UI_SWEEP_LOG_MINOR_COUNT  8u
+#define UI_SWEEP_PROBE_RADIUS     7
+#define UI_SWEEP_PROBE_HIT_RADIUS 40
+#define UI_SWEEP_MIN_X_SPAN_LOG_MILLI 250
+#define UI_SWEEP_MIN_Y_SPAN_LOG_MILLI 250
+#define UI_SWEEP_PINCH_MIN_DISTANCE_PX 24.0f
+#define UI_SWEEP_GESTURE_UPDATE_MS 30u
+#define UI_SWEEP_DOUBLE_TAP_MS    350u
+#define UI_SWEEP_TAP_MOVE_LIMIT_PX 12
+#define UI_SWEEP_SMALL_ANIMATION_MS  140u
+#define UI_SWEEP_CHART_REFRESH_MS     80u
+#define UI_SWEEP_PAGE_SWIPE_TRIGGER 100
+#define UI_SWEEP_PAGE_SWIPE_MAX_MS 700u
+#define UI_SWEEP_ENGINEERING_BUTTON_WIDTH 164
+#define UI_SWEEP_ENGINEERING_BUTTON_HEIGHT 40
+#define UI_SWEEP_ENGINEERING_BUTTON_GAP 12
+#define UI_ENGINEERING_PARAMETER_COUNT 6u
+#define UI_ENGINEERING_QR_SIZE     288
+#define UI_ENGINEERING_MODEL_URL_CAPACITY 3072u
+
+#define UI_BIAS_MIN_TENTHS        1u
+#define UI_BIAS_MAX_TENTHS        1000u
+
+#define UI_KEYPAD_DECIMAL         10u
+#define UI_KEYPAD_BACKSPACE       11u
+#define UI_KEYPAD_CLEAR           12u
+#define UI_KEYPAD_CANCEL          13u
+#define UI_KEYPAD_MINIMUM         14u
+#define UI_KEYPAD_CONFIRM         15u
+
+typedef enum
+{
+    UI_PAGE_HOME = 0u,
+    UI_PAGE_INITIALIZE = 1u,
+    UI_PAGE_SINGLE = 2u,
+    UI_PAGE_MEASURE_ALL = 3u,
+    UI_PAGE_SWEEP = 4u
+} UI_Page;
+
+typedef enum
+{
+    UI_BIAS_TARGET_SINGLE = 0u,
+    UI_BIAS_TARGET_MEASURE_ALL = 1u,
+    UI_BIAS_TARGET_SWEEP = 2u,
+    UI_BIAS_TARGET_ANALYSIS = 3u
+} UI_BiasTarget;
+
+#define UI_DISPLAY_PATH_ALL       4u
+
+typedef struct
+{
+    uint32_t action_code;
+    const char *status_text;
+} UI_Action;
+
+typedef struct
+{
+    uint8_t active;
+    uint8_t block_single_touch;
+    uint8_t first_id;
+    uint8_t second_id;
+    float start_distance;
+    float anchor_x_log_milli;
+    float anchor_y_log_milli;
+    int32_t start_x_min_log_milli;
+    int32_t start_x_max_log_milli;
+    int32_t start_y_min_log_milli;
+    int32_t start_y_max_log_milli;
+    uint32_t last_update_tick;
+} UI_SweepGestureState;
+
+typedef struct
+{
+    uint8_t active;
+    lv_point_t start_point;
+    uint32_t start_tick;
+} UI_SweepPageSwipeState;
+
+static lv_obj_t *g_status_label;
+static lv_obj_t *g_modal_overlay;
+static lv_obj_t *g_common_header;
+static lv_obj_t *g_header_back_button;
+static lv_obj_t *g_header_title_label;
+static lv_obj_t *g_header_connection_label;
+static lv_obj_t *g_header_bias_label;
+static lv_obj_t *g_header_path_label;
+static lv_obj_t *g_header_operation_label;
+static lv_obj_t *g_page_containers[5];
+static uint8_t g_page_built[5];
+static lv_obj_t *g_single_path_buttons[4];
+static lv_obj_t *g_sweep_path_buttons[4];
+static lv_obj_t *g_single_bias_value_label;
+static lv_obj_t *g_measure_all_bias_value_label;
+static lv_obj_t *g_sweep_bias_value_label;
+static lv_obj_t *g_single_result_label;
+static lv_obj_t *g_single_result_note_label;
+static lv_obj_t *g_all_result_labels[3];
+static lv_obj_t *g_sweep_chart;
+static lv_obj_t *g_sweep_progress_label;
+static lv_obj_t *g_sweep_progress_bar;
+static lv_obj_t *g_sweep_progress_indicator;
+static lv_obj_t *g_sweep_control_panel;
+static lv_obj_t *g_sweep_settings_button;
+static lv_obj_t *g_sweep_engineering_button;
+static lv_timer_t *g_sweep_chart_refresh_timer;
+static lv_obj_t *g_sweep_curve_page;
+static lv_obj_t *g_sweep_engineering_page;
+static lv_obj_t *g_engineering_analysis_value_label;
+static lv_obj_t *g_engineering_quality_label;
+static lv_obj_t *g_engineering_parameter_value_labels[
+    UI_ENGINEERING_PARAMETER_COUNT];
+static lv_obj_t *g_engineering_slider_track;
+static lv_obj_t *g_engineering_slider_knob;
+static lv_obj_t *g_engineering_qrcode;
+static lv_obj_t *g_engineering_qr_mode_label;
+static lv_obj_t *g_engineering_qr_status_label;
+static lv_obj_t *g_engineering_qr_model_label;
+static lv_chart_series_t *g_sweep_series[3];
+static lv_obj_t *g_keypad_overlay;
+static lv_obj_t *g_keypad_title_label;
+static lv_obj_t *g_keypad_value_label;
+static lv_obj_t *g_keypad_note_label;
+static uint32_t g_ui_click_count;
+static uint32_t g_ui_last_button;
+static uint32_t g_ui_current_page;
+static uint32_t g_ui_reset_request_count;
+static uint32_t g_ui_single_path;
+static uint32_t g_ui_sweep_path;
+static uint32_t g_ui_single_bias_tenths;
+static uint32_t g_ui_measure_all_bias_tenths;
+static uint32_t g_ui_sweep_end_tenths;
+static uint32_t g_ui_analysis_voltage_tenths;
+static uint32_t g_ui_analysis_voltage_max_tenths;
+static uint32_t g_ui_display_bias_tenths;
+static uint32_t g_ui_display_path;
+static uint8_t g_ui_immediate_refresh_enabled;
+static UI_BiasTarget g_keypad_target;
+static char g_keypad_buffer[8];
+static char g_ui_actual_bias[16];
+static char g_ui_actual_path[16];
+static float g_sweep_voltage[3][UI_SWEEP_MAX_POINTS];
+static float g_sweep_capacitance[3][UI_SWEEP_MAX_POINTS];
+static float g_sweep_parallel_capacitance[3][UI_SWEEP_MAX_POINTS];
+static float g_sweep_dissipation[3][UI_SWEEP_MAX_POINTS];
+static uint8_t g_sweep_model_valid[3][UI_SWEEP_MAX_POINTS];
+static uint8_t g_sweep_valid[3][UI_SWEEP_MAX_POINTS];
+static uint32_t g_sweep_total_points[3];
+static SweepInterpolationCurve g_sweep_cs_curve[3];
+static SweepInterpolationCurve g_sweep_cp_curve[3];
+static SweepInterpolationCurve g_sweep_d_curve[3];
+static uint8_t g_sweep_interpolation_ready[3];
+static uint32_t g_sweep_visible_mask;
+static uint32_t g_sweep_probe_path;
+static uint32_t g_sweep_probe_index;
+static float g_sweep_probe_voltage;
+static float g_sweep_probe_cs;
+static float g_sweep_probe_cp;
+static float g_sweep_probe_d;
+static uint8_t g_sweep_probe_model_valid;
+static uint8_t g_sweep_probe_interpolated;
+static uint8_t g_sweep_probe_valid;
+static uint8_t g_sweep_probe_tracking;
+static uint8_t g_sweep_inspection_ready;
+static uint8_t g_sweep_last_tap_valid;
+static uint8_t g_sweep_single_touch_moved;
+static uint32_t g_sweep_last_tap_tick;
+static lv_point_t g_sweep_touch_press_point;
+static int32_t g_sweep_x_min_log_milli = UI_SWEEP_X_MIN_LOG_MILLI;
+static int32_t g_sweep_x_max_log_milli = UI_SWEEP_X_MAX_LOG_MILLI;
+static int32_t g_sweep_y_min_log_milli =
+    UI_SWEEP_DEFAULT_Y_MIN_LOG_MILLI;
+static int32_t g_sweep_y_max_log_milli =
+    UI_SWEEP_DEFAULT_Y_MAX_LOG_MILLI;
+static int32_t g_sweep_full_y_min_log_milli =
+    UI_SWEEP_DEFAULT_Y_MIN_LOG_MILLI;
+static int32_t g_sweep_full_y_max_log_milli =
+    UI_SWEEP_DEFAULT_Y_MAX_LOG_MILLI;
+static UI_SweepGestureState g_sweep_gesture;
+static UI_SweepPageSwipeState g_sweep_back_swipe;
+static uint8_t g_sweep_engineering_page_active;
+static uint8_t g_sweep_subpage_animating;
+static uint8_t g_sweep_chart_dirty;
+static uint8_t g_engineering_analysis_initialized;
+static uint8_t g_engineering_ai_model_ready;
+static uint32_t g_engineering_quality_state;
+static uint32_t g_engineering_quality_class;
+static float g_engineering_quality_clean_probability;
+static float g_latest_rg_ohm;
+static uint8_t g_latest_rg_valid;
+static char g_engineering_ai_model_url[UI_ENGINEERING_MODEL_URL_CAPACITY];
+
+static const char g_engineering_demo_url[] =
+    "https://fox4327.github.io/ai-cv2spice-web/";
+
+static const uint32_t g_sweep_series_colors[] =
+    {0xd65ab1u, 0xe5225bu, 0x8c971du};
+
+static const UI_Action g_single_path_actions[] =
+{
+    {210u, "当前选择:CISS"},
+    {211u, "当前选择:COSS"},
+    {212u, "当前选择:CRSS"},
+    {213u, "当前选择:RG"}
+};
+
+static const UI_Action g_sweep_path_actions[] =
+{
+    {310u, "扫压回路:CISS"},
+    {311u, "扫压回路:COSS"},
+    {312u, "扫压回路:CRSS"},
+    {313u, "扫压回路:全部"}
+};
+
+static const UI_Action g_single_measure_action =
+    {220u, "状态:单点测量指令发送完成"};
+static const UI_Action g_measure_all_action =
+    {230u, "状态:一键测量指令发送完成"};
+static const UI_Action g_sweep_start_action =
+    {320u, "状态:扫压指令发送完成"};
+static const UI_Action g_sweep_stop_action =
+    {321u, "状态:停止扫压指令发送完成"};
+
+static void UI_ShowHome(void);
+static void UI_ShowInitialize(void);
+static void UI_ShowSingle(void);
+static void UI_ShowMeasureAll(void);
+static void UI_ShowSweep(void);
+static void UI_UpdateSinglePathStyle(void);
+static void UI_UpdateSweepPathStyle(void);
+static void UI_UpdateSingleBiasLabel(void);
+static void UI_UpdateMeasureAllBiasLabel(void);
+static void UI_UpdateSweepBiasLabel(void);
+static void UI_UpdateCommonStatus(void);
+static void UI_CreateBiasKeypad(void);
+static void UI_ActivatePage(UI_Page page);
+static void UI_RebuildSweepChart(void);
+static void UI_SetSweepProgress(uint32_t progress_permille);
+static void UI_SetSweepDrawerOpen(bool open);
+static void UI_SweepDrawerEvent(lv_event_t *event);
+static void UI_DrawSweepLogGrid(lv_obj_t *chart,
+                                lv_draw_ctx_t *draw_context);
+static void UI_SweepChartDrawEvent(lv_event_t *event);
+static void UI_SweepChartProbeDrawEvent(lv_event_t *event);
+static void UI_SweepChartTouchEvent(lv_event_t *event);
+static void UI_ResetSweepProbe(void);
+static void UI_ApplySweepViewport(void);
+static void UI_ResetSweepViewport(void);
+static void UI_ResetSweepInterpolation(uint32_t path);
+static void UI_BuildSweepInterpolation(uint32_t path);
+static void UI_SetSweepEngineeringPage(bool show, bool animated);
+static void UI_UpdateSweepEngineeringButton(bool animate_appearance);
+static void UI_RequestSweepChartRefresh(void);
+static void UI_SweepChartRefreshTimer(lv_timer_t *timer);
+static void UI_UpdateEngineeringPage(void);
+static void UI_UpdateEngineeringVoltageRange(void);
+static void UI_UpdateEngineeringQRCode(void);
+static void UI_UpdateEngineeringQualityLabel(void);
+static bool UI_IsSweepEngineeringReady(void);
+static void UI_BackEvent(lv_event_t *event);
+
+static void UI_RecordAction(uint32_t action_code)
+{
+    ++g_ui_click_count;
+    g_ui_last_button = action_code;
+}
+
+static void UI_UpdateSinglePathStyle(void)
+{
+    static const uint32_t accent_colors[] =
+        {UI_COLOR_BLUE, UI_COLOR_GREEN, UI_COLOR_ORANGE, UI_COLOR_PURPLE};
+    uint32_t index;
+
+    for (index = 0u; index < 4u; ++index)
+    {
+        lv_obj_t *button = g_single_path_buttons[index];
+
+        if (button == NULL)
+        {
+            continue;
+        }
+
+        if (index == g_ui_single_path)
+        {
+            lv_obj_set_style_bg_color(button,
+                                      lv_color_hex(accent_colors[index]),
+                                      LV_PART_MAIN | LV_STATE_DEFAULT);
+            lv_obj_set_style_border_color(button,
+                                          lv_color_hex(accent_colors[index]),
+                                          LV_PART_MAIN);
+            lv_obj_set_style_border_width(button, 2, LV_PART_MAIN);
+        }
+        else
+        {
+            lv_obj_set_style_bg_color(button,
+                                      lv_color_hex(UI_COLOR_SURFACE),
+                                      LV_PART_MAIN | LV_STATE_DEFAULT);
+            lv_obj_set_style_border_color(button,
+                                          lv_color_hex(UI_COLOR_BORDER),
+                                          LV_PART_MAIN);
+            lv_obj_set_style_border_width(button, 1, LV_PART_MAIN);
+        }
+    }
+}
+
+static void UI_UpdateSweepPathStyle(void)
+{
+    static const uint32_t accent_colors[] =
+        {UI_COLOR_BLUE, UI_COLOR_GREEN, UI_COLOR_ORANGE, UI_COLOR_PURPLE};
+    uint32_t index;
+
+    for (index = 0u; index < 4u; ++index)
+    {
+        lv_obj_t *button = g_sweep_path_buttons[index];
+
+        if (button == NULL)
+        {
+            continue;
+        }
+
+        if (index == g_ui_sweep_path)
+        {
+            lv_obj_set_style_bg_color(button,
+                                      lv_color_hex(accent_colors[index]),
+                                      LV_PART_MAIN | LV_STATE_DEFAULT);
+            lv_obj_set_style_border_color(button,
+                                          lv_color_hex(accent_colors[index]),
+                                          LV_PART_MAIN);
+            lv_obj_set_style_border_width(button, 2, LV_PART_MAIN);
+        }
+        else
+        {
+            lv_obj_set_style_bg_color(button,
+                                      lv_color_hex(UI_COLOR_SURFACE),
+                                      LV_PART_MAIN | LV_STATE_DEFAULT);
+            lv_obj_set_style_border_color(button,
+                                          lv_color_hex(UI_COLOR_BORDER),
+                                          LV_PART_MAIN);
+            lv_obj_set_style_border_width(button, 1, LV_PART_MAIN);
+        }
+    }
+}
+
+static void UI_UpdateSingleBiasLabel(void)
+{
+    if (g_single_bias_value_label != NULL)
+    {
+        lv_label_set_text_fmt(
+            g_single_bias_value_label,
+            "偏压设置:%lu.%lu V",
+            (unsigned long)(g_ui_single_bias_tenths / 10u),
+            (unsigned long)(g_ui_single_bias_tenths % 10u));
+    }
+}
+
+static void UI_UpdateMeasureAllBiasLabel(void)
+{
+    if (g_measure_all_bias_value_label != NULL)
+    {
+        lv_label_set_text_fmt(
+            g_measure_all_bias_value_label,
+            "统一偏压:%lu.%lu V",
+            (unsigned long)(g_ui_measure_all_bias_tenths / 10u),
+            (unsigned long)(g_ui_measure_all_bias_tenths % 10u));
+    }
+}
+
+static void UI_UpdateSweepBiasLabel(void)
+{
+    if (g_sweep_bias_value_label != NULL)
+    {
+        lv_label_set_text_fmt(
+            g_sweep_bias_value_label,
+            "终止电压:%lu.%lu V",
+            (unsigned long)(g_ui_sweep_end_tenths / 10u),
+            (unsigned long)(g_ui_sweep_end_tenths % 10u));
+    }
+}
+
+static void UI_UpdateCommonStatus(void)
+{
+    if (g_header_bias_label != NULL)
+    {
+        lv_label_set_text_fmt(g_header_bias_label,
+                              "偏压:%s",
+                              g_ui_actual_bias);
+    }
+
+    if (g_header_path_label != NULL)
+    {
+        lv_label_set_text_fmt(g_header_path_label,
+                              "回路:%s",
+                              g_ui_actual_path);
+    }
+}
+
+static lv_obj_t *UI_CreatePanel(lv_obj_t *parent,
+                                lv_coord_t x,
+                                lv_coord_t y,
+                                lv_coord_t width,
+                                lv_coord_t height,
+                                uint32_t color,
+                                lv_coord_t radius)
+{
+    lv_obj_t *panel = lv_obj_create(parent);
+
+    lv_obj_set_pos(panel, x, y);
+    lv_obj_set_size(panel, width, height);
+    lv_obj_clear_flag(panel, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_color(panel, lv_color_hex(color), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(panel, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_border_color(panel,
+                                  lv_color_hex(UI_COLOR_BORDER),
+                                  LV_PART_MAIN);
+    lv_obj_set_style_border_width(panel, 1, LV_PART_MAIN);
+    lv_obj_set_style_radius(panel, radius, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(panel, 0, LV_PART_MAIN);
+
+    return panel;
+}
+
+static lv_obj_t *UI_CreateText(lv_obj_t *parent,
+                               const char *text,
+                               const lv_font_t *font,
+                               uint32_t color,
+                               lv_coord_t x,
+                               lv_coord_t y,
+                               lv_coord_t width,
+                               lv_coord_t height,
+                               lv_text_align_t align)
+{
+    lv_obj_t *label = lv_label_create(parent);
+
+    lv_label_set_text(label, text);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
+    lv_obj_set_pos(label, x, y);
+    lv_obj_set_size(label, width, height);
+    lv_obj_set_style_text_font(label, font, LV_PART_MAIN);
+    lv_obj_set_style_text_color(label, lv_color_hex(color), LV_PART_MAIN);
+    lv_obj_set_style_text_align(label, align, LV_PART_MAIN);
+
+    return label;
+}
+
+static lv_obj_t *UI_CreateButton(lv_obj_t *parent,
+                                 const char *text,
+                                 uint32_t color,
+                                 lv_coord_t x,
+                                 lv_coord_t y,
+                                 lv_coord_t width,
+                                 lv_coord_t height,
+                                 lv_event_cb_t event_callback,
+                                 void *user_data)
+{
+    lv_obj_t *button = lv_btn_create(parent);
+    lv_obj_t *label;
+
+    lv_obj_set_pos(button, x, y);
+    lv_obj_set_size(button, width, height);
+    lv_obj_clear_flag(button, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_color(button,
+                              lv_color_hex(color),
+                              LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_bg_color(button,
+                              lv_color_hex(UI_COLOR_PRESSED),
+                              LV_PART_MAIN | LV_STATE_PRESSED);
+    lv_obj_set_style_bg_opa(button, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_border_color(button,
+                                  lv_color_hex(UI_COLOR_BORDER),
+                                  LV_PART_MAIN);
+    lv_obj_set_style_border_width(button, 1, LV_PART_MAIN);
+    lv_obj_set_style_radius(button, 14, LV_PART_MAIN);
+    lv_obj_set_style_shadow_width(button, 0, LV_PART_MAIN);
+    lv_obj_set_style_shadow_opa(button, LV_OPA_TRANSP, LV_PART_MAIN);
+
+    if (event_callback != NULL)
+    {
+        lv_obj_add_event_cb(button,
+                            event_callback,
+                            LV_EVENT_CLICKED,
+                            user_data);
+    }
+
+    label = lv_label_create(button);
+    lv_label_set_text(label, text);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(label, width - 20);
+    lv_obj_set_style_text_font(label, &ui_font_cn_20, LV_PART_MAIN);
+    lv_obj_set_style_text_color(label,
+                                lv_color_hex(UI_COLOR_TEXT),
+                                LV_PART_MAIN);
+    lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+    lv_obj_align(label, LV_ALIGN_CENTER, 0, 0);
+
+    return button;
+}
+
+static void UI_FormatSweepLogTick(int32_t log_milli,
+                                  bool voltage_axis,
+                                  char *text,
+                                  uint32_t text_length)
+{
+    float value;
+    float display_value;
+    uint32_t scale;
+    uint32_t scaled_value;
+    uint32_t integer_value;
+    uint32_t fraction_value;
+    const char *suffix = "";
+
+    if ((text == NULL) || (text_length == 0u))
+    {
+        return;
+    }
+
+    value = powf(10.0f, (float)log_milli / 1000.0f);
+    if (!isfinite(value) || (value <= 0.0f))
+    {
+        (void)lv_snprintf(text, text_length, "--");
+        return;
+    }
+
+    display_value = value;
+    if (!voltage_axis && (display_value >= 1000000.0f))
+    {
+        display_value /= 1000000.0f;
+        suffix = "M";
+    }
+    else if (!voltage_axis && (display_value >= 1000.0f))
+    {
+        display_value /= 1000.0f;
+        suffix = "k";
+    }
+
+    if (display_value < 1.0f)
+    {
+        scale = 100u;
+    }
+    else if (display_value < 10.0f)
+    {
+        scale = 10u;
+    }
+    else
+    {
+        scale = 1u;
+    }
+    if (display_value > ((float)UINT32_MAX / (float)scale))
+    {
+        (void)lv_snprintf(text, text_length, "--");
+        return;
+    }
+
+    scaled_value = (uint32_t)(display_value * (float)scale + 0.5f);
+    integer_value = scaled_value / scale;
+    fraction_value = scaled_value % scale;
+    if (scale == 100u)
+    {
+        (void)lv_snprintf(text, text_length, "%lu.%02lu%s",
+                          (unsigned long)integer_value,
+                          (unsigned long)fraction_value, suffix);
+    }
+    else if (scale == 10u)
+    {
+        (void)lv_snprintf(text, text_length, "%lu.%01lu%s",
+                          (unsigned long)integer_value,
+                          (unsigned long)fraction_value, suffix);
+    }
+    else
+    {
+        (void)lv_snprintf(text, text_length, "%lu%s",
+                          (unsigned long)integer_value, suffix);
+    }
+}
+
+static void UI_DrawSweepLogGrid(lv_obj_t *chart,
+                                lv_draw_ctx_t *draw_context)
+{
+    static const int32_t minor_log_offset[UI_SWEEP_LOG_MINOR_COUNT] =
+        {301, 477, 602, 699, 778, 845, 903, 954};
+    lv_draw_line_dsc_t major_horizontal;
+    lv_draw_line_dsc_t minor_horizontal;
+    lv_draw_line_dsc_t major_vertical;
+    lv_draw_line_dsc_t minor_vertical;
+    lv_coord_t border_width;
+    lv_coord_t left;
+    lv_coord_t top;
+    lv_coord_t plot_width;
+    lv_coord_t plot_height;
+    lv_point_t start;
+    lv_point_t end;
+    int32_t exponent;
+    int32_t x_range;
+    int32_t y_range;
+    uint32_t minor_index;
+
+    if ((chart == NULL) || (draw_context == NULL))
+    {
+        return;
+    }
+
+    border_width = lv_obj_get_style_border_width(chart, LV_PART_MAIN);
+    left = chart->coords.x1 +
+           lv_obj_get_style_pad_left(chart, LV_PART_MAIN) +
+           border_width;
+    top = chart->coords.y1 +
+          lv_obj_get_style_pad_top(chart, LV_PART_MAIN) +
+          border_width;
+    plot_width = lv_obj_get_content_width(chart) - 1;
+    plot_height = lv_obj_get_content_height(chart) - 1;
+    if ((plot_width <= 0) || (plot_height <= 0))
+    {
+        return;
+    }
+    x_range = g_sweep_x_max_log_milli - g_sweep_x_min_log_milli;
+    y_range = g_sweep_y_max_log_milli - g_sweep_y_min_log_milli;
+    if ((x_range <= 0) || (y_range <= 0))
+    {
+        return;
+    }
+
+    lv_draw_line_dsc_init(&major_horizontal);
+    major_horizontal.color = lv_color_hex(0xffffffu);
+    major_horizontal.width = 1;
+    major_horizontal.opa = (lv_opa_t)190u;
+
+    lv_draw_line_dsc_init(&minor_horizontal);
+    minor_horizontal.color = lv_color_hex(0xffffffu);
+    minor_horizontal.width = 1;
+    minor_horizontal.opa = (lv_opa_t)85u;
+    minor_horizontal.dash_width = 1;
+    minor_horizontal.dash_gap = 3;
+
+    lv_draw_line_dsc_init(&major_vertical);
+    major_vertical.color = lv_color_hex(0xffffffu);
+    major_vertical.width = 1;
+    major_vertical.opa = (lv_opa_t)125u;
+
+    lv_draw_line_dsc_init(&minor_vertical);
+    minor_vertical.color = lv_color_hex(0xffffffu);
+    minor_vertical.width = 1;
+    minor_vertical.opa = (lv_opa_t)55u;
+    minor_vertical.dash_width = 1;
+    minor_vertical.dash_gap = 3;
+
+    start.y = top;
+    end.y = top + plot_height;
+    for (exponent = UI_SWEEP_X_MIN_LOG_MILLI / 1000;
+         exponent <= UI_SWEEP_X_MAX_LOG_MILLI / 1000;
+         ++exponent)
+    {
+        int32_t log_milli = exponent * 1000;
+        lv_coord_t x;
+
+        if ((log_milli < g_sweep_x_min_log_milli) ||
+            (log_milli > g_sweep_x_max_log_milli))
+        {
+            continue;
+        }
+        x = left + (lv_coord_t)(((int32_t)plot_width *
+                  (log_milli - g_sweep_x_min_log_milli)) / x_range);
+
+        start.x = x;
+        end.x = x;
+        lv_draw_line(draw_context, &major_vertical, &start, &end);
+    }
+
+    for (exponent = UI_SWEEP_X_MIN_LOG_MILLI / 1000;
+         exponent < UI_SWEEP_X_MAX_LOG_MILLI / 1000;
+         ++exponent)
+    {
+        for (minor_index = 0u;
+             minor_index < UI_SWEEP_LOG_MINOR_COUNT;
+             ++minor_index)
+        {
+            int32_t log_milli =
+                exponent * 1000 + minor_log_offset[minor_index];
+            lv_coord_t x;
+
+            if ((log_milli < g_sweep_x_min_log_milli) ||
+                (log_milli > g_sweep_x_max_log_milli))
+            {
+                continue;
+            }
+            x = left + (lv_coord_t)(((int32_t)plot_width *
+                      (log_milli - g_sweep_x_min_log_milli)) / x_range);
+
+            start.x = x;
+            end.x = x;
+            lv_draw_line(draw_context, &minor_vertical, &start, &end);
+        }
+    }
+
+    start.x = left;
+    end.x = left + plot_width;
+    for (exponent = g_sweep_full_y_min_log_milli / 1000;
+         exponent <= g_sweep_full_y_max_log_milli / 1000;
+         ++exponent)
+    {
+        int32_t log_milli = exponent * 1000;
+        lv_coord_t y;
+
+        if ((log_milli < g_sweep_y_min_log_milli) ||
+            (log_milli > g_sweep_y_max_log_milli))
+        {
+            continue;
+        }
+        y = top + (lv_coord_t)(((int32_t)plot_height *
+                 (g_sweep_y_max_log_milli - log_milli)) / y_range);
+
+        start.y = y;
+        end.y = y;
+        lv_draw_line(draw_context, &major_horizontal, &start, &end);
+    }
+
+    for (exponent = g_sweep_full_y_min_log_milli / 1000;
+         exponent < g_sweep_full_y_max_log_milli / 1000;
+         ++exponent)
+    {
+        for (minor_index = 0u;
+             minor_index < UI_SWEEP_LOG_MINOR_COUNT;
+             ++minor_index)
+        {
+            int32_t log_milli =
+                exponent * 1000 + minor_log_offset[minor_index];
+            lv_coord_t y;
+
+            if ((log_milli < g_sweep_y_min_log_milli) ||
+                (log_milli > g_sweep_y_max_log_milli))
+            {
+                continue;
+            }
+            y = top + (lv_coord_t)(((int32_t)plot_height *
+                     (g_sweep_y_max_log_milli - log_milli)) / y_range);
+
+            start.y = y;
+            end.y = y;
+            lv_draw_line(draw_context, &minor_horizontal, &start, &end);
+        }
+    }
+}
+
+static void UI_SweepChartDrawEvent(lv_event_t *event)
+{
+    lv_obj_draw_part_dsc_t *draw;
+    lv_obj_t *chart;
+
+    if ((event == NULL) ||
+        (lv_event_get_code(event) != LV_EVENT_DRAW_PART_BEGIN))
+    {
+        return;
+    }
+
+    draw = lv_event_get_draw_part_dsc(event);
+    if ((draw == NULL) || (draw->class_p != &lv_chart_class))
+    {
+        return;
+    }
+
+    chart = lv_event_get_target(event);
+    if (draw->type == LV_CHART_DRAW_PART_DIV_LINE_INIT)
+    {
+        UI_DrawSweepLogGrid(chart, draw->draw_ctx);
+        return;
+    }
+
+    if ((draw->type == LV_CHART_DRAW_PART_TICK_LABEL) &&
+        (draw->text != NULL) && (draw->text_length != 0u))
+    {
+        UI_FormatSweepLogTick(
+            draw->value,
+            draw->id == LV_CHART_AXIS_PRIMARY_X,
+            draw->text,
+            draw->text_length);
+        if (draw->label_dsc != NULL)
+        {
+            draw->label_dsc->font = &lv_font_montserrat_16;
+            draw->label_dsc->color = lv_color_hex(0xffffffu);
+        }
+        if (draw->line_dsc != NULL)
+        {
+            draw->line_dsc->color = lv_color_hex(0xffffffu);
+            draw->line_dsc->opa = LV_OPA_COVER;
+        }
+    }
+}
+
+static bool UI_GetSweepPlotArea(lv_obj_t *chart, lv_area_t *area)
+{
+    lv_coord_t border_width;
+    lv_coord_t width;
+    lv_coord_t height;
+
+    if ((chart == NULL) || (area == NULL))
+    {
+        return false;
+    }
+
+    border_width = lv_obj_get_style_border_width(chart, LV_PART_MAIN);
+    width = lv_obj_get_content_width(chart);
+    height = lv_obj_get_content_height(chart);
+    if ((width <= 1) || (height <= 1))
+    {
+        return false;
+    }
+
+    area->x1 = chart->coords.x1 +
+               lv_obj_get_style_pad_left(chart, LV_PART_MAIN) +
+               border_width;
+    area->y1 = chart->coords.y1 +
+               lv_obj_get_style_pad_top(chart, LV_PART_MAIN) +
+               border_width;
+    area->x2 = area->x1 + width - 1;
+    area->y2 = area->y1 + height - 1;
+    return true;
+}
+
+static void UI_ResetSweepInterpolation(uint32_t path)
+{
+    if (path >= 3u)
+    {
+        return;
+    }
+
+    SweepInterpolation_Reset(&g_sweep_cs_curve[path]);
+    SweepInterpolation_Reset(&g_sweep_cp_curve[path]);
+    SweepInterpolation_Reset(&g_sweep_d_curve[path]);
+    g_sweep_interpolation_ready[path] = 0u;
+}
+
+static void UI_BuildSweepInterpolation(uint32_t path)
+{
+    uint32_t point_count;
+
+    if (path >= 3u)
+    {
+        return;
+    }
+    point_count = g_sweep_total_points[path];
+    if (point_count > UI_SWEEP_MAX_POINTS)
+    {
+        point_count = UI_SWEEP_MAX_POINTS;
+    }
+
+    /*
+     * 原始数据完全保留；连续曲线只从有效点构建。
+     * Cs/Cp在log(V)-log(C)空间插值，D在log(V)-D空间插值。
+     */
+    (void)SweepInterpolation_Build(&g_sweep_cs_curve[path],
+                                   g_sweep_voltage[path],
+                                   g_sweep_capacitance[path],
+                                   g_sweep_valid[path],
+                                   point_count, true);
+    (void)SweepInterpolation_Build(&g_sweep_cp_curve[path],
+                                   g_sweep_voltage[path],
+                                   g_sweep_parallel_capacitance[path],
+                                   g_sweep_model_valid[path],
+                                   point_count, true);
+    (void)SweepInterpolation_Build(&g_sweep_d_curve[path],
+                                   g_sweep_voltage[path],
+                                   g_sweep_dissipation[path],
+                                   g_sweep_model_valid[path],
+                                   point_count, false);
+    g_sweep_interpolation_ready[path] =
+        (g_sweep_cs_curve[path].count >= 2u) ? 1u : 0u;
+}
+
+static bool UI_SweepValueToPixel(lv_obj_t *chart,
+                                 float voltage,
+                                 float capacitance,
+                                 lv_point_t *point)
+{
+    lv_area_t plot_area;
+    int32_t x_log_milli;
+    int32_t y_log_milli;
+    int32_t x_range;
+    int32_t y_range;
+    lv_coord_t plot_width;
+    lv_coord_t plot_height;
+
+    if ((chart == NULL) || (point == NULL) ||
+        !UI_GetSweepPlotArea(chart, &plot_area))
+    {
+        return false;
+    }
+
+    if (!isfinite(voltage) || !isfinite(capacitance) ||
+        (voltage <= 0.0f) || (capacitance <= 0.0f))
+    {
+        return false;
+    }
+    if (voltage < 0.1f)
+    {
+        voltage = 0.1f;
+    }
+
+    x_log_milli = (int32_t)(log10f(voltage) * 1000.0f);
+    y_log_milli = (int32_t)(log10f(capacitance) * 1000.0f);
+    if ((x_log_milli < g_sweep_x_min_log_milli) ||
+        (x_log_milli > g_sweep_x_max_log_milli) ||
+        (y_log_milli < g_sweep_y_min_log_milli) ||
+        (y_log_milli > g_sweep_y_max_log_milli))
+    {
+        return false;
+    }
+
+    x_range = g_sweep_x_max_log_milli - g_sweep_x_min_log_milli;
+    y_range = g_sweep_y_max_log_milli - g_sweep_y_min_log_milli;
+    if ((x_range <= 0) || (y_range <= 0))
+    {
+        return false;
+    }
+
+    plot_width = lv_area_get_width(&plot_area) - 1;
+    plot_height = lv_area_get_height(&plot_area) - 1;
+    point->x = plot_area.x1 +
+               (lv_coord_t)(((int32_t)plot_width *
+                             (x_log_milli - g_sweep_x_min_log_milli)) /
+                            x_range);
+    point->y = plot_area.y1 +
+               (lv_coord_t)(((int32_t)plot_height *
+                             (g_sweep_y_max_log_milli - y_log_milli)) /
+                            y_range);
+    return true;
+}
+
+static bool UI_SweepPointToPixel(lv_obj_t *chart,
+                                 uint32_t path,
+                                 uint32_t index,
+                                 lv_point_t *point)
+{
+    if ((path >= 3u) || (index >= UI_SWEEP_MAX_POINTS) ||
+        (g_sweep_valid[path][index] == 0u))
+    {
+        return false;
+    }
+
+    return UI_SweepValueToPixel(chart,
+                                g_sweep_voltage[path][index],
+                                g_sweep_capacitance[path][index],
+                                point);
+}
+
+static void UI_FormatSweepFixed(float value,
+                                uint32_t decimal_count,
+                                char *text,
+                                uint32_t text_length)
+{
+    float absolute_value;
+    uint32_t scale;
+    uint32_t scaled_value;
+    uint32_t integer_value;
+    uint32_t fraction_value;
+    const char *sign;
+
+    if ((text == NULL) || (text_length == 0u))
+    {
+        return;
+    }
+    if (!isfinite(value))
+    {
+        (void)lv_snprintf(text, text_length, "--");
+        return;
+    }
+
+    sign = (value < 0.0f) ? "-" : "";
+    absolute_value = (value < 0.0f) ? -value : value;
+    scale = (decimal_count == 6u) ? 1000000u : 1000u;
+    if (absolute_value > ((float)UINT32_MAX / (float)scale))
+    {
+        (void)lv_snprintf(text, text_length, "--");
+        return;
+    }
+
+    scaled_value = (uint32_t)(absolute_value * (float)scale + 0.5f);
+    integer_value = scaled_value / scale;
+    fraction_value = scaled_value % scale;
+    if (decimal_count == 6u)
+    {
+        (void)lv_snprintf(text, text_length, "%s%lu.%06lu",
+                          sign,
+                          (unsigned long)integer_value,
+                          (unsigned long)fraction_value);
+    }
+    else
+    {
+        (void)lv_snprintf(text, text_length, "%s%lu.%03lu",
+                          sign,
+                          (unsigned long)integer_value,
+                          (unsigned long)fraction_value);
+    }
+}
+
+static void UI_FormatEngineeringFixed(float value,
+                                      uint32_t decimal_count,
+                                      char *text,
+                                      uint32_t text_length)
+{
+    uint32_t scale;
+    uint32_t scaled_value;
+    uint32_t integer_value;
+    uint32_t fraction_value;
+
+    if ((text == NULL) || (text_length == 0u))
+    {
+        return;
+    }
+    if (!isfinite(value) || (value < 0.0f))
+    {
+        (void)lv_snprintf(text, text_length, "--");
+        return;
+    }
+
+    switch (decimal_count)
+    {
+        case 1u:
+            scale = 10u;
+            break;
+        case 2u:
+            scale = 100u;
+            break;
+        default:
+            decimal_count = 3u;
+            scale = 1000u;
+            break;
+    }
+    if (value > ((float)UINT32_MAX / (float)scale))
+    {
+        (void)lv_snprintf(text, text_length, "--");
+        return;
+    }
+
+    scaled_value = (uint32_t)(value * (float)scale + 0.5f);
+    integer_value = scaled_value / scale;
+    fraction_value = scaled_value % scale;
+    if (decimal_count == 1u)
+    {
+        (void)lv_snprintf(text, text_length, "%lu.%01lu",
+                          (unsigned long)integer_value,
+                          (unsigned long)fraction_value);
+    }
+    else if (decimal_count == 2u)
+    {
+        (void)lv_snprintf(text, text_length, "%lu.%02lu",
+                          (unsigned long)integer_value,
+                          (unsigned long)fraction_value);
+    }
+    else
+    {
+        (void)lv_snprintf(text, text_length, "%lu.%03lu",
+                          (unsigned long)integer_value,
+                          (unsigned long)fraction_value);
+    }
+}
+
+static bool UI_ParseNonnegativeDecimal(const char *text, float *value)
+{
+    float result = 0.0f;
+    float fraction_scale = 0.1f;
+    uint8_t decimal_seen = 0u;
+    uint8_t digit_seen = 0u;
+    uint32_t index;
+
+    if ((text == NULL) || (value == NULL))
+    {
+        return false;
+    }
+    for (index = 0u; text[index] != '\0'; ++index)
+    {
+        char character = text[index];
+
+        if ((character >= '0') && (character <= '9'))
+        {
+            float digit = (float)(character - '0');
+
+            digit_seen = 1u;
+            if (decimal_seen == 0u)
+            {
+                result = result * 10.0f + digit;
+            }
+            else
+            {
+                result += digit * fraction_scale;
+                fraction_scale *= 0.1f;
+            }
+            if (!isfinite(result))
+            {
+                return false;
+            }
+        }
+        else if ((character == '.') && (decimal_seen == 0u))
+        {
+            decimal_seen = 1u;
+        }
+        else
+        {
+            return false;
+        }
+    }
+    if (digit_seen == 0u)
+    {
+        return false;
+    }
+    *value = result;
+    return true;
+}
+
+static void UI_UpdateEngineeringSlider(void)
+{
+    lv_coord_t track_width;
+    lv_coord_t knob_width;
+    lv_coord_t travel;
+    lv_coord_t knob_x;
+    uint32_t span;
+
+    if ((g_engineering_slider_track == NULL) ||
+        (g_engineering_slider_knob == NULL))
+    {
+        return;
+    }
+
+    track_width = lv_obj_get_width(g_engineering_slider_track);
+    knob_width = lv_obj_get_width(g_engineering_slider_knob);
+    travel = track_width - knob_width;
+    span = (g_ui_analysis_voltage_max_tenths > UI_BIAS_MIN_TENTHS) ?
+           (g_ui_analysis_voltage_max_tenths - UI_BIAS_MIN_TENTHS) : 0u;
+    knob_x = 0;
+    if ((travel > 0) && (span != 0u))
+    {
+        knob_x = (lv_coord_t)(
+            ((uint64_t)travel *
+             (g_ui_analysis_voltage_tenths - UI_BIAS_MIN_TENTHS)) /
+            span);
+    }
+    lv_obj_set_x(g_engineering_slider_knob, knob_x);
+}
+
+static void UI_UpdateEngineeringVoltageRange(void)
+{
+    uint32_t path;
+    uint32_t maximum_tenths = UI_BIAS_MAX_TENTHS;
+    uint8_t found_curve = 0u;
+
+    for (path = 0u; path < 3u; ++path)
+    {
+        float minimum_log_voltage;
+        float maximum_log_voltage;
+        float maximum_voltage;
+        uint32_t path_maximum_tenths;
+
+        if (((g_sweep_visible_mask & (1u << path)) == 0u) ||
+            (g_sweep_interpolation_ready[path] == 0u) ||
+            !SweepInterpolation_GetLogVoltageRange(
+                &g_sweep_cs_curve[path],
+                &minimum_log_voltage, &maximum_log_voltage))
+        {
+            continue;
+        }
+        (void)minimum_log_voltage;
+        maximum_voltage = powf(10.0f, maximum_log_voltage);
+        if (!isfinite(maximum_voltage) || (maximum_voltage <= 0.0f))
+        {
+            continue;
+        }
+        path_maximum_tenths = (uint32_t)floorf(maximum_voltage * 10.0f +
+                                                0.001f);
+        if (path_maximum_tenths > UI_BIAS_MAX_TENTHS)
+        {
+            path_maximum_tenths = UI_BIAS_MAX_TENTHS;
+        }
+        if ((found_curve == 0u) ||
+            (path_maximum_tenths < maximum_tenths))
+        {
+            maximum_tenths = path_maximum_tenths;
+            found_curve = 1u;
+        }
+    }
+
+    if ((found_curve == 0u) || (maximum_tenths < UI_BIAS_MIN_TENTHS))
+    {
+        maximum_tenths = UI_BIAS_MIN_TENTHS;
+    }
+    g_ui_analysis_voltage_max_tenths = maximum_tenths;
+    if ((g_engineering_analysis_initialized == 0u) &&
+        UI_IsSweepEngineeringReady())
+    {
+        g_ui_analysis_voltage_tenths = g_ui_sweep_end_tenths;
+        g_engineering_analysis_initialized = 1u;
+    }
+    if (g_ui_analysis_voltage_tenths > maximum_tenths)
+    {
+        g_ui_analysis_voltage_tenths = maximum_tenths;
+    }
+    if (g_ui_analysis_voltage_tenths < UI_BIAS_MIN_TENTHS)
+    {
+        g_ui_analysis_voltage_tenths = UI_BIAS_MIN_TENTHS;
+    }
+}
+
+static bool UI_IsSweepEngineeringReady(void)
+{
+    uint32_t path;
+
+    if (g_sweep_visible_mask == 0u)
+    {
+        return false;
+    }
+    for (path = 0u; path < 3u; ++path)
+    {
+        if (((g_sweep_visible_mask & (1u << path)) != 0u) &&
+            (g_sweep_total_points[path] == 0u))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+static void UI_UpdateEngineeringPage(void)
+{
+    static const char *const units[UI_ENGINEERING_PARAMETER_COUNT] =
+        {"pF", "pF", "pF", "ohm", "nC", "uJ"};
+    EngineeringParametersResult result;
+    uint8_t available_curves[3];
+    float values[UI_ENGINEERING_PARAMETER_COUNT];
+    uint8_t valid[UI_ENGINEERING_PARAMETER_COUNT];
+    uint32_t decimals[UI_ENGINEERING_PARAMETER_COUNT] =
+        {1u, 1u, 1u, 2u, 2u, 3u};
+    uint32_t index;
+
+    if (g_engineering_analysis_value_label != NULL)
+    {
+        lv_label_set_text_fmt(
+            g_engineering_analysis_value_label,
+            "%lu.%lu V",
+            (unsigned long)(g_ui_analysis_voltage_tenths / 10u),
+            (unsigned long)(g_ui_analysis_voltage_tenths % 10u));
+    }
+    UI_UpdateEngineeringSlider();
+
+    for (index = 0u; index < 3u; ++index)
+    {
+        available_curves[index] =
+            (((g_sweep_visible_mask & (1u << index)) != 0u) &&
+             (g_sweep_interpolation_ready[index] != 0u)) ? 1u : 0u;
+    }
+    EngineeringParameters_Compute(
+        g_sweep_cs_curve, available_curves,
+        (float)g_ui_analysis_voltage_tenths / 10.0f,
+        g_latest_rg_ohm, g_latest_rg_valid != 0u, &result);
+
+    values[0] = result.ciss_pf;
+    values[1] = result.coss_pf;
+    values[2] = result.crss_pf;
+    values[3] = result.rg_ohm;
+    values[4] = result.qoss_nc;
+    values[5] = result.eoss_uj;
+    valid[0] = result.ciss_valid;
+    valid[1] = result.coss_valid;
+    valid[2] = result.crss_valid;
+    valid[3] = result.rg_valid;
+    valid[4] = result.qoss_valid;
+    valid[5] = result.eoss_valid;
+
+    for (index = 0u; index < UI_ENGINEERING_PARAMETER_COUNT; ++index)
+    {
+        char value_text[28];
+
+        if (g_engineering_parameter_value_labels[index] == NULL)
+        {
+            continue;
+        }
+        if (valid[index] != 0u)
+        {
+            char number[20];
+
+            UI_FormatEngineeringFixed(values[index], decimals[index],
+                                      number, sizeof(number));
+            (void)lv_snprintf(value_text, sizeof(value_text), "%s %s",
+                              number, units[index]);
+        }
+        else
+        {
+            (void)lv_snprintf(value_text, sizeof(value_text), "--");
+        }
+        lv_label_set_text(g_engineering_parameter_value_labels[index],
+                          value_text);
+        lv_obj_set_style_text_color(
+            g_engineering_parameter_value_labels[index],
+            lv_color_hex((valid[index] != 0u) ?
+                         UI_COLOR_TEXT : UI_COLOR_TEXT_MUTED),
+            LV_PART_MAIN);
+    }
+}
+
+static void UI_UpdateSweepProbeLabel(void)
+{
+    static const char *const names[] = {"CISS", "COSS", "CRSS"};
+    char voltage[20];
+    char cs[20];
+    char cp[20];
+    char dissipation[20];
+    uint32_t path;
+
+    if ((g_sweep_progress_label == NULL) ||
+        (g_sweep_probe_valid == 0u))
+    {
+        return;
+    }
+
+    path = g_sweep_probe_path;
+    UI_FormatSweepFixed(g_sweep_probe_voltage, 3u,
+                        voltage, sizeof(voltage));
+    UI_FormatSweepFixed(g_sweep_probe_cs, 3u,
+                        cs, sizeof(cs));
+    if (g_sweep_probe_model_valid != 0u)
+    {
+        UI_FormatSweepFixed(g_sweep_probe_cp, 3u,
+                            cp, sizeof(cp));
+        UI_FormatSweepFixed(g_sweep_probe_d, 6u,
+                            dissipation, sizeof(dissipation));
+    }
+    else
+    {
+        (void)lv_snprintf(cp, sizeof(cp), "--");
+        (void)lv_snprintf(dissipation, sizeof(dissipation), "--");
+    }
+
+    lv_label_set_text_fmt(
+        g_sweep_progress_label,
+        "%s  VBIAS=%sV  Cs=%spF  Cp=%spF  D=%s%s",
+        names[path], voltage, cs, cp, dissipation,
+        (g_sweep_probe_interpolated != 0u) ? "  INTP" : "");
+}
+
+static void UI_ResetSweepProbe(void)
+{
+    uint8_t was_valid = g_sweep_probe_valid;
+
+    g_sweep_probe_path = 0u;
+    g_sweep_probe_index = 0u;
+    g_sweep_probe_voltage = 0.0f;
+    g_sweep_probe_cs = 0.0f;
+    g_sweep_probe_cp = 0.0f;
+    g_sweep_probe_d = 0.0f;
+    g_sweep_probe_model_valid = 0u;
+    g_sweep_probe_interpolated = 0u;
+    g_sweep_probe_valid = 0u;
+    g_sweep_probe_tracking = 0u;
+    if ((was_valid != 0u) && (g_sweep_chart != NULL))
+    {
+        lv_obj_invalidate(g_sweep_chart);
+    }
+}
+
+static void UI_ApplySweepViewport(void)
+{
+    int32_t x_span;
+    int32_t y_span;
+    uint32_t x_major_count;
+    uint32_t y_major_count;
+
+    if (g_sweep_chart == NULL)
+    {
+        return;
+    }
+
+    x_span = g_sweep_x_max_log_milli - g_sweep_x_min_log_milli;
+    y_span = g_sweep_y_max_log_milli - g_sweep_y_min_log_milli;
+    if ((x_span <= 0) || (y_span <= 0))
+    {
+        return;
+    }
+
+    x_major_count = (uint32_t)((x_span + 999) / 1000) + 1u;
+    y_major_count = (uint32_t)((y_span + 999) / 1000) + 1u;
+    if (x_major_count < 3u)
+    {
+        x_major_count = 3u;
+    }
+    else if (x_major_count > 6u)
+    {
+        x_major_count = 6u;
+    }
+    if (y_major_count < 3u)
+    {
+        y_major_count = 3u;
+    }
+    else if (y_major_count > 6u)
+    {
+        y_major_count = 6u;
+    }
+
+    lv_chart_set_range(g_sweep_chart, LV_CHART_AXIS_PRIMARY_X,
+                       (lv_coord_t)g_sweep_x_min_log_milli,
+                       (lv_coord_t)g_sweep_x_max_log_milli);
+    lv_chart_set_range(g_sweep_chart, LV_CHART_AXIS_PRIMARY_Y,
+                       (lv_coord_t)g_sweep_y_min_log_milli,
+                       (lv_coord_t)g_sweep_y_max_log_milli);
+    lv_chart_set_axis_tick(g_sweep_chart,
+                           LV_CHART_AXIS_PRIMARY_X,
+                           6, 3, (lv_coord_t)x_major_count,
+                           1, true, 38);
+    lv_chart_set_axis_tick(g_sweep_chart,
+                           LV_CHART_AXIS_PRIMARY_Y,
+                           6, 3, (lv_coord_t)y_major_count,
+                           1, true, 58);
+    lv_chart_set_div_line_count(g_sweep_chart, 0u, 0u);
+    lv_chart_refresh(g_sweep_chart);
+}
+
+static void UI_ResetSweepViewport(void)
+{
+    g_sweep_x_min_log_milli = UI_SWEEP_X_MIN_LOG_MILLI;
+    g_sweep_x_max_log_milli = UI_SWEEP_X_MAX_LOG_MILLI;
+    g_sweep_y_min_log_milli = g_sweep_full_y_min_log_milli;
+    g_sweep_y_max_log_milli = g_sweep_full_y_max_log_milli;
+    UI_ApplySweepViewport();
+}
+
+static bool UI_FindTouchPointById(const LCD_TouchState *touch_state,
+                                  uint8_t id,
+                                  lv_point_t *point)
+{
+    uint32_t index;
+
+    if ((touch_state == NULL) || (point == NULL))
+    {
+        return false;
+    }
+    for (index = 0u;
+         (index < touch_state->count) && (index < LCD_TOUCH_MAX_POINTS);
+         ++index)
+    {
+        if (touch_state->point[index].id == id)
+        {
+            point->x = (lv_coord_t)touch_state->point[index].x;
+            point->y = (lv_coord_t)touch_state->point[index].y;
+            return true;
+        }
+    }
+    return false;
+}
+
+static float UI_SweepTouchDistance(const lv_point_t *first,
+                                   const lv_point_t *second)
+{
+    float delta_x;
+    float delta_y;
+
+    if ((first == NULL) || (second == NULL))
+    {
+        return 0.0f;
+    }
+    delta_x = (float)second->x - (float)first->x;
+    delta_y = (float)second->y - (float)first->y;
+    return sqrtf(delta_x * delta_x + delta_y * delta_y);
+}
+
+static float UI_ClampSweepRatio(float ratio)
+{
+    if (ratio < 0.0f)
+    {
+        return 0.0f;
+    }
+    if (ratio > 1.0f)
+    {
+        return 1.0f;
+    }
+    return ratio;
+}
+
+static void UI_ClampSweepViewRange(float *minimum,
+                                   float *maximum,
+                                   float full_minimum,
+                                   float full_maximum,
+                                   float minimum_span)
+{
+    float full_span;
+    float span;
+
+    if ((minimum == NULL) || (maximum == NULL))
+    {
+        return;
+    }
+
+    full_span = full_maximum - full_minimum;
+    if (full_span <= 0.0f)
+    {
+        *minimum = full_minimum;
+        *maximum = full_maximum;
+        return;
+    }
+    if (minimum_span > full_span)
+    {
+        minimum_span = full_span;
+    }
+
+    span = *maximum - *minimum;
+    if (span < minimum_span)
+    {
+        float center = (*minimum + *maximum) * 0.5f;
+
+        span = minimum_span;
+        *minimum = center - span * 0.5f;
+        *maximum = center + span * 0.5f;
+    }
+    if (span >= full_span)
+    {
+        *minimum = full_minimum;
+        *maximum = full_maximum;
+        return;
+    }
+    if (*minimum < full_minimum)
+    {
+        *maximum += full_minimum - *minimum;
+        *minimum = full_minimum;
+    }
+    if (*maximum > full_maximum)
+    {
+        *minimum -= *maximum - full_maximum;
+        *maximum = full_maximum;
+    }
+}
+
+static bool UI_StartSweepGesture(const LCD_TouchState *touch_state)
+{
+    lv_area_t plot_area;
+    lv_point_t first;
+    lv_point_t second;
+    float center_x;
+    float center_y;
+    float x_ratio;
+    float y_ratio;
+    float x_span;
+    float y_span;
+
+    if ((touch_state == NULL) || (touch_state->count < 2u) ||
+        (g_sweep_chart == NULL) || (g_sweep_inspection_ready == 0u) ||
+        !UI_GetSweepPlotArea(g_sweep_chart, &plot_area))
+    {
+        return false;
+    }
+
+    first.x = (lv_coord_t)touch_state->point[0].x;
+    first.y = (lv_coord_t)touch_state->point[0].y;
+    second.x = (lv_coord_t)touch_state->point[1].x;
+    second.y = (lv_coord_t)touch_state->point[1].y;
+    g_sweep_gesture.start_distance =
+        UI_SweepTouchDistance(&first, &second);
+    if (g_sweep_gesture.start_distance < UI_SWEEP_PINCH_MIN_DISTANCE_PX)
+    {
+        return false;
+    }
+
+    center_x = ((float)first.x + (float)second.x) * 0.5f;
+    center_y = ((float)first.y + (float)second.y) * 0.5f;
+    x_ratio = UI_ClampSweepRatio(
+        (center_x - (float)plot_area.x1) /
+        (float)(lv_area_get_width(&plot_area) - 1));
+    y_ratio = UI_ClampSweepRatio(
+        (center_y - (float)plot_area.y1) /
+        (float)(lv_area_get_height(&plot_area) - 1));
+    x_span = (float)(g_sweep_x_max_log_milli -
+                     g_sweep_x_min_log_milli);
+    y_span = (float)(g_sweep_y_max_log_milli -
+                     g_sweep_y_min_log_milli);
+
+    g_sweep_gesture.first_id = touch_state->point[0].id;
+    g_sweep_gesture.second_id = touch_state->point[1].id;
+    g_sweep_gesture.start_x_min_log_milli = g_sweep_x_min_log_milli;
+    g_sweep_gesture.start_x_max_log_milli = g_sweep_x_max_log_milli;
+    g_sweep_gesture.start_y_min_log_milli = g_sweep_y_min_log_milli;
+    g_sweep_gesture.start_y_max_log_milli = g_sweep_y_max_log_milli;
+    g_sweep_gesture.anchor_x_log_milli =
+        (float)g_sweep_x_min_log_milli + x_ratio * x_span;
+    g_sweep_gesture.anchor_y_log_milli =
+        (float)g_sweep_y_max_log_milli - y_ratio * y_span;
+    g_sweep_gesture.last_update_tick = lv_tick_get();
+    g_sweep_gesture.active = 1u;
+    g_sweep_gesture.block_single_touch = 1u;
+    g_sweep_probe_tracking = 0u;
+    g_sweep_last_tap_valid = 0u;
+    return true;
+}
+
+static void UI_UpdateSweepGesture(const LCD_TouchState *touch_state)
+{
+    lv_area_t plot_area;
+    lv_point_t first;
+    lv_point_t second;
+    float current_distance;
+    float scale;
+    float center_x;
+    float center_y;
+    float x_ratio;
+    float y_ratio;
+    float new_x_span;
+    float new_y_span;
+    float new_x_min;
+    float new_x_max;
+    float new_y_min;
+    float new_y_max;
+    int32_t x_minimum;
+    int32_t x_maximum;
+    int32_t y_minimum;
+    int32_t y_maximum;
+    uint32_t now;
+
+    if ((touch_state == NULL) || (touch_state->count < 2u) ||
+        (g_sweep_gesture.active == 0u) ||
+        !UI_GetSweepPlotArea(g_sweep_chart, &plot_area))
+    {
+        return;
+    }
+    if (!UI_FindTouchPointById(touch_state, g_sweep_gesture.first_id,
+                               &first) ||
+        !UI_FindTouchPointById(touch_state, g_sweep_gesture.second_id,
+                               &second))
+    {
+        g_sweep_gesture.active = 0u;
+        (void)UI_StartSweepGesture(touch_state);
+        return;
+    }
+
+    now = lv_tick_get();
+    if (lv_tick_elaps(g_sweep_gesture.last_update_tick) <
+        UI_SWEEP_GESTURE_UPDATE_MS)
+    {
+        return;
+    }
+    g_sweep_gesture.last_update_tick = now;
+
+    current_distance = UI_SweepTouchDistance(&first, &second);
+    if (current_distance < UI_SWEEP_PINCH_MIN_DISTANCE_PX)
+    {
+        return;
+    }
+    scale = g_sweep_gesture.start_distance / current_distance;
+    center_x = ((float)first.x + (float)second.x) * 0.5f;
+    center_y = ((float)first.y + (float)second.y) * 0.5f;
+    x_ratio = UI_ClampSweepRatio(
+        (center_x - (float)plot_area.x1) /
+        (float)(lv_area_get_width(&plot_area) - 1));
+    y_ratio = UI_ClampSweepRatio(
+        (center_y - (float)plot_area.y1) /
+        (float)(lv_area_get_height(&plot_area) - 1));
+
+    new_x_span =
+        (float)(g_sweep_gesture.start_x_max_log_milli -
+                g_sweep_gesture.start_x_min_log_milli) * scale;
+    new_y_span =
+        (float)(g_sweep_gesture.start_y_max_log_milli -
+                g_sweep_gesture.start_y_min_log_milli) * scale;
+    new_x_min = g_sweep_gesture.anchor_x_log_milli -
+                x_ratio * new_x_span;
+    new_x_max = new_x_min + new_x_span;
+    new_y_max = g_sweep_gesture.anchor_y_log_milli +
+                y_ratio * new_y_span;
+    new_y_min = new_y_max - new_y_span;
+
+    UI_ClampSweepViewRange(&new_x_min, &new_x_max,
+                           (float)UI_SWEEP_X_MIN_LOG_MILLI,
+                           (float)UI_SWEEP_X_MAX_LOG_MILLI,
+                           (float)UI_SWEEP_MIN_X_SPAN_LOG_MILLI);
+    UI_ClampSweepViewRange(&new_y_min, &new_y_max,
+                           (float)g_sweep_full_y_min_log_milli,
+                           (float)g_sweep_full_y_max_log_milli,
+                           (float)UI_SWEEP_MIN_Y_SPAN_LOG_MILLI);
+
+    x_minimum = (int32_t)lroundf(new_x_min);
+    x_maximum = (int32_t)lroundf(new_x_max);
+    y_minimum = (int32_t)lroundf(new_y_min);
+    y_maximum = (int32_t)lroundf(new_y_max);
+    if ((abs(x_minimum - g_sweep_x_min_log_milli) < 2) &&
+        (abs(x_maximum - g_sweep_x_max_log_milli) < 2) &&
+        (abs(y_minimum - g_sweep_y_min_log_milli) < 2) &&
+        (abs(y_maximum - g_sweep_y_max_log_milli) < 2))
+    {
+        return;
+    }
+
+    g_sweep_x_min_log_milli = x_minimum;
+    g_sweep_x_max_log_milli = x_maximum;
+    g_sweep_y_min_log_milli = y_minimum;
+    g_sweep_y_max_log_milli = y_maximum;
+    UI_ApplySweepViewport();
+}
+
+static void UI_SweepSmallAnimationReady(lv_anim_t *animation)
+{
+    (void)animation;
+    g_sweep_subpage_animating = 0u;
+}
+
+static void UI_StartSweepSmallObjectAnimation(lv_obj_t *object,
+                                               lv_coord_t start_x,
+                                               lv_coord_t end_x,
+                                               bool notify_ready)
+{
+    lv_anim_t animation;
+
+    if (object == NULL)
+    {
+        return;
+    }
+    lv_anim_del(object, NULL);
+    lv_anim_init(&animation);
+    lv_anim_set_var(&animation, object);
+    lv_anim_set_exec_cb(&animation, (lv_anim_exec_xcb_t)lv_obj_set_x);
+    lv_anim_set_values(&animation, start_x, end_x);
+    lv_anim_set_time(&animation, UI_SWEEP_SMALL_ANIMATION_MS);
+    lv_anim_set_path_cb(&animation, lv_anim_path_ease_out);
+    if (notify_ready)
+    {
+        lv_anim_set_ready_cb(&animation, UI_SweepSmallAnimationReady);
+    }
+    lv_anim_start(&animation);
+}
+
+static void UI_StartSweepHeaderAnimation(void)
+{
+    const lv_coord_t title_x = 84;
+
+    if ((g_ui_current_page != UI_PAGE_SWEEP) ||
+        (g_header_title_label == NULL))
+    {
+        g_sweep_subpage_animating = 0u;
+        return;
+    }
+
+    g_sweep_subpage_animating = 1u;
+    UI_StartSweepSmallObjectAnimation(g_header_title_label,
+                                      title_x + 16,
+                                      title_x,
+                                      true);
+}
+
+static void UI_SetSweepEngineeringPage(bool show, bool animated)
+{
+    if ((g_sweep_curve_page == NULL) ||
+        (g_sweep_engineering_page == NULL))
+    {
+        return;
+    }
+    if (animated &&
+        ((g_sweep_engineering_page_active != 0u) == show))
+    {
+        return;
+    }
+
+    if (g_header_title_label != NULL)
+    {
+        lv_anim_del(g_header_title_label, NULL);
+    }
+    lv_obj_set_x(g_sweep_curve_page, 0);
+    lv_obj_set_x(g_sweep_engineering_page, 0);
+    g_sweep_engineering_page_active = show ? 1u : 0u;
+
+    if ((g_ui_current_page == UI_PAGE_SWEEP) &&
+        (g_header_title_label != NULL))
+    {
+        lv_label_set_text(g_header_title_label,
+                          show ? "参数页面" : "扫压测量");
+    }
+    if (show)
+    {
+        UI_UpdateEngineeringPage();
+        if ((g_ui_current_page == UI_PAGE_SWEEP) &&
+            (g_header_operation_label != NULL))
+        {
+            lv_label_set_text(g_header_operation_label,
+                              (g_engineering_ai_model_ready != 0u) ?
+                              "MODEL QR" : "DEMO QR");
+        }
+    }
+    else if ((g_ui_current_page == UI_PAGE_SWEEP) &&
+             (g_header_operation_label != NULL) &&
+             (g_sweep_inspection_ready != 0u))
+    {
+        lv_label_set_text(g_header_operation_label, "扫压完成");
+    }
+
+    if (show)
+    {
+        lv_obj_add_flag(g_sweep_curve_page, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(g_sweep_engineering_page, LV_OBJ_FLAG_HIDDEN);
+    }
+    else
+    {
+        lv_obj_add_flag(g_sweep_engineering_page, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(g_sweep_curve_page, LV_OBJ_FLAG_HIDDEN);
+    }
+    g_sweep_subpage_animating = 0u;
+    UI_UpdateSweepEngineeringButton(false);
+    if (!show && (g_sweep_chart_dirty != 0u))
+    {
+        UI_RebuildSweepChart();
+    }
+    if (animated)
+    {
+        UI_StartSweepHeaderAnimation();
+    }
+}
+
+static void UI_EngineeringBackSwipeEvent(lv_event_t *event)
+{
+    lv_event_code_t code;
+    lv_indev_t *input_device;
+    lv_point_t point;
+
+    if ((event == NULL) ||
+        (g_sweep_engineering_page_active == 0u) ||
+        (g_sweep_subpage_animating != 0u))
+    {
+        return;
+    }
+    code = lv_event_get_code(event);
+    input_device = lv_indev_get_act();
+    if (input_device == NULL)
+    {
+        return;
+    }
+    lv_indev_get_point(input_device, &point);
+
+    if (code == LV_EVENT_PRESSED)
+    {
+        g_sweep_back_swipe.active = 1u;
+        g_sweep_back_swipe.start_point = point;
+        g_sweep_back_swipe.start_tick = lv_tick_get();
+        return;
+    }
+    if (g_sweep_back_swipe.active == 0u)
+    {
+        return;
+    }
+    if ((code == LV_EVENT_RELEASED) || (code == LV_EVENT_PRESS_LOST))
+    {
+        int32_t delta_x = (int32_t)point.x -
+                          (int32_t)g_sweep_back_swipe.start_point.x;
+        int32_t delta_y = (int32_t)point.y -
+                          (int32_t)g_sweep_back_swipe.start_point.y;
+        uint32_t elapsed = lv_tick_elaps(g_sweep_back_swipe.start_tick);
+
+        g_sweep_back_swipe.active = 0u;
+        if ((code == LV_EVENT_RELEASED) &&
+            (delta_x >= UI_SWEEP_PAGE_SWIPE_TRIGGER) &&
+            (delta_x > (2 * abs(delta_y))) &&
+            (elapsed <= UI_SWEEP_PAGE_SWIPE_MAX_MS))
+        {
+            UI_SetSweepEngineeringPage(false, true);
+        }
+    }
+}
+
+static bool UI_SelectInterpolatedSweepProbe(
+    const lv_point_t *touch_point,
+    bool lock_current_path)
+{
+    lv_area_t plot_area;
+    float x_ratio;
+    float log_voltage;
+    float voltage;
+    uint32_t path_offset;
+    uint32_t start_path;
+    uint32_t best_path = 0u;
+    uint32_t best_distance = UINT32_MAX;
+    float best_cs = 0.0f;
+    float probe_cp = 0.0f;
+    float probe_d = 0.0f;
+    uint8_t probe_model_valid;
+    bool found = false;
+
+    if ((touch_point == NULL) || (g_sweep_chart == NULL) ||
+        !UI_GetSweepPlotArea(g_sweep_chart, &plot_area) ||
+        (touch_point->x < plot_area.x1) ||
+        (touch_point->x > plot_area.x2) ||
+        ((!lock_current_path) &&
+         ((touch_point->y < plot_area.y1) ||
+          (touch_point->y > plot_area.y2))))
+    {
+        return false;
+    }
+
+    x_ratio = UI_ClampSweepRatio(
+        ((float)touch_point->x - (float)plot_area.x1) /
+        (float)(lv_area_get_width(&plot_area) - 1));
+    log_voltage =
+        ((float)g_sweep_x_min_log_milli +
+         x_ratio * (float)(g_sweep_x_max_log_milli -
+                           g_sweep_x_min_log_milli)) /
+        1000.0f;
+    voltage = powf(10.0f, log_voltage);
+    if (!isfinite(voltage) || (voltage <= 0.0f))
+    {
+        return false;
+    }
+
+    start_path = (g_sweep_probe_valid != 0u) ?
+                 ((g_sweep_probe_path + 1u) % 3u) : 0u;
+    for (path_offset = 0u; path_offset < 3u; ++path_offset)
+    {
+        uint32_t path = lock_current_path ?
+                        g_sweep_probe_path :
+                        ((start_path + path_offset) % 3u);
+        float cs;
+        lv_point_t curve_point;
+        int32_t delta_x;
+        int32_t delta_y;
+        uint32_t distance;
+
+        if ((path >= 3u) ||
+            ((g_sweep_visible_mask & (1u << path)) == 0u) ||
+            (g_sweep_interpolation_ready[path] == 0u))
+        {
+            if (lock_current_path)
+            {
+                break;
+            }
+            continue;
+        }
+        if (!SweepInterpolation_Evaluate(&g_sweep_cs_curve[path],
+                                         voltage, &cs) ||
+            !UI_SweepValueToPixel(g_sweep_chart, voltage, cs,
+                                  &curve_point))
+        {
+            if (lock_current_path)
+            {
+                break;
+            }
+            continue;
+        }
+
+        delta_x = (int32_t)curve_point.x - (int32_t)touch_point->x;
+        if (lock_current_path)
+        {
+            distance = (uint32_t)((delta_x < 0) ? -delta_x : delta_x);
+        }
+        else
+        {
+            delta_y = (int32_t)curve_point.y - (int32_t)touch_point->y;
+            distance = (uint32_t)(delta_x * delta_x +
+                                  delta_y * delta_y);
+        }
+        if (distance < best_distance)
+        {
+            best_distance = distance;
+            best_path = path;
+            best_cs = cs;
+            found = true;
+        }
+        if (lock_current_path)
+        {
+            break;
+        }
+    }
+
+    if (!found ||
+        ((!lock_current_path) &&
+         (best_distance > (UI_SWEEP_PROBE_HIT_RADIUS *
+                           UI_SWEEP_PROBE_HIT_RADIUS))))
+    {
+        return false;
+    }
+
+    probe_model_valid =
+        (SweepInterpolation_Evaluate(&g_sweep_cp_curve[best_path],
+                                     voltage, &probe_cp) &&
+         SweepInterpolation_Evaluate(&g_sweep_d_curve[best_path],
+                                     voltage, &probe_d)) ? 1u : 0u;
+    if ((g_sweep_probe_valid == 0u) ||
+        (g_sweep_probe_interpolated == 0u) ||
+        (g_sweep_probe_path != best_path) ||
+        (fabsf(g_sweep_probe_voltage - voltage) > 0.0001f))
+    {
+        g_sweep_probe_path = best_path;
+        g_sweep_probe_index = 0u;
+        g_sweep_probe_voltage = voltage;
+        g_sweep_probe_cs = best_cs;
+        g_sweep_probe_cp = probe_cp;
+        g_sweep_probe_d = probe_d;
+        g_sweep_probe_model_valid = probe_model_valid;
+        g_sweep_probe_interpolated = 1u;
+        g_sweep_probe_valid = 1u;
+        UI_UpdateSweepProbeLabel();
+        lv_obj_invalidate(g_sweep_chart);
+    }
+    return true;
+}
+
+static bool UI_SelectSweepProbe(const lv_point_t *touch_point,
+                                bool lock_current_path)
+{
+    lv_area_t plot_area;
+    uint32_t path_offset;
+    uint32_t best_path = 0u;
+    uint32_t best_index = 0u;
+    uint32_t best_distance = UINT32_MAX;
+    uint32_t start_path;
+    bool found = false;
+
+    if (g_sweep_inspection_ready != 0u)
+    {
+        uint32_t path;
+        bool interpolation_available = false;
+
+        if (lock_current_path)
+        {
+            interpolation_available =
+                (g_sweep_probe_path < 3u) &&
+                (g_sweep_interpolation_ready[g_sweep_probe_path] != 0u);
+        }
+        else
+        {
+            for (path = 0u; path < 3u; ++path)
+            {
+                if (((g_sweep_visible_mask & (1u << path)) != 0u) &&
+                    (g_sweep_interpolation_ready[path] != 0u))
+                {
+                    interpolation_available = true;
+                    break;
+                }
+            }
+        }
+        if (interpolation_available)
+        {
+            return UI_SelectInterpolatedSweepProbe(touch_point,
+                                                    lock_current_path);
+        }
+    }
+
+    if ((touch_point == NULL) || (g_sweep_chart == NULL) ||
+        !UI_GetSweepPlotArea(g_sweep_chart, &plot_area) ||
+        (touch_point->x < plot_area.x1) ||
+        (touch_point->x > plot_area.x2) ||
+        ((!lock_current_path) &&
+         ((touch_point->y < plot_area.y1) ||
+          (touch_point->y > plot_area.y2))))
+    {
+        return false;
+    }
+
+    start_path = (g_sweep_probe_valid != 0u) ?
+                 ((g_sweep_probe_path + 1u) % 3u) : 0u;
+    for (path_offset = 0u; path_offset < 3u; ++path_offset)
+    {
+        uint32_t path = lock_current_path ?
+                        g_sweep_probe_path :
+                        ((start_path + path_offset) % 3u);
+        uint32_t index;
+
+        if ((path >= 3u) ||
+            ((g_sweep_visible_mask & (1u << path)) == 0u))
+        {
+            if (lock_current_path)
+            {
+                break;
+            }
+            continue;
+        }
+
+        for (index = 0u;
+             (index < g_sweep_total_points[path]) &&
+             (index < UI_SWEEP_MAX_POINTS);
+             ++index)
+        {
+            lv_point_t data_point;
+            int32_t delta_x;
+            int32_t delta_y;
+            uint32_t distance;
+
+            if (!UI_SweepPointToPixel(g_sweep_chart, path, index,
+                                      &data_point))
+            {
+                continue;
+            }
+
+            delta_x = (int32_t)data_point.x - (int32_t)touch_point->x;
+            if (lock_current_path)
+            {
+                distance = (uint32_t)((delta_x < 0) ? -delta_x : delta_x);
+            }
+            else
+            {
+                delta_y = (int32_t)data_point.y - (int32_t)touch_point->y;
+                distance = (uint32_t)(delta_x * delta_x +
+                                      delta_y * delta_y);
+            }
+            if (distance < best_distance)
+            {
+                best_distance = distance;
+                best_path = path;
+                best_index = index;
+                found = true;
+            }
+        }
+
+        if (lock_current_path)
+        {
+            break;
+        }
+    }
+
+    if (!found ||
+        ((!lock_current_path) &&
+         (best_distance > (UI_SWEEP_PROBE_HIT_RADIUS *
+                           UI_SWEEP_PROBE_HIT_RADIUS))))
+    {
+        return false;
+    }
+
+    if ((g_sweep_probe_valid == 0u) ||
+        (g_sweep_probe_path != best_path) ||
+        (g_sweep_probe_index != best_index))
+    {
+        g_sweep_probe_path = best_path;
+        g_sweep_probe_index = best_index;
+        g_sweep_probe_voltage = g_sweep_voltage[best_path][best_index];
+        g_sweep_probe_cs = g_sweep_capacitance[best_path][best_index];
+        g_sweep_probe_cp =
+            g_sweep_parallel_capacitance[best_path][best_index];
+        g_sweep_probe_d = g_sweep_dissipation[best_path][best_index];
+        g_sweep_probe_model_valid =
+            g_sweep_model_valid[best_path][best_index];
+        g_sweep_probe_interpolated = 0u;
+        g_sweep_probe_valid = 1u;
+        UI_UpdateSweepProbeLabel();
+        lv_obj_invalidate(g_sweep_chart);
+    }
+    return true;
+}
+
+static void UI_SweepChartTouchEvent(lv_event_t *event)
+{
+    lv_event_code_t code;
+    lv_indev_t *input_device;
+    lv_point_t touch_point;
+    LCD_TouchState touch_state = {0};
+
+    if (event == NULL)
+    {
+        return;
+    }
+
+    code = lv_event_get_code(event);
+    if ((code == LV_EVENT_RELEASED) || (code == LV_EVENT_PRESS_LOST))
+    {
+        uint8_t gesture_was_active =
+            g_sweep_gesture.block_single_touch;
+
+        g_sweep_probe_tracking = 0u;
+        g_sweep_gesture.active = 0u;
+        g_sweep_gesture.block_single_touch = 0u;
+        if ((code == LV_EVENT_RELEASED) &&
+            (gesture_was_active == 0u) &&
+            (g_sweep_single_touch_moved == 0u) &&
+            (g_sweep_inspection_ready != 0u))
+        {
+            uint32_t now = lv_tick_get();
+
+            if ((g_sweep_last_tap_valid != 0u) &&
+                (lv_tick_elaps(g_sweep_last_tap_tick) <=
+                 UI_SWEEP_DOUBLE_TAP_MS))
+            {
+                g_sweep_last_tap_valid = 0u;
+                UI_ResetSweepViewport();
+            }
+            else
+            {
+                g_sweep_last_tap_tick = now;
+                g_sweep_last_tap_valid = 1u;
+            }
+        }
+        g_sweep_single_touch_moved = 0u;
+        return;
+    }
+    if ((code != LV_EVENT_PRESSED) && (code != LV_EVENT_PRESSING))
+    {
+        return;
+    }
+
+    (void)LV_PortIndev_GetTouchState(&touch_state);
+    if ((touch_state.count >= 2u) &&
+        (g_sweep_inspection_ready != 0u))
+    {
+        g_sweep_single_touch_moved = 1u;
+        if (g_sweep_gesture.active == 0u)
+        {
+            (void)UI_StartSweepGesture(&touch_state);
+        }
+        else
+        {
+            UI_UpdateSweepGesture(&touch_state);
+        }
+        return;
+    }
+    if (g_sweep_gesture.active != 0u)
+    {
+        g_sweep_gesture.active = 0u;
+        g_sweep_gesture.block_single_touch = 1u;
+        g_sweep_probe_tracking = 0u;
+        return;
+    }
+    if (g_sweep_gesture.block_single_touch != 0u)
+    {
+        return;
+    }
+
+    input_device = lv_indev_get_act();
+    if (input_device == NULL)
+    {
+        return;
+    }
+    lv_indev_get_point(input_device, &touch_point);
+
+    if (code == LV_EVENT_PRESSED)
+    {
+        g_sweep_touch_press_point = touch_point;
+        g_sweep_single_touch_moved = 0u;
+        g_sweep_probe_tracking =
+            UI_SelectSweepProbe(&touch_point, false) ? 1u : 0u;
+    }
+    else
+    {
+        if ((abs((int)touch_point.x -
+                 (int)g_sweep_touch_press_point.x) >
+             UI_SWEEP_TAP_MOVE_LIMIT_PX) ||
+            (abs((int)touch_point.y -
+                 (int)g_sweep_touch_press_point.y) >
+             UI_SWEEP_TAP_MOVE_LIMIT_PX))
+        {
+            g_sweep_single_touch_moved = 1u;
+        }
+        if (g_sweep_probe_tracking != 0u)
+        {
+            (void)UI_SelectSweepProbe(&touch_point, true);
+        }
+    }
+}
+
+static void UI_SweepChartProbeDrawEvent(lv_event_t *event)
+{
+    lv_obj_t *chart;
+    lv_draw_ctx_t *draw_context;
+    lv_area_t plot_area;
+    lv_point_t point;
+    lv_point_t line_start;
+    lv_point_t line_end;
+    lv_area_t marker_area;
+    lv_draw_line_dsc_t guide_line;
+    lv_draw_rect_dsc_t marker;
+
+    if ((event == NULL) ||
+        (lv_event_get_code(event) != LV_EVENT_DRAW_POST) ||
+        (g_sweep_probe_valid == 0u))
+    {
+        return;
+    }
+
+    chart = lv_event_get_target(event);
+    draw_context = lv_event_get_draw_ctx(event);
+    if ((draw_context == NULL) ||
+        !UI_GetSweepPlotArea(chart, &plot_area) ||
+        !UI_SweepValueToPixel(chart, g_sweep_probe_voltage,
+                              g_sweep_probe_cs, &point))
+    {
+        return;
+    }
+
+    lv_draw_line_dsc_init(&guide_line);
+    guide_line.color = lv_color_hex(0xffffffu);
+    guide_line.width = 1;
+    guide_line.opa = (lv_opa_t)110u;
+    guide_line.dash_width = 3;
+    guide_line.dash_gap = 3;
+
+    line_start.x = point.x;
+    line_start.y = plot_area.y1;
+    line_end.x = point.x;
+    line_end.y = plot_area.y2;
+    lv_draw_line(draw_context, &guide_line, &line_start, &line_end);
+    line_start.x = plot_area.x1;
+    line_start.y = point.y;
+    line_end.x = plot_area.x2;
+    line_end.y = point.y;
+    lv_draw_line(draw_context, &guide_line, &line_start, &line_end);
+
+    marker_area.x1 = point.x - UI_SWEEP_PROBE_RADIUS;
+    marker_area.y1 = point.y - UI_SWEEP_PROBE_RADIUS;
+    marker_area.x2 = point.x + UI_SWEEP_PROBE_RADIUS;
+    marker_area.y2 = point.y + UI_SWEEP_PROBE_RADIUS;
+    lv_draw_rect_dsc_init(&marker);
+    marker.radius = LV_RADIUS_CIRCLE;
+    marker.bg_color =
+        lv_color_hex(g_sweep_series_colors[g_sweep_probe_path]);
+    marker.bg_opa = LV_OPA_COVER;
+    marker.border_color = lv_color_hex(0xffffffu);
+    marker.border_width = 2;
+    marker.border_opa = LV_OPA_COVER;
+    lv_draw_rect(draw_context, &marker, &marker_area);
+}
+
+static void UI_SetSweepDrawerOpen(bool open)
+{
+    if (g_sweep_control_panel != NULL)
+    {
+        if (open)
+        {
+            lv_obj_clear_flag(g_sweep_control_panel, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_move_foreground(g_sweep_control_panel);
+        }
+        else
+        {
+            lv_obj_add_flag(g_sweep_control_panel, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+
+    if (g_sweep_settings_button != NULL)
+    {
+        if (open)
+        {
+            lv_obj_add_flag(g_sweep_settings_button, LV_OBJ_FLAG_HIDDEN);
+        }
+        else
+        {
+            lv_obj_clear_flag(g_sweep_settings_button, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_move_foreground(g_sweep_settings_button);
+        }
+    }
+
+    UI_UpdateSweepEngineeringButton(false);
+}
+
+static void UI_UpdateSweepEngineeringButton(bool animate_appearance)
+{
+    bool drawer_closed;
+    bool should_show;
+    lv_coord_t target_x;
+
+    if (g_sweep_engineering_button == NULL)
+    {
+        return;
+    }
+
+    drawer_closed = (g_sweep_control_panel == NULL) ||
+                    lv_obj_has_flag(g_sweep_control_panel,
+                                    LV_OBJ_FLAG_HIDDEN);
+    should_show = (g_ui_current_page == UI_PAGE_SWEEP) &&
+                  (g_sweep_inspection_ready != 0u) &&
+                  UI_IsSweepEngineeringReady() &&
+                  (g_sweep_engineering_page_active == 0u) &&
+                  drawer_closed;
+    if (!should_show)
+    {
+        lv_anim_del(g_sweep_engineering_button, NULL);
+        lv_obj_add_flag(g_sweep_engineering_button, LV_OBJ_FLAG_HIDDEN);
+        return;
+    }
+
+    target_x = (lv_coord_t)LCD_PIXEL_WIDTH - 82 -
+               UI_SWEEP_ENGINEERING_BUTTON_GAP -
+               UI_SWEEP_ENGINEERING_BUTTON_WIDTH;
+    if (lv_obj_has_flag(g_sweep_engineering_button, LV_OBJ_FLAG_HIDDEN))
+    {
+        lv_obj_clear_flag(g_sweep_engineering_button, LV_OBJ_FLAG_HIDDEN);
+        if (animate_appearance)
+        {
+            lv_obj_set_x(g_sweep_engineering_button,
+                         (lv_coord_t)LCD_PIXEL_WIDTH);
+            UI_StartSweepSmallObjectAnimation(
+                g_sweep_engineering_button,
+                (lv_coord_t)LCD_PIXEL_WIDTH,
+                target_x,
+                false);
+        }
+        else
+        {
+            lv_obj_set_x(g_sweep_engineering_button, target_x);
+        }
+    }
+    else
+    {
+        lv_obj_set_x(g_sweep_engineering_button, target_x);
+    }
+    lv_obj_move_foreground(g_sweep_engineering_button);
+}
+
+static void UI_SweepEngineeringButtonEvent(lv_event_t *event)
+{
+    if ((event == NULL) ||
+        (lv_event_get_code(event) != LV_EVENT_CLICKED) ||
+        (g_sweep_inspection_ready == 0u) ||
+        !UI_IsSweepEngineeringReady())
+    {
+        return;
+    }
+
+    UI_RecordAction(322u);
+    UI_SetSweepEngineeringPage(true, true);
+}
+
+static void UI_SweepDrawerEvent(lv_event_t *event)
+{
+    bool open;
+
+    if ((event == NULL) ||
+        (lv_event_get_code(event) != LV_EVENT_CLICKED))
+    {
+        return;
+    }
+
+    open = ((uintptr_t)lv_event_get_user_data(event) != 0u);
+    UI_SetSweepDrawerOpen(open);
+}
+
+static void UI_SetSweepProgress(uint32_t progress_permille)
+{
+    lv_coord_t full_width;
+    lv_coord_t indicator_width;
+
+    if ((g_sweep_progress_bar == NULL) ||
+        (g_sweep_progress_indicator == NULL))
+    {
+        return;
+    }
+
+    if (progress_permille > 1000u)
+    {
+        progress_permille = 1000u;
+    }
+    if (progress_permille == 0u)
+    {
+        lv_obj_add_flag(g_sweep_progress_indicator, LV_OBJ_FLAG_HIDDEN);
+        return;
+    }
+
+    full_width = lv_obj_get_width(g_sweep_progress_bar) - 2;
+    indicator_width =
+        (lv_coord_t)(((int32_t)full_width * progress_permille) / 1000);
+    if (indicator_width < 1)
+    {
+        indicator_width = 1;
+    }
+    lv_obj_set_width(g_sweep_progress_indicator, indicator_width);
+    lv_obj_clear_flag(g_sweep_progress_indicator, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void UI_CreateCommonStatusHeader(lv_obj_t *screen)
+{
+    g_common_header = UI_CreatePanel(screen,
+                                     0,
+                                     0,
+                                     (lv_coord_t)LCD_PIXEL_WIDTH,
+                                     UI_COMMON_HEADER_HEIGHT,
+                                     UI_COLOR_SURFACE,
+                                     0);
+    lv_obj_set_style_border_color(g_common_header,
+                                  lv_color_hex(UI_COLOR_BORDER),
+                                  LV_PART_MAIN);
+    lv_obj_set_style_border_width(g_common_header, 1, LV_PART_MAIN);
+
+    g_header_back_button =
+        UI_CreateButton(g_common_header,
+                        "返回",
+                        UI_COLOR_BLUE,
+                        8,
+                        7,
+                        68,
+                        38,
+                        UI_BackEvent,
+                        NULL);
+    g_header_title_label =
+        UI_CreateText(g_common_header, "首页", &ui_font_cn_20,
+                      UI_COLOR_TEXT, 84, 12, 146, 28,
+                      LV_TEXT_ALIGN_LEFT);
+    g_header_connection_label =
+        UI_CreateText(g_common_header, "主控:未连接", &ui_font_cn_20,
+                      UI_COLOR_ORANGE, 234, 12, 158, 28,
+                      LV_TEXT_ALIGN_CENTER);
+    g_header_bias_label =
+        UI_CreateText(g_common_header, "", &ui_font_cn_20,
+                      UI_COLOR_STATUS, 396, 12, 150, 28,
+                      LV_TEXT_ALIGN_CENTER);
+    g_header_path_label =
+        UI_CreateText(g_common_header, "", &ui_font_cn_20,
+                      UI_COLOR_STATUS, 550, 12, 150, 28,
+                      LV_TEXT_ALIGN_CENTER);
+    g_header_operation_label =
+        UI_CreateText(g_common_header, "系统就绪", &ui_font_cn_20,
+                      UI_COLOR_TEXT_MUTED, 704, 12,
+                      (lv_coord_t)LCD_PIXEL_WIDTH - 714, 28,
+                      LV_TEXT_ALIGN_RIGHT);
+    g_status_label = g_header_operation_label;
+    UI_UpdateCommonStatus();
+}
+
+static lv_obj_t *UI_PrepareRootScreen(void)
+{
+    lv_obj_t *screen = lv_scr_act();
+    uint32_t index;
+
+    lv_obj_clean(screen);
+    lv_obj_clear_flag(screen, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_color(screen,
+                              lv_color_hex(UI_COLOR_BACKGROUND),
+                              LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_text_font(screen, &ui_font_cn_20, LV_PART_MAIN);
+    lv_obj_set_style_text_color(screen,
+                                lv_color_hex(UI_COLOR_TEXT),
+                                LV_PART_MAIN);
+
+    g_status_label = NULL;
+    g_modal_overlay = NULL;
+    g_common_header = NULL;
+    g_header_back_button = NULL;
+    g_header_title_label = NULL;
+    g_header_connection_label = NULL;
+    g_header_bias_label = NULL;
+    g_header_path_label = NULL;
+    g_header_operation_label = NULL;
+    g_keypad_overlay = NULL;
+    g_keypad_title_label = NULL;
+    g_single_bias_value_label = NULL;
+    g_measure_all_bias_value_label = NULL;
+    g_sweep_bias_value_label = NULL;
+    g_single_result_label = NULL;
+    g_single_result_note_label = NULL;
+    g_sweep_chart = NULL;
+    g_sweep_progress_label = NULL;
+    g_sweep_progress_bar = NULL;
+    g_sweep_progress_indicator = NULL;
+    g_sweep_control_panel = NULL;
+    g_sweep_settings_button = NULL;
+    g_sweep_engineering_button = NULL;
+    g_sweep_curve_page = NULL;
+    g_sweep_engineering_page = NULL;
+    g_engineering_analysis_value_label = NULL;
+    g_engineering_quality_label = NULL;
+    g_engineering_slider_track = NULL;
+    g_engineering_slider_knob = NULL;
+    g_engineering_qrcode = NULL;
+    g_engineering_qr_mode_label = NULL;
+    g_engineering_qr_status_label = NULL;
+    g_engineering_qr_model_label = NULL;
+    g_keypad_value_label = NULL;
+    g_keypad_note_label = NULL;
+    for (index = 0u; index < 4u; ++index)
+    {
+        g_single_path_buttons[index] = NULL;
+        g_sweep_path_buttons[index] = NULL;
+    }
+    UI_CreateCommonStatusHeader(screen);
+    return screen;
+}
+
+static lv_obj_t *UI_CreatePageContainer(lv_obj_t *screen)
+{
+    lv_obj_t *container = lv_obj_create(screen);
+
+    lv_obj_set_pos(container, 0, 0);
+    lv_obj_set_size(container,
+                    (lv_coord_t)LCD_PIXEL_WIDTH,
+                    (lv_coord_t)LCD_PIXEL_HEIGHT);
+    lv_obj_clear_flag(container, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_clear_flag(container, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_opa(container, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_border_width(container, 0, LV_PART_MAIN);
+    lv_obj_set_style_radius(container, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(container, 0, LV_PART_MAIN);
+
+    return container;
+}
+
+static void UI_ActivatePage(UI_Page page)
+{
+    static const char *const page_titles[] =
+    {
+        "首页", "系统初始化", "单点测量", "一键测量", "扫压测量"
+    };
+    static const char *const page_status[] =
+    {
+        "系统就绪", "等待操作", "请选择回路", "等待测量", "等待扫压"
+    };
+    uint32_t index;
+
+    for (index = 0u; index < 5u; ++index)
+    {
+        if (g_page_containers[index] == NULL)
+        {
+            continue;
+        }
+
+        if (index == (uint32_t)page)
+        {
+            lv_obj_set_x(g_page_containers[index], 0);
+            lv_obj_clear_flag(g_page_containers[index], LV_OBJ_FLAG_HIDDEN);
+        }
+        else
+        {
+            lv_obj_set_x(g_page_containers[index], 0);
+            lv_obj_add_flag(g_page_containers[index], LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+
+    g_ui_current_page = (uint32_t)page;
+    g_status_label = g_header_operation_label;
+    if (g_header_title_label != NULL)
+    {
+        lv_anim_del(g_header_title_label, NULL);
+        g_sweep_subpage_animating = 0u;
+        lv_label_set_text(g_header_title_label, page_titles[(uint32_t)page]);
+        if (page == UI_PAGE_HOME)
+        {
+            lv_obj_set_pos(g_header_title_label, 16, 12);
+            lv_obj_set_width(g_header_title_label, 214);
+        }
+        else
+        {
+            lv_obj_set_pos(g_header_title_label, 84, 12);
+            lv_obj_set_width(g_header_title_label, 146);
+        }
+    }
+    if (g_header_back_button != NULL)
+    {
+        if (page == UI_PAGE_HOME)
+        {
+            lv_obj_add_flag(g_header_back_button, LV_OBJ_FLAG_HIDDEN);
+        }
+        else
+        {
+            lv_obj_clear_flag(g_header_back_button, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+    if (g_header_operation_label != NULL)
+    {
+        lv_label_set_text(g_header_operation_label,
+                          page_status[(uint32_t)page]);
+    }
+    if (g_common_header != NULL)
+    {
+        lv_obj_move_foreground(g_common_header);
+    }
+    UI_UpdateCommonStatus();
+
+    /*
+     * 输入定时器可能刚好排在显示刷新定时器之后运行。页面切换完成后
+     * 立即刷新，可避免再等待一个默认刷新周期才开始绘制新页面。
+     */
+    if (g_ui_immediate_refresh_enabled != 0u)
+    {
+        lv_refr_now(lv_disp_get_default());
+    }
+}
+
+static void UI_BackEvent(lv_event_t *event)
+{
+    if ((event == NULL) ||
+        (lv_event_get_code(event) != LV_EVENT_CLICKED))
+    {
+        return;
+    }
+
+    if ((g_ui_current_page == UI_PAGE_SWEEP) &&
+        (g_sweep_engineering_page_active != 0u))
+    {
+        UI_RecordAction(101u);
+        UI_SetSweepEngineeringPage(false, true);
+        return;
+    }
+
+    UI_RecordAction(100u);
+    UI_ShowHome();
+}
+
+
+static void UI_SimpleActionEvent(lv_event_t *event)
+{
+    const UI_Action *action;
+    bool command_queued = true;
+
+    if ((event == NULL) ||
+        (lv_event_get_code(event) != LV_EVENT_CLICKED))
+    {
+        return;
+    }
+
+    action = (const UI_Action *)lv_event_get_user_data(event);
+    if (action == NULL)
+    {
+        return;
+    }
+
+    if ((action->action_code >= 210u) &&
+        (action->action_code <= 213u))
+    {
+        g_ui_single_path = action->action_code - 210u;
+        UI_UpdateSinglePathStyle();
+        command_queued = DisplayProtocol_RequestPath(g_ui_single_path);
+    }
+    else if ((action->action_code >= 310u) &&
+             (action->action_code <= 313u))
+    {
+        g_ui_sweep_path = action->action_code - 310u;
+        UI_UpdateSweepPathStyle();
+    }
+    else if (action->action_code == 220u)
+    {
+        command_queued =
+            DisplayProtocol_RequestPoint(g_ui_single_path,
+                                         g_ui_single_bias_tenths);
+    }
+    else if (action->action_code == 230u)
+    {
+        command_queued =
+            DisplayProtocol_RequestPointAll(g_ui_measure_all_bias_tenths);
+    }
+    else if (action->action_code == 320u)
+    {
+        command_queued = (g_ui_sweep_path == 3u) ?
+            DisplayProtocol_RequestRgThenSweepAll(g_ui_sweep_end_tenths) :
+            DisplayProtocol_RequestSweep(g_ui_sweep_path,
+                                         g_ui_sweep_end_tenths);
+        if (command_queued)
+        {
+            g_sweep_inspection_ready = 0u;
+            UI_SetSweepEngineeringPage(false, false);
+            UI_SetSweepDrawerOpen(false);
+        }
+    }
+    else if (action->action_code == 321u)
+    {
+        command_queued = DisplayProtocol_RequestSweepStop();
+    }
+
+    UI_RecordAction(action->action_code);
+    if (g_status_label != NULL)
+    {
+        if (command_queued)
+        {
+            lv_label_set_text(
+                g_status_label,
+                ((action->action_code == 320u) &&
+                 (g_ui_sweep_path == 3u)) ?
+                "状态:先测量RG,随后三回路扫压" :
+                action->status_text);
+        }
+        else
+        {
+            lv_label_set_text(g_status_label,
+                              "状态:UART7发送失败,重新尝试");
+        }
+    }
+}
+
+static void UI_HomeButtonEvent(lv_event_t *event)
+{
+    uint32_t page;
+
+    if ((event == NULL) ||
+        (lv_event_get_code(event) != LV_EVENT_CLICKED))
+    {
+        return;
+    }
+
+    page = (uint32_t)(uintptr_t)lv_event_get_user_data(event);
+    UI_RecordAction(page);
+
+    switch (page)
+    {
+        case UI_PAGE_INITIALIZE:
+            UI_ShowInitialize();
+            break;
+
+        case UI_PAGE_SINGLE:
+            UI_ShowSingle();
+            break;
+
+        case UI_PAGE_MEASURE_ALL:
+            UI_ShowMeasureAll();
+            break;
+
+        case UI_PAGE_SWEEP:
+            UI_ShowSweep();
+            break;
+
+        default:
+            UI_ShowHome();
+            break;
+    }
+}
+
+static void UI_ShowHome(void)
+{
+    static const char *const button_text[] =
+    {
+        "初始化\n主控复位与安全启动",
+        "单点测量\n选择回路与偏压",
+        "一键测量\n三回路统一测量",
+        "扫压测量\n显示MOSFET C-V曲线"
+    };
+    static const uint32_t button_colors[] =
+    {
+        UI_COLOR_BLUE,
+        UI_COLOR_CYAN,
+        UI_COLOR_GREEN,
+        UI_COLOR_ORANGE
+    };
+    lv_obj_t *screen = g_page_containers[UI_PAGE_HOME];
+    lv_coord_t button_width;
+    lv_coord_t button_height;
+    lv_coord_t horizontal_gap = 22;
+    lv_coord_t vertical_gap = 18;
+    lv_coord_t button_top;
+    uint32_t index;
+
+    g_ui_current_page = UI_PAGE_HOME;
+
+    if (g_page_built[UI_PAGE_HOME] != 0u)
+    {
+        UI_ActivatePage(UI_PAGE_HOME);
+        return;
+    }
+
+    UI_CreateText(screen,
+                  "MOSFET 参数测试系统",
+                  &ui_font_cn_28,
+                  UI_COLOR_TEXT,
+                  UI_PAGE_MARGIN,
+                  64,
+                  (lv_coord_t)LCD_PIXEL_WIDTH - (2 * UI_PAGE_MARGIN),
+                  38,
+                  LV_TEXT_ALIGN_CENTER);
+    UI_CreateText(screen,
+                  "C-V / RG 参数测量终端",
+                  &ui_font_cn_20,
+                  UI_COLOR_TEXT_MUTED,
+                  UI_PAGE_MARGIN,
+                  102,
+                  (lv_coord_t)LCD_PIXEL_WIDTH - (2 * UI_PAGE_MARGIN),
+                  30,
+                  LV_TEXT_ALIGN_CENTER);
+
+    button_width = ((lv_coord_t)LCD_PIXEL_WIDTH - 96 -
+                    horizontal_gap) / 2;
+    button_height = (LCD_PIXEL_HEIGHT > 500u) ? 156 : 110;
+    button_top = (LCD_PIXEL_HEIGHT > 500u) ? 142 : 132;
+
+    for (index = 0u; index < 4u; ++index)
+    {
+        lv_coord_t column = (lv_coord_t)(index % 2u);
+        lv_coord_t row = (lv_coord_t)(index / 2u);
+        lv_coord_t x = 48 + column * (button_width + horizontal_gap);
+        lv_coord_t y = button_top + row *
+                       (button_height + vertical_gap);
+
+        lv_obj_t *button = UI_CreateButton(
+            screen,
+            button_text[index],
+            UI_COLOR_SURFACE_LIGHT,
+            x,
+            y,
+            button_width,
+            button_height,
+            UI_HomeButtonEvent,
+            (void *)(uintptr_t)(index + 1u));
+
+        lv_obj_set_style_border_color(button,
+                                      lv_color_hex(button_colors[index]),
+                                      LV_PART_MAIN);
+        lv_obj_set_style_border_width(button, 2, LV_PART_MAIN);
+    }
+
+    g_page_built[UI_PAGE_HOME] = 1u;
+    UI_ActivatePage(UI_PAGE_HOME);
+}
+
+static void UI_InitModalCancelEvent(lv_event_t *event)
+{
+    if ((event == NULL) ||
+        (lv_event_get_code(event) != LV_EVENT_CLICKED))
+    {
+        return;
+    }
+
+    UI_RecordAction(202u);
+    if (g_modal_overlay != NULL)
+    {
+        lv_obj_del(g_modal_overlay);
+        g_modal_overlay = NULL;
+    }
+    if (g_status_label != NULL)
+    {
+        lv_label_set_text(g_status_label, "状态:复位操作取消");
+    }
+}
+
+static void UI_InitModalConfirmEvent(lv_event_t *event)
+{
+    bool command_queued;
+
+    if ((event == NULL) ||
+        (lv_event_get_code(event) != LV_EVENT_CLICKED))
+    {
+        return;
+    }
+
+    UI_RecordAction(203u);
+    ++g_ui_reset_request_count;
+    command_queued = DisplayProtocol_RequestReset();
+    if (g_modal_overlay != NULL)
+    {
+        lv_obj_del(g_modal_overlay);
+        g_modal_overlay = NULL;
+    }
+    if (g_status_label != NULL)
+    {
+        lv_label_set_text(g_status_label,
+                          command_queued ?
+                          "状态:主控复位指令发送完成" :
+                          "状态:UART7发送失败,复位指令未发送");
+    }
+}
+
+static void UI_InitResetEvent(lv_event_t *event)
+{
+    lv_obj_t *screen;
+    lv_obj_t *dialog;
+    lv_coord_t dialog_width;
+
+    if ((event == NULL) ||
+        (lv_event_get_code(event) != LV_EVENT_CLICKED) ||
+        (g_modal_overlay != NULL))
+    {
+        return;
+    }
+
+    UI_RecordAction(201u);
+    screen = lv_scr_act();
+    g_modal_overlay = UI_CreatePanel(screen,
+                                     0,
+                                     0,
+                                     (lv_coord_t)LCD_PIXEL_WIDTH,
+                                     (lv_coord_t)LCD_PIXEL_HEIGHT,
+                                     0x020617u,
+                                     0);
+    lv_obj_set_style_bg_opa(g_modal_overlay, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_border_width(g_modal_overlay, 0, LV_PART_MAIN);
+
+    dialog_width = (lv_coord_t)LCD_PIXEL_WIDTH - 220;
+    if (dialog_width > 560)
+    {
+        dialog_width = 560;
+    }
+    dialog = UI_CreatePanel(g_modal_overlay,
+                            ((lv_coord_t)LCD_PIXEL_WIDTH - dialog_width) / 2,
+                            ((lv_coord_t)LCD_PIXEL_HEIGHT - 230) / 2,
+                            dialog_width,
+                            230,
+                            UI_COLOR_SURFACE_LIGHT,
+                            18);
+    UI_CreateText(dialog,
+                  "确认发送主控复位指令?",
+                  &ui_font_cn_28,
+                  UI_COLOR_TEXT,
+                  20,
+                  28,
+                  dialog_width - 40,
+                  40,
+                  LV_TEXT_ALIGN_CENTER);
+    UI_CreateText(dialog,
+                  "显示板只发送复位请求,其他安全流程由主控完成",
+                  &ui_font_cn_20,
+                  UI_COLOR_STATUS,
+                  28,
+                  84,
+                  dialog_width - 56,
+                  56,
+                  LV_TEXT_ALIGN_CENTER);
+    UI_CreateButton(dialog,
+                    "取消",
+                    UI_COLOR_BORDER,
+                    42,
+                    160,
+                    (dialog_width - 110) / 2,
+                    50,
+                    UI_InitModalCancelEvent,
+                    NULL);
+    UI_CreateButton(dialog,
+                    "确认",
+                    UI_COLOR_RED,
+                    68 + (dialog_width - 110) / 2,
+                    160,
+                    (dialog_width - 110) / 2,
+                    50,
+                    UI_InitModalConfirmEvent,
+                    NULL);
+}
+
+static void UI_ShowInitialize(void)
+{
+    lv_obj_t *screen = g_page_containers[UI_PAGE_INITIALIZE];
+    lv_obj_t *panel;
+    lv_coord_t panel_width = (lv_coord_t)LCD_PIXEL_WIDTH - 220;
+
+    g_ui_current_page = UI_PAGE_INITIALIZE;
+
+    if (g_page_built[UI_PAGE_INITIALIZE] != 0u)
+    {
+        UI_ActivatePage(UI_PAGE_INITIALIZE);
+        return;
+    }
+    panel = UI_CreatePanel(screen,
+                           110,
+                           94,
+                           panel_width,
+                           330,
+                           UI_COLOR_SURFACE_LIGHT,
+                           20);
+    lv_obj_set_style_border_color(panel,
+                                  lv_color_hex(UI_COLOR_RED),
+                                  LV_PART_MAIN);
+    lv_obj_set_style_border_width(panel, 2, LV_PART_MAIN);
+    UI_CreateText(panel,
+                  "安全初始化",
+                  &ui_font_cn_28,
+                  UI_COLOR_TEXT,
+                  24,
+                  24,
+                  panel_width - 48,
+                  40,
+                  LV_TEXT_ALIGN_CENTER);
+    UI_CreateText(panel,
+                  "显示板只发送 mcu_reset 指令\n偏压降低与安全等待由主控完成",
+                  &ui_font_cn_20,
+                  UI_COLOR_STATUS,
+                  36,
+                  78,
+                  panel_width - 72,
+                  64,
+                  LV_TEXT_ALIGN_CENTER);
+
+    UI_CreateButton(panel,
+                    "发送复位指令",
+                    UI_COLOR_RED,
+                    (panel_width - 320) / 2,
+                    166,
+                    320,
+                    60,
+                    UI_InitResetEvent,
+                    NULL);
+    UI_CreateText(screen,
+                  "二次确认后发送指令  主控复位时显示离线状态",
+                  &ui_font_cn_20,
+                  UI_COLOR_TEXT_MUTED,
+                  60,
+                  456,
+                  (lv_coord_t)LCD_PIXEL_WIDTH - 120,
+                  32,
+                  LV_TEXT_ALIGN_CENTER);
+
+    g_page_built[UI_PAGE_INITIALIZE] = 1u;
+    UI_ActivatePage(UI_PAGE_INITIALIZE);
+}
+
+static void UI_CreatePathButtons(lv_obj_t *panel,
+                                 lv_coord_t panel_width,
+                                 const char *const *names,
+                                 const UI_Action *actions,
+                                 uint32_t action_count)
+{
+    lv_coord_t start_x = 152;
+    lv_coord_t gap = 10;
+    lv_coord_t button_width =
+        (panel_width - start_x - 18 -
+         ((lv_coord_t)action_count - 1) * gap) /
+        (lv_coord_t)action_count;
+    uint32_t index;
+
+    UI_CreateText(panel,
+                  "测量回路",
+                  &ui_font_cn_20,
+                  UI_COLOR_STATUS,
+                  18,
+                  24,
+                  120,
+                  30,
+                  LV_TEXT_ALIGN_LEFT);
+
+    for (index = 0u; index < action_count; ++index)
+    {
+        lv_obj_t *button =
+            UI_CreateButton(panel,
+                            names[index],
+                            UI_COLOR_CYAN,
+                            start_x + (lv_coord_t)index *
+                            (button_width + gap),
+                            13,
+                            button_width,
+                            52,
+                            UI_SimpleActionEvent,
+                            (void *)&actions[index]);
+
+        if ((actions == g_single_path_actions) && (index < 4u))
+        {
+            g_single_path_buttons[index] = button;
+        }
+        else if ((actions == g_sweep_path_actions) && (index < 4u))
+        {
+            g_sweep_path_buttons[index] = button;
+        }
+    }
+
+    if (actions == g_single_path_actions)
+    {
+        UI_UpdateSinglePathStyle();
+    }
+    else if (actions == g_sweep_path_actions)
+    {
+        UI_UpdateSweepPathStyle();
+    }
+}
+
+static void UI_BiasKeypadRefresh(void)
+{
+    if (g_keypad_value_label == NULL)
+    {
+        return;
+    }
+
+    if (g_keypad_buffer[0] == '\0')
+    {
+        lv_label_set_text(g_keypad_value_label, "0.0 V");
+    }
+    else
+    {
+        lv_label_set_text_fmt(g_keypad_value_label,
+                              "%s V",
+                              g_keypad_buffer);
+    }
+}
+
+static uint32_t UI_ParseBiasTenths(uint32_t *bias_tenths)
+{
+    uint32_t integer_part = 0u;
+    uint32_t fraction_part = 0u;
+    uint32_t decimal_seen = 0u;
+    uint32_t fraction_digits = 0u;
+    uint32_t digit_seen = 0u;
+    uint32_t index;
+
+    if (bias_tenths == NULL)
+    {
+        return 0u;
+    }
+
+    for (index = 0u; g_keypad_buffer[index] != '\0'; ++index)
+    {
+        char character = g_keypad_buffer[index];
+
+        if (character == '.')
+        {
+            if (decimal_seen != 0u)
+            {
+                return 0u;
+            }
+            decimal_seen = 1u;
+            continue;
+        }
+
+        if ((character < '0') || (character > '9'))
+        {
+            return 0u;
+        }
+
+        digit_seen = 1u;
+        if (decimal_seen == 0u)
+        {
+            integer_part = integer_part * 10u +
+                           (uint32_t)(character - '0');
+            if (integer_part > 100u)
+            {
+                return 0u;
+            }
+        }
+        else
+        {
+            if (fraction_digits >= 1u)
+            {
+                return 0u;
+            }
+            fraction_part = (uint32_t)(character - '0');
+            ++fraction_digits;
+        }
+    }
+
+    if (digit_seen == 0u)
+    {
+        return 0u;
+    }
+
+    *bias_tenths = integer_part * 10u + fraction_part;
+    if ((*bias_tenths < UI_BIAS_MIN_TENTHS) ||
+        (*bias_tenths > UI_BIAS_MAX_TENTHS))
+    {
+        return 0u;
+    }
+
+    return 1u;
+}
+
+static void UI_CloseBiasKeypad(void)
+{
+    if (g_keypad_overlay != NULL)
+    {
+        lv_obj_add_flag(g_keypad_overlay, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+static void UI_BiasKeypadEvent(lv_event_t *event)
+{
+    uint32_t action;
+    size_t length;
+    char *decimal;
+
+    if ((event == NULL) ||
+        (lv_event_get_code(event) != LV_EVENT_CLICKED))
+    {
+        return;
+    }
+
+    action = (uint32_t)(uintptr_t)lv_event_get_user_data(event);
+    length = strlen(g_keypad_buffer);
+    decimal = strchr(g_keypad_buffer, '.');
+
+    if (action <= 9u)
+    {
+        uint32_t integer_digits =
+            (decimal == NULL) ? (uint32_t)length :
+            (uint32_t)(decimal - g_keypad_buffer);
+        uint32_t fraction_digits =
+            (decimal == NULL) ? 0u :
+            (uint32_t)(length - (size_t)(decimal - g_keypad_buffer) - 1u);
+
+        if ((length < (sizeof(g_keypad_buffer) - 1u)) &&
+            (((decimal == NULL) && (integer_digits < 3u)) ||
+             ((decimal != NULL) && (fraction_digits < 1u))))
+        {
+            g_keypad_buffer[length] = (char)('0' + action);
+            g_keypad_buffer[length + 1u] = '\0';
+        }
+    }
+    else if (action == UI_KEYPAD_DECIMAL)
+    {
+        if ((decimal == NULL) &&
+            (length < (sizeof(g_keypad_buffer) - 1u)))
+        {
+            if (length == 0u)
+            {
+                g_keypad_buffer[0] = '0';
+                g_keypad_buffer[1] = '.';
+                g_keypad_buffer[2] = '\0';
+            }
+            else
+            {
+                g_keypad_buffer[length] = '.';
+                g_keypad_buffer[length + 1u] = '\0';
+            }
+        }
+    }
+    else if (action == UI_KEYPAD_BACKSPACE)
+    {
+        if (length != 0u)
+        {
+            g_keypad_buffer[length - 1u] = '\0';
+        }
+    }
+    else if (action == UI_KEYPAD_CLEAR)
+    {
+        g_keypad_buffer[0] = '\0';
+    }
+    else if (action == UI_KEYPAD_CANCEL)
+    {
+        UI_RecordAction(241u);
+        UI_CloseBiasKeypad();
+        if (g_status_label != NULL)
+        {
+            lv_label_set_text(g_status_label, "状态:偏压设置取消");
+        }
+        return;
+    }
+    else if (action == UI_KEYPAD_MINIMUM)
+    {
+        (void)strcpy(g_keypad_buffer, "0.1");
+    }
+    else if (action == UI_KEYPAD_CONFIRM)
+    {
+        uint32_t bias_tenths;
+
+        if (UI_ParseBiasTenths(&bias_tenths) == 0u)
+        {
+            if (g_keypad_note_label != NULL)
+            {
+                lv_label_set_text(g_keypad_note_label,
+                                  "输入错误  偏压:0.1-100.0 V");
+                lv_obj_set_style_text_color(g_keypad_note_label,
+                                            lv_color_hex(UI_COLOR_RED),
+                                            LV_PART_MAIN);
+            }
+            return;
+        }
+        if ((g_keypad_target == UI_BIAS_TARGET_ANALYSIS) &&
+            ((g_sweep_inspection_ready == 0u) ||
+             (bias_tenths > g_ui_analysis_voltage_max_tenths)))
+        {
+            if (g_keypad_note_label != NULL)
+            {
+                lv_label_set_text_fmt(
+                    g_keypad_note_label,
+                    "输入错误  参数电压:0.1-%lu.%lu V",
+                    (unsigned long)(g_ui_analysis_voltage_max_tenths / 10u),
+                    (unsigned long)(g_ui_analysis_voltage_max_tenths % 10u));
+                lv_obj_set_style_text_color(g_keypad_note_label,
+                                            lv_color_hex(UI_COLOR_RED),
+                                            LV_PART_MAIN);
+            }
+            return;
+        }
+
+        if (g_keypad_target == UI_BIAS_TARGET_ANALYSIS)
+        {
+            g_ui_analysis_voltage_tenths = bias_tenths;
+            UI_UpdateEngineeringPage();
+        }
+        else if (g_keypad_target == UI_BIAS_TARGET_MEASURE_ALL)
+        {
+            g_ui_measure_all_bias_tenths = bias_tenths;
+            g_ui_display_path = UI_DISPLAY_PATH_ALL;
+            UI_UpdateMeasureAllBiasLabel();
+        }
+        else if (g_keypad_target == UI_BIAS_TARGET_SWEEP)
+        {
+            g_ui_sweep_end_tenths = bias_tenths;
+            g_ui_display_path = (g_ui_sweep_path == 3u) ?
+                                UI_DISPLAY_PATH_ALL : g_ui_sweep_path;
+            UI_UpdateSweepBiasLabel();
+        }
+        else
+        {
+            g_ui_single_bias_tenths = bias_tenths;
+            UI_UpdateSingleBiasLabel();
+        }
+        UI_RecordAction(242u);
+        UI_CloseBiasKeypad();
+        if (g_status_label != NULL)
+        {
+            if (g_keypad_target == UI_BIAS_TARGET_ANALYSIS)
+            {
+                lv_label_set_text_fmt(
+                    g_status_label,
+                    "参数电压:%lu.%lu V",
+                    (unsigned long)(bias_tenths / 10u),
+                    (unsigned long)(bias_tenths % 10u));
+            }
+            else if ((g_keypad_target == UI_BIAS_TARGET_SINGLE) &&
+                (g_ui_single_path != UI_SINGLE_PATH_RG))
+            {
+                if (DisplayProtocol_RequestBias(bias_tenths))
+                {
+                    lv_label_set_text_fmt(
+                        g_status_label,
+                        "状态:偏压指令发送完成:%lu.%lu V",
+                        (unsigned long)(bias_tenths / 10u),
+                        (unsigned long)(bias_tenths % 10u));
+                }
+                else
+                {
+                    lv_label_set_text(g_status_label,
+                                      "状态:UART7发送失败");
+                }
+            }
+            else
+            {
+                lv_label_set_text_fmt(
+                    g_status_label,
+                    "状态:测量参数设置完成:%lu.%lu V",
+                    (unsigned long)(bias_tenths / 10u),
+                    (unsigned long)(bias_tenths % 10u));
+            }
+        }
+        return;
+    }
+
+    if (g_keypad_note_label != NULL)
+    {
+        if (g_keypad_target == UI_BIAS_TARGET_ANALYSIS)
+        {
+            lv_label_set_text_fmt(
+                g_keypad_note_label,
+                "参数电压:0.1-%lu.%lu V",
+                (unsigned long)(g_ui_analysis_voltage_max_tenths / 10u),
+                (unsigned long)(g_ui_analysis_voltage_max_tenths % 10u));
+        }
+        else
+        {
+            lv_label_set_text(g_keypad_note_label, "偏压:0.1-100.0 V");
+        }
+        lv_obj_set_style_text_color(g_keypad_note_label,
+                                    lv_color_hex(UI_COLOR_TEXT_MUTED),
+                                    LV_PART_MAIN);
+    }
+    UI_BiasKeypadRefresh();
+}
+
+static void UI_CreateBiasKeypad(void)
+{
+    static const char *const key_text[] =
+    {
+        "7", "8", "9", "<-",
+        "4", "5", "6", "清空",
+        "1", "2", "3", "取消",
+        "0", ".", "0.1", "确认"
+    };
+    static const uint32_t key_action[] =
+    {
+        7u, 8u, 9u, UI_KEYPAD_BACKSPACE,
+        4u, 5u, 6u, UI_KEYPAD_CLEAR,
+        1u, 2u, 3u, UI_KEYPAD_CANCEL,
+        0u, UI_KEYPAD_DECIMAL, UI_KEYPAD_MINIMUM, UI_KEYPAD_CONFIRM
+    };
+    lv_obj_t *dialog;
+    lv_obj_t *value_panel;
+    lv_coord_t dialog_width;
+    lv_coord_t dialog_x;
+    lv_coord_t button_width;
+    lv_coord_t gap = 8;
+    uint32_t index;
+
+    if (g_keypad_overlay != NULL)
+    {
+        return;
+    }
+
+    g_keypad_overlay = UI_CreatePanel(lv_layer_top(),
+                                      0,
+                                      0,
+                                      (lv_coord_t)LCD_PIXEL_WIDTH,
+                                      (lv_coord_t)LCD_PIXEL_HEIGHT,
+                                      0x020617u,
+                                      0);
+    lv_obj_set_style_bg_opa(g_keypad_overlay, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_border_width(g_keypad_overlay, 0, LV_PART_MAIN);
+
+    dialog_width = (lv_coord_t)LCD_PIXEL_WIDTH - 180;
+    if (dialog_width > 620)
+    {
+        dialog_width = 620;
+    }
+    dialog_x = ((lv_coord_t)LCD_PIXEL_WIDTH - dialog_width) / 2;
+    dialog = UI_CreatePanel(g_keypad_overlay,
+                            dialog_x,
+                            ((lv_coord_t)LCD_PIXEL_HEIGHT - 430) / 2,
+                            dialog_width,
+                            430,
+                            UI_COLOR_SURFACE_LIGHT,
+                            18);
+
+    g_keypad_title_label =
+        UI_CreateText(dialog, "设置偏压", &ui_font_cn_28,
+                      UI_COLOR_TEXT, 20, 16,
+                      dialog_width - 40, 38, LV_TEXT_ALIGN_CENTER);
+
+    value_panel = UI_CreatePanel(dialog,
+                                 24,
+                                 58,
+                                 dialog_width - 48,
+                                 58,
+                                 UI_COLOR_BACKGROUND,
+                                 10);
+    g_keypad_value_label = UI_CreateText(value_panel,
+                                         "",
+                                         &ui_font_cn_28,
+                                         UI_COLOR_TEXT,
+                                         12,
+                                         12,
+                                         dialog_width - 72,
+                                         38,
+                                         LV_TEXT_ALIGN_RIGHT);
+    UI_BiasKeypadRefresh();
+
+    g_keypad_note_label = UI_CreateText(dialog,
+                                        "偏压:0.1-100.0 V",
+                                        &ui_font_cn_20,
+                                        UI_COLOR_TEXT_MUTED,
+                                        24,
+                                        122,
+                                        dialog_width - 48,
+                                        28,
+                                        LV_TEXT_ALIGN_CENTER);
+
+    button_width = (dialog_width - 72) / 4;
+    for (index = 0u; index < 16u; ++index)
+    {
+        lv_coord_t column = (lv_coord_t)(index % 4u);
+        lv_coord_t row = (lv_coord_t)(index / 4u);
+        uint32_t color = UI_COLOR_BLUE;
+
+        if (key_action[index] == UI_KEYPAD_CONFIRM)
+        {
+            color = UI_COLOR_GREEN;
+        }
+        else if (key_action[index] == UI_KEYPAD_CANCEL)
+        {
+            color = UI_COLOR_RED;
+        }
+        else if ((key_action[index] == UI_KEYPAD_CLEAR) ||
+                 (key_action[index] == UI_KEYPAD_BACKSPACE))
+        {
+            color = UI_COLOR_ORANGE;
+        }
+
+        UI_CreateButton(dialog,
+                        key_text[index],
+                        color,
+                        24 + column * (button_width + gap),
+                        154 + row * 62,
+                        button_width,
+                        54,
+                        UI_BiasKeypadEvent,
+                        (void *)(uintptr_t)key_action[index]);
+    }
+
+    lv_obj_add_flag(g_keypad_overlay, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void UI_BiasOpenEvent(lv_event_t *event)
+{
+    uint32_t current_bias_tenths;
+    const char *dialog_title;
+
+    if ((event == NULL) ||
+        (lv_event_get_code(event) != LV_EVENT_CLICKED) ||
+        (g_modal_overlay != NULL) ||
+        (g_keypad_overlay == NULL) ||
+        !lv_obj_has_flag(g_keypad_overlay, LV_OBJ_FLAG_HIDDEN))
+    {
+        return;
+    }
+
+    UI_RecordAction(240u);
+    g_keypad_target =
+        (UI_BiasTarget)(uintptr_t)lv_event_get_user_data(event);
+    if (g_keypad_target == UI_BIAS_TARGET_ANALYSIS)
+    {
+        current_bias_tenths = g_ui_analysis_voltage_tenths;
+        dialog_title = "设置参数电压";
+    }
+    else if (g_keypad_target == UI_BIAS_TARGET_MEASURE_ALL)
+    {
+        current_bias_tenths = g_ui_measure_all_bias_tenths;
+        dialog_title = "设置统一偏压";
+    }
+    else if (g_keypad_target == UI_BIAS_TARGET_SWEEP)
+    {
+        current_bias_tenths = g_ui_sweep_end_tenths;
+        dialog_title = "设置终止电压";
+    }
+    else
+    {
+        g_keypad_target = UI_BIAS_TARGET_SINGLE;
+        current_bias_tenths = g_ui_single_bias_tenths;
+        dialog_title = "设置偏压";
+    }
+
+    lv_snprintf(g_keypad_buffer,
+                sizeof(g_keypad_buffer),
+                "%lu.%lu",
+                (unsigned long)(current_bias_tenths / 10u),
+                (unsigned long)(current_bias_tenths % 10u));
+    lv_label_set_text(g_keypad_title_label, dialog_title);
+    if (g_keypad_target == UI_BIAS_TARGET_ANALYSIS)
+    {
+        lv_label_set_text_fmt(
+            g_keypad_note_label,
+            "参数电压:0.1-%lu.%lu V",
+            (unsigned long)(g_ui_analysis_voltage_max_tenths / 10u),
+            (unsigned long)(g_ui_analysis_voltage_max_tenths % 10u));
+    }
+    else
+    {
+        lv_label_set_text(g_keypad_note_label, "偏压:0.1-100.0 V");
+    }
+    lv_obj_set_style_text_color(g_keypad_note_label,
+                                lv_color_hex(UI_COLOR_TEXT_MUTED),
+                                LV_PART_MAIN);
+    UI_BiasKeypadRefresh();
+    lv_obj_clear_flag(g_keypad_overlay, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(g_keypad_overlay);
+}
+
+static void UI_ShowSingle(void)
+{
+    static const char *const path_names[] =
+        {"CISS", "COSS", "CRSS", "RG"};
+    lv_obj_t *screen = g_page_containers[UI_PAGE_SINGLE];
+    lv_obj_t *path_panel;
+    lv_obj_t *control_panel;
+    lv_obj_t *result_panel;
+    lv_coord_t content_width =
+        (lv_coord_t)LCD_PIXEL_WIDTH - (2 * UI_PAGE_MARGIN);
+
+    g_ui_current_page = UI_PAGE_SINGLE;
+    g_ui_display_bias_tenths = g_ui_single_bias_tenths;
+    g_ui_display_path = g_ui_single_path;
+
+    if (g_page_built[UI_PAGE_SINGLE] != 0u)
+    {
+        UI_ActivatePage(UI_PAGE_SINGLE);
+        return;
+    }
+    path_panel = UI_CreatePanel(screen,
+                                UI_PAGE_MARGIN,
+                                68,
+                                content_width,
+                                76,
+                                UI_COLOR_SURFACE_LIGHT,
+                                14);
+    UI_CreatePathButtons(path_panel,
+                         content_width,
+                         path_names,
+                         g_single_path_actions,
+                         4u);
+
+    control_panel = UI_CreatePanel(screen,
+                                   UI_PAGE_MARGIN,
+                                   156,
+                                   300,
+                                   420,
+                                   UI_COLOR_SURFACE_LIGHT,
+                                   16);
+    lv_obj_set_style_border_color(control_panel,
+                                  lv_color_hex(UI_COLOR_BLUE),
+                                  LV_PART_MAIN);
+    UI_CreateText(control_panel, "测量设置", &ui_font_cn_28,
+                  UI_COLOR_TEXT, 20, 18, 260, 38, LV_TEXT_ALIGN_CENTER);
+    UI_CreateText(control_panel, "设置目标偏压后开始测量",
+                  &ui_font_cn_20, UI_COLOR_TEXT_MUTED,
+                  20, 62, 260, 30, LV_TEXT_ALIGN_CENTER);
+    {
+        lv_obj_t *bias_button =
+            UI_CreateButton(control_panel,
+                            "偏压设置:0.1 V",
+                            UI_COLOR_BLUE,
+                            20,
+                            108,
+                            260,
+                            58,
+                            UI_BiasOpenEvent,
+                            (void *)(uintptr_t)UI_BIAS_TARGET_SINGLE);
+
+        g_single_bias_value_label = lv_obj_get_child(bias_button, 0);
+        UI_UpdateSingleBiasLabel();
+    }
+    UI_CreateButton(control_panel,
+                    "开始单点测量",
+                    UI_COLOR_GREEN,
+                    20,
+                    322,
+                    260,
+                    72,
+                    UI_SimpleActionEvent,
+                    (void *)&g_single_measure_action);
+
+    result_panel = UI_CreatePanel(screen,
+                                  UI_PAGE_MARGIN + 312,
+                                  156,
+                                  content_width - 312,
+                                  420,
+                                  UI_COLOR_SURFACE_LIGHT,
+                                  16);
+    lv_obj_set_style_border_color(result_panel,
+                                  lv_color_hex(UI_COLOR_CYAN),
+                                  LV_PART_MAIN);
+    UI_CreateText(result_panel, "实时测量结果", &ui_font_cn_28,
+                  UI_COLOR_TEXT, 26, 22, content_width - 364, 38,
+                  LV_TEXT_ALIGN_CENTER);
+    g_single_result_label =
+        UI_CreateText(result_panel, "Cs  -- pF\nCp  -- pF\nD   --",
+                      &ui_font_cn_28, UI_COLOR_TEXT,
+                      34, 92, content_width - 380, 202,
+                      LV_TEXT_ALIGN_LEFT);
+    g_single_result_note_label =
+        UI_CreateText(result_panel, "尚未读取测量结果", &ui_font_cn_20,
+                      UI_COLOR_TEXT_MUTED, 34, 344,
+                      content_width - 380, 30, LV_TEXT_ALIGN_CENTER);
+
+    g_page_built[UI_PAGE_SINGLE] = 1u;
+    UI_ActivatePage(UI_PAGE_SINGLE);
+}
+
+static void UI_ShowMeasureAll(void)
+{
+    lv_obj_t *screen = g_page_containers[UI_PAGE_MEASURE_ALL];
+    lv_obj_t *setting_panel;
+    lv_coord_t content_width =
+        (lv_coord_t)LCD_PIXEL_WIDTH - (2 * UI_PAGE_MARGIN);
+    lv_coord_t card_gap = 16;
+    lv_coord_t card_width = (content_width - (2 * card_gap)) / 3;
+    uint32_t index;
+
+    g_ui_current_page = UI_PAGE_MEASURE_ALL;
+    g_ui_display_bias_tenths = g_ui_measure_all_bias_tenths;
+    g_ui_display_path = UI_DISPLAY_PATH_ALL;
+
+    if (g_page_built[UI_PAGE_MEASURE_ALL] != 0u)
+    {
+        UI_ActivatePage(UI_PAGE_MEASURE_ALL);
+        return;
+    }
+    setting_panel = UI_CreatePanel(screen,
+                                   UI_PAGE_MARGIN,
+                                   68,
+                                   content_width,
+                                   84,
+                                   UI_COLOR_SURFACE_LIGHT,
+                                   16);
+    lv_obj_set_style_border_color(setting_panel,
+                                  lv_color_hex(UI_COLOR_BLUE),
+                                  LV_PART_MAIN);
+    {
+        lv_obj_t *bias_button =
+            UI_CreateButton(setting_panel,
+                            "统一偏压:0.1 V",
+                            UI_COLOR_BLUE,
+                            22,
+                            12,
+                            290,
+                            58,
+                            UI_BiasOpenEvent,
+                            (void *)(uintptr_t)UI_BIAS_TARGET_MEASURE_ALL);
+
+        g_measure_all_bias_value_label = lv_obj_get_child(bias_button, 0);
+        UI_UpdateMeasureAllBiasLabel();
+    }
+    UI_CreateText(setting_panel, "统一偏压测量 CISS / COSS / CRSS",
+                  &ui_font_cn_20, UI_COLOR_TEXT_MUTED,
+                  330, 26, content_width - 660, 30, LV_TEXT_ALIGN_CENTER);
+    UI_CreateButton(setting_panel,
+                    "开始一键测量",
+                    UI_COLOR_GREEN,
+                    content_width - 312,
+                    12,
+                    290,
+                    58,
+                    UI_SimpleActionEvent,
+                    (void *)&g_measure_all_action);
+
+    for (index = 0u; index < 3u; ++index)
+    {
+        static const char *const empty_text[] =
+        {
+            "CISS\n\nCs  -- pF\nCp  -- pF\nD   --",
+            "COSS\n\nCs  -- pF\nCp  -- pF\nD   --",
+            "CRSS\n\nCs  -- pF\nCp  -- pF\nD   --"
+        };
+        static const uint32_t colors[] =
+            {UI_COLOR_BLUE, UI_COLOR_GREEN, UI_COLOR_ORANGE};
+        lv_obj_t *card = UI_CreatePanel(
+            screen,
+            UI_PAGE_MARGIN + (lv_coord_t)index * (card_width + card_gap),
+            166,
+            card_width,
+            410,
+            UI_COLOR_SURFACE_LIGHT,
+            18);
+
+        lv_obj_set_style_border_color(card, lv_color_hex(colors[index]),
+                                      LV_PART_MAIN);
+        lv_obj_set_style_border_width(card, 2, LV_PART_MAIN);
+        g_all_result_labels[index] =
+            UI_CreateText(card, empty_text[index], &ui_font_cn_28,
+                          UI_COLOR_TEXT, 20, 38, card_width - 40, 278,
+                          LV_TEXT_ALIGN_CENTER);
+    }
+
+    g_page_built[UI_PAGE_MEASURE_ALL] = 1u;
+    UI_ActivatePage(UI_PAGE_MEASURE_ALL);
+}
+
+static lv_obj_t *UI_CreateSweepSubpageContainer(lv_obj_t *parent,
+                                                 lv_coord_t x)
+{
+    lv_obj_t *container = lv_obj_create(parent);
+
+    lv_obj_set_pos(container, x, UI_COMMON_HEADER_HEIGHT);
+    lv_obj_set_size(container,
+                    (lv_coord_t)LCD_PIXEL_WIDTH,
+                    (lv_coord_t)LCD_PIXEL_HEIGHT -
+                    UI_COMMON_HEADER_HEIGHT);
+    lv_obj_clear_flag(container, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_color(container,
+                              lv_color_hex(UI_COLOR_BACKGROUND),
+                              LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(container, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_border_width(container, 0, LV_PART_MAIN);
+    lv_obj_set_style_radius(container, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(container, 0, LV_PART_MAIN);
+    return container;
+}
+
+static void UI_EngineeringVoltageStepEvent(lv_event_t *event)
+{
+    uint32_t increment;
+
+    if ((event == NULL) ||
+        (lv_event_get_code(event) != LV_EVENT_CLICKED) ||
+        (g_sweep_subpage_animating != 0u))
+    {
+        return;
+    }
+    increment = (uint32_t)(uintptr_t)lv_event_get_user_data(event);
+    if (increment != 0u)
+    {
+        if (g_ui_analysis_voltage_tenths <
+            g_ui_analysis_voltage_max_tenths)
+        {
+            ++g_ui_analysis_voltage_tenths;
+        }
+    }
+    else if (g_ui_analysis_voltage_tenths > UI_BIAS_MIN_TENTHS)
+    {
+        --g_ui_analysis_voltage_tenths;
+    }
+    UI_UpdateEngineeringPage();
+}
+
+static void UI_EngineeringSliderEvent(lv_event_t *event)
+{
+    lv_event_code_t code;
+    lv_indev_t *input_device;
+    lv_point_t point;
+    lv_coord_t width;
+    int32_t relative_x;
+    uint32_t span;
+
+    if ((event == NULL) || (g_engineering_slider_track == NULL) ||
+        (g_sweep_subpage_animating != 0u))
+    {
+        return;
+    }
+    code = lv_event_get_code(event);
+    if ((code != LV_EVENT_PRESSED) && (code != LV_EVENT_PRESSING))
+    {
+        return;
+    }
+    input_device = lv_indev_get_act();
+    if (input_device == NULL)
+    {
+        return;
+    }
+    lv_indev_get_point(input_device, &point);
+    width = lv_obj_get_width(g_engineering_slider_track);
+    if (width <= 1)
+    {
+        return;
+    }
+    relative_x = (int32_t)point.x -
+                 (int32_t)g_engineering_slider_track->coords.x1;
+    if (relative_x < 0)
+    {
+        relative_x = 0;
+    }
+    else if (relative_x > (width - 1))
+    {
+        relative_x = width - 1;
+    }
+    span = (g_ui_analysis_voltage_max_tenths > UI_BIAS_MIN_TENTHS) ?
+           (g_ui_analysis_voltage_max_tenths - UI_BIAS_MIN_TENTHS) : 0u;
+    g_ui_analysis_voltage_tenths = UI_BIAS_MIN_TENTHS;
+    if (span != 0u)
+    {
+        g_ui_analysis_voltage_tenths +=
+            (uint32_t)(((uint64_t)span * (uint32_t)relative_x +
+                        (uint32_t)(width - 1) / 2u) /
+                       (uint32_t)(width - 1));
+    }
+    UI_UpdateEngineeringPage();
+}
+
+static void UI_UpdateEngineeringQRCode(void)
+{
+    const char *qr_data = (g_engineering_ai_model_ready != 0u) ?
+                          g_engineering_ai_model_url :
+                          g_engineering_demo_url;
+    lv_res_t result;
+
+    if (g_engineering_qr_mode_label != NULL)
+    {
+        lv_label_set_text(g_engineering_qr_mode_label,
+                          (g_engineering_ai_model_ready != 0u) ?
+                          "MODEL QR" : "DEMO QR");
+    }
+    if (g_engineering_qr_status_label != NULL)
+    {
+        lv_label_set_text(g_engineering_qr_status_label,
+                          (g_engineering_ai_model_ready != 0u) ?
+                          "SCAN QR TO GET SPICE" :
+                          "WAIT FOR 3-PATH SWEEP");
+        lv_obj_set_style_text_color(
+            g_engineering_qr_status_label,
+            lv_color_hex((g_engineering_ai_model_ready != 0u) ?
+                         UI_COLOR_GREEN : UI_COLOR_ORANGE),
+            LV_PART_MAIN);
+    }
+    if (g_engineering_qr_model_label != NULL)
+    {
+        lv_label_set_text(g_engineering_qr_model_label,
+                          (g_engineering_ai_model_ready != 0u) ?
+                          "LIVE / MEASURED / PHYSICAL" :
+                          "DEMO / STM32H7R7");
+    }
+    if (g_engineering_qrcode == NULL)
+    {
+        return;
+    }
+
+    result = lv_qrcode_update(g_engineering_qrcode, qr_data,
+                              (uint32_t)strlen(qr_data));
+    if (result == LV_RES_OK)
+    {
+        lv_obj_clear_flag(g_engineering_qrcode, LV_OBJ_FLAG_HIDDEN);
+    }
+    else
+    {
+        lv_obj_add_flag(g_engineering_qrcode, LV_OBJ_FLAG_HIDDEN);
+        if (g_engineering_qr_status_label != NULL)
+        {
+            lv_label_set_text(g_engineering_qr_status_label,
+                              "QR RENDER ERROR");
+            lv_obj_set_style_text_color(g_engineering_qr_status_label,
+                                        lv_color_hex(UI_COLOR_RED),
+                                        LV_PART_MAIN);
+        }
+    }
+}
+
+static void UI_UpdateEngineeringQualityLabel(void)
+{
+    const char *text = "质量:等待扫压";
+    uint32_t color = UI_COLOR_TEXT_MUTED;
+
+    if (g_engineering_quality_label == NULL)
+    {
+        return;
+    }
+    switch (g_engineering_quality_state)
+    {
+        case UI_DEMO_AI_QUALITY_TRUSTED:
+            text = "质量:可信";
+            color = UI_COLOR_GREEN;
+            break;
+        case UI_DEMO_AI_QUALITY_UNCERTAIN:
+            text = "质量:不确定";
+            color = UI_COLOR_ORANGE;
+            break;
+        case UI_DEMO_AI_QUALITY_ANOMALY:
+            text = "质量:异常";
+            color = UI_COLOR_RED;
+            break;
+        case UI_DEMO_AI_QUALITY_ERROR:
+            text = "质量:检测失败";
+            color = UI_COLOR_TEXT_MUTED;
+            break;
+        case UI_DEMO_AI_QUALITY_WAITING:
+        default:
+            break;
+    }
+    lv_label_set_text(g_engineering_quality_label, text);
+    lv_obj_set_style_text_color(g_engineering_quality_label,
+                                lv_color_hex(color), LV_PART_MAIN);
+}
+
+static lv_obj_t *UI_CreateEngineeringParameterCard(lv_obj_t *parent,
+                                                    const char *name,
+                                                    lv_coord_t x,
+                                                    lv_coord_t y,
+                                                    uint32_t accent_color)
+{
+    lv_obj_t *card = UI_CreatePanel(parent, x, y, 270, 94,
+                                    UI_COLOR_SURFACE_LIGHT, 14);
+    lv_obj_t *accent = lv_obj_create(card);
+
+    lv_obj_set_pos(accent, 0, 0);
+    lv_obj_set_size(accent, 5, 94);
+    lv_obj_clear_flag(accent, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_color(accent, lv_color_hex(accent_color),
+                              LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(accent, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_border_width(accent, 0, LV_PART_MAIN);
+    lv_obj_set_style_radius(accent, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(accent, 0, LV_PART_MAIN);
+    UI_CreateText(card, name, &lv_font_montserrat_16,
+                  UI_COLOR_TEXT_MUTED, 18, 12, 220, 20,
+                  LV_TEXT_ALIGN_LEFT);
+    return UI_CreateText(card, "--", &lv_font_montserrat_24,
+                         UI_COLOR_TEXT, 18, 42, 234, 34,
+                         LV_TEXT_ALIGN_LEFT);
+}
+
+static void UI_CreateSweepEngineeringPage(lv_obj_t *screen)
+{
+    static const char *const parameter_names[
+        UI_ENGINEERING_PARAMETER_COUNT] =
+        {"CISS", "COSS", "CRSS", "Rg", "Qoss", "Eoss"};
+    static const uint32_t parameter_colors[
+        UI_ENGINEERING_PARAMETER_COUNT] =
+        {UI_COLOR_BLUE, UI_COLOR_GREEN, UI_COLOR_ORANGE,
+         UI_COLOR_PURPLE, UI_COLOR_CYAN, UI_COLOR_RED};
+    lv_obj_t *left_panel;
+    lv_obj_t *right_panel;
+    lv_obj_t *analysis_button;
+    lv_obj_t *qr_background;
+    lv_obj_t *back_zone;
+    uint32_t index;
+
+    g_sweep_engineering_page = UI_CreateSweepSubpageContainer(
+        screen, (lv_coord_t)LCD_PIXEL_WIDTH);
+    left_panel = UI_CreatePanel(g_sweep_engineering_page,
+                                12, 6, 610, 536,
+                                UI_COLOR_SURFACE, 16);
+    right_panel = UI_CreatePanel(g_sweep_engineering_page,
+                                 634, 6, 378, 536,
+                                 UI_COLOR_SURFACE, 16);
+    lv_obj_set_style_border_color(left_panel,
+                                  lv_color_hex(UI_COLOR_BLUE),
+                                  LV_PART_MAIN);
+    lv_obj_set_style_border_color(right_panel,
+                                  lv_color_hex(UI_COLOR_PURPLE),
+                                  LV_PART_MAIN);
+
+    UI_CreateText(left_panel, "参数电压", &ui_font_cn_28,
+                  UI_COLOR_TEXT, 24, 14, 180, 38,
+                  LV_TEXT_ALIGN_LEFT);
+    g_engineering_quality_label =
+        UI_CreateText(left_panel, "质量:等待扫压", &ui_font_cn_20,
+                      UI_COLOR_TEXT_MUTED, 210, 20, 360, 28,
+                      LV_TEXT_ALIGN_RIGHT);
+    UI_UpdateEngineeringQualityLabel();
+    UI_CreateButton(left_panel, "-0.1", UI_COLOR_SURFACE_LIGHT,
+                    24, 62, 78, 58,
+                    UI_EngineeringVoltageStepEvent,
+                    (void *)(uintptr_t)0u);
+    analysis_button = UI_CreateButton(
+        left_panel, "0.1 V", UI_COLOR_BLUE,
+        116, 62, 378, 58,
+        UI_BiasOpenEvent,
+        (void *)(uintptr_t)UI_BIAS_TARGET_ANALYSIS);
+    g_engineering_analysis_value_label =
+        lv_obj_get_child(analysis_button, 0);
+    lv_obj_set_style_text_font(g_engineering_analysis_value_label,
+                               &lv_font_montserrat_24, LV_PART_MAIN);
+    UI_CreateButton(left_panel, "+0.1", UI_COLOR_SURFACE_LIGHT,
+                    508, 62, 78, 58,
+                    UI_EngineeringVoltageStepEvent,
+                    (void *)(uintptr_t)1u);
+
+    g_engineering_slider_track = UI_CreatePanel(
+        left_panel, 30, 142, 550, 18,
+        UI_COLOR_BORDER, 9);
+    lv_obj_add_flag(g_engineering_slider_track,
+                    LV_OBJ_FLAG_OVERFLOW_VISIBLE);
+    lv_obj_add_flag(g_engineering_slider_track,
+                    LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_PRESS_LOCK);
+    lv_obj_add_event_cb(g_engineering_slider_track,
+                        UI_EngineeringSliderEvent,
+                        LV_EVENT_PRESSED, NULL);
+    lv_obj_add_event_cb(g_engineering_slider_track,
+                        UI_EngineeringSliderEvent,
+                        LV_EVENT_PRESSING, NULL);
+    g_engineering_slider_knob = lv_obj_create(
+        g_engineering_slider_track);
+    lv_obj_set_pos(g_engineering_slider_knob, 0, -5);
+    lv_obj_set_size(g_engineering_slider_knob, 28, 28);
+    lv_obj_clear_flag(g_engineering_slider_knob,
+                      LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(g_engineering_slider_knob,
+                              lv_color_hex(UI_COLOR_CYAN),
+                              LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(g_engineering_slider_knob,
+                            LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_border_color(g_engineering_slider_knob,
+                                  lv_color_hex(0xffffffu),
+                                  LV_PART_MAIN);
+    lv_obj_set_style_border_width(g_engineering_slider_knob, 2,
+                                  LV_PART_MAIN);
+    lv_obj_set_style_radius(g_engineering_slider_knob,
+                            LV_RADIUS_CIRCLE, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(g_engineering_slider_knob, 0,
+                             LV_PART_MAIN);
+
+    for (index = 0u; index < UI_ENGINEERING_PARAMETER_COUNT; ++index)
+    {
+        lv_coord_t column = (lv_coord_t)(index % 2u);
+        lv_coord_t row = (lv_coord_t)(index / 2u);
+
+        g_engineering_parameter_value_labels[index] =
+            UI_CreateEngineeringParameterCard(
+                left_panel, parameter_names[index],
+                24 + column * 286,
+                184 + row * 108,
+                parameter_colors[index]);
+    }
+
+    UI_CreateText(right_panel, "AI-CV2SPICE", &lv_font_montserrat_24,
+                  UI_COLOR_TEXT, 20, 16, 338, 34,
+                  LV_TEXT_ALIGN_CENTER);
+    g_engineering_qr_mode_label =
+        UI_CreateText(right_panel, "DEMO QR", &lv_font_montserrat_16,
+                      UI_COLOR_PURPLE, 20, 48, 338, 24,
+                      LV_TEXT_ALIGN_CENTER);
+    qr_background = UI_CreatePanel(right_panel,
+                                   25, 74, 328, 328,
+                                   0xffffffu, 8);
+    lv_obj_set_style_border_color(qr_background,
+                                  lv_color_hex(0xffffffu),
+                                  LV_PART_MAIN);
+    g_engineering_qrcode = lv_qrcode_create(
+        qr_background, UI_ENGINEERING_QR_SIZE,
+        lv_color_hex(0x000000u), lv_color_hex(0xffffffu));
+    lv_obj_set_pos(g_engineering_qrcode, 20, 20);
+    g_engineering_qr_status_label =
+        UI_CreateText(right_panel,
+                      "WAIT FOR 3-PATH SWEEP",
+                      &lv_font_montserrat_16, UI_COLOR_ORANGE,
+                      20, 420, 338, 28,
+                      LV_TEXT_ALIGN_CENTER);
+    g_engineering_qr_model_label =
+        UI_CreateText(right_panel,
+                      "DEMO / STM32H7R7",
+                      &lv_font_montserrat_16, UI_COLOR_TEXT_MUTED,
+                      20, 458, 338, 24,
+                      LV_TEXT_ALIGN_CENTER);
+    UI_UpdateEngineeringQRCode();
+
+    back_zone = lv_obj_create(g_sweep_engineering_page);
+    lv_obj_set_pos(back_zone, 0, 0);
+    lv_obj_set_size(back_zone, 28,
+                    (lv_coord_t)LCD_PIXEL_HEIGHT -
+                    UI_COMMON_HEADER_HEIGHT);
+    lv_obj_clear_flag(back_zone, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(back_zone,
+                    LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_PRESS_LOCK);
+    lv_obj_set_style_bg_opa(back_zone, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_border_width(back_zone, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(back_zone, 0, LV_PART_MAIN);
+    lv_obj_add_event_cb(back_zone, UI_EngineeringBackSwipeEvent,
+                        LV_EVENT_PRESSED, NULL);
+    lv_obj_add_event_cb(back_zone, UI_EngineeringBackSwipeEvent,
+                        LV_EVENT_PRESSING, NULL);
+    lv_obj_add_event_cb(back_zone, UI_EngineeringBackSwipeEvent,
+                        LV_EVENT_RELEASED, NULL);
+    lv_obj_add_event_cb(back_zone, UI_EngineeringBackSwipeEvent,
+                        LV_EVENT_PRESS_LOST, NULL);
+
+    UI_UpdateEngineeringPage();
+    lv_obj_add_flag(g_sweep_engineering_page, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void UI_ShowSweep(void)
+{
+    static const char *const path_names[] =
+        {"CISS", "COSS", "CRSS", "全部"};
+    static const char *const legend_names[] =
+        {"CISS", "COSS", "CRSS"};
+    lv_obj_t *screen = g_page_containers[UI_PAGE_SWEEP];
+    lv_obj_t *chart_panel;
+    lv_obj_t *legend_panel;
+    lv_coord_t chart_width = (lv_coord_t)LCD_PIXEL_WIDTH - 16;
+    lv_coord_t chart_height = (lv_coord_t)LCD_PIXEL_HEIGHT -
+                              UI_COMMON_HEADER_HEIGHT - 40;
+    lv_coord_t control_button_width = UI_SWEEP_DRAWER_WIDTH - 36;
+    uint32_t index;
+
+    g_ui_current_page = UI_PAGE_SWEEP;
+    g_ui_display_bias_tenths = g_ui_sweep_end_tenths;
+    g_ui_display_path = (g_ui_sweep_path == 3u) ?
+                        UI_DISPLAY_PATH_ALL : g_ui_sweep_path;
+
+    if (g_page_built[UI_PAGE_SWEEP] != 0u)
+    {
+        UI_SetSweepDrawerOpen(false);
+        UI_ActivatePage(UI_PAGE_SWEEP);
+        UI_SetSweepEngineeringPage(false, false);
+        return;
+    }
+    g_sweep_curve_page = UI_CreateSweepSubpageContainer(screen, 0);
+    UI_CreateSweepEngineeringPage(screen);
+    chart_panel = UI_CreatePanel(g_sweep_curve_page,
+                                 8,
+                                 6,
+                                 chart_width,
+                                 chart_height,
+                                 0x050505u,
+                                 2);
+    lv_obj_set_style_border_color(chart_panel,
+                                  lv_color_hex(0xffffffu),
+                                  LV_PART_MAIN);
+    lv_obj_set_style_border_width(chart_panel, 1, LV_PART_MAIN);
+    UI_CreateText(chart_panel,
+                  "Cs / pF (log)",
+                  &lv_font_montserrat_16, 0xffffffu,
+                  8, 6, 132, 22, LV_TEXT_ALIGN_LEFT);
+    legend_panel = UI_CreatePanel(chart_panel,
+                                  (chart_width - 474) / 2,
+                                  4,
+                                  474,
+                                  30,
+                                  0x080808u,
+                                  0);
+    lv_obj_set_style_border_color(legend_panel,
+                                  lv_color_hex(0x263747u),
+                                  LV_PART_MAIN);
+    lv_obj_set_style_border_width(legend_panel, 1, LV_PART_MAIN);
+    for (index = 0u; index < 3u; ++index)
+    {
+        lv_obj_t *line = lv_obj_create(legend_panel);
+        lv_coord_t item_x = 18 + (lv_coord_t)index * 150;
+
+        lv_obj_set_pos(line, item_x, 13);
+        lv_obj_set_size(line, 34, 3);
+        lv_obj_clear_flag(line, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_style_bg_color(line,
+                                  lv_color_hex(g_sweep_series_colors[index]),
+                                  LV_PART_MAIN);
+        lv_obj_set_style_bg_opa(line, LV_OPA_COVER, LV_PART_MAIN);
+        lv_obj_set_style_border_width(line, 0, LV_PART_MAIN);
+        lv_obj_set_style_radius(line, 0, LV_PART_MAIN);
+        lv_obj_set_style_pad_all(line, 0, LV_PART_MAIN);
+        UI_CreateText(legend_panel, legend_names[index],
+                      &lv_font_montserrat_16, 0xffffffu,
+                      item_x + 42, 4, 76, 20,
+                      LV_TEXT_ALIGN_LEFT);
+    }
+    g_sweep_chart = lv_chart_create(chart_panel);
+    lv_obj_set_pos(g_sweep_chart, 64, 42);
+    lv_obj_set_size(g_sweep_chart, chart_width - 82, 402);
+    lv_chart_set_type(g_sweep_chart, LV_CHART_TYPE_SCATTER);
+    lv_chart_set_point_count(g_sweep_chart, UI_SWEEP_RENDER_POINTS);
+    lv_chart_set_range(g_sweep_chart, LV_CHART_AXIS_PRIMARY_X,
+                       g_sweep_x_min_log_milli,
+                       g_sweep_x_max_log_milli);
+    lv_chart_set_range(g_sweep_chart, LV_CHART_AXIS_PRIMARY_Y,
+                       g_sweep_y_min_log_milli,
+                       g_sweep_y_max_log_milli);
+    lv_chart_set_div_line_count(g_sweep_chart, 0u, 0u);
+    lv_chart_set_axis_tick(g_sweep_chart,
+                           LV_CHART_AXIS_PRIMARY_X,
+                           6, 3, 4,
+                           1,
+                           true, 38);
+    lv_chart_set_axis_tick(g_sweep_chart,
+                           LV_CHART_AXIS_PRIMARY_Y,
+                           6, 3, 5,
+                           1,
+                           true, 58);
+    lv_obj_set_style_bg_color(g_sweep_chart,
+                              lv_color_hex(0x050505u),
+                              LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(g_sweep_chart, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_border_color(g_sweep_chart,
+                                  lv_color_hex(0xffffffu),
+                                  LV_PART_MAIN);
+    lv_obj_set_style_border_width(g_sweep_chart, 1, LV_PART_MAIN);
+    lv_obj_set_style_line_color(g_sweep_chart,
+                                lv_color_hex(0xffffffu),
+                                LV_PART_MAIN);
+    lv_obj_set_style_line_width(g_sweep_chart, 2, LV_PART_ITEMS);
+    lv_obj_set_style_size(g_sweep_chart, 0, LV_PART_INDICATOR);
+    lv_obj_set_style_text_font(g_sweep_chart, &lv_font_montserrat_16,
+                               LV_PART_TICKS);
+    lv_obj_set_style_text_color(g_sweep_chart, lv_color_hex(0xffffffu),
+                                LV_PART_TICKS);
+    lv_obj_set_style_line_color(g_sweep_chart, lv_color_hex(0xffffffu),
+                                LV_PART_TICKS);
+    lv_obj_set_style_line_opa(g_sweep_chart, LV_OPA_COVER,
+                              LV_PART_TICKS);
+    lv_obj_set_style_pad_left(g_sweep_chart, 5, LV_PART_TICKS);
+    lv_obj_set_style_pad_bottom(g_sweep_chart, 4, LV_PART_TICKS);
+    lv_obj_add_flag(g_sweep_chart, LV_OBJ_FLAG_CLICKABLE |
+                                   LV_OBJ_FLAG_PRESS_LOCK);
+    lv_obj_clear_flag(g_sweep_chart, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(g_sweep_chart, UI_SweepChartDrawEvent,
+                        LV_EVENT_DRAW_PART_BEGIN, NULL);
+    lv_obj_add_event_cb(g_sweep_chart, UI_SweepChartProbeDrawEvent,
+                        LV_EVENT_DRAW_POST, NULL);
+    lv_obj_add_event_cb(g_sweep_chart, UI_SweepChartTouchEvent,
+                        LV_EVENT_PRESSED, NULL);
+    lv_obj_add_event_cb(g_sweep_chart, UI_SweepChartTouchEvent,
+                        LV_EVENT_PRESSING, NULL);
+    lv_obj_add_event_cb(g_sweep_chart, UI_SweepChartTouchEvent,
+                        LV_EVENT_RELEASED, NULL);
+    lv_obj_add_event_cb(g_sweep_chart, UI_SweepChartTouchEvent,
+                        LV_EVENT_PRESS_LOST, NULL);
+    g_sweep_series[0] =
+        lv_chart_add_series(g_sweep_chart,
+                            lv_color_hex(g_sweep_series_colors[0]),
+                            LV_CHART_AXIS_PRIMARY_Y);
+    g_sweep_series[1] =
+        lv_chart_add_series(g_sweep_chart,
+                            lv_color_hex(g_sweep_series_colors[1]),
+                            LV_CHART_AXIS_PRIMARY_Y);
+    g_sweep_series[2] =
+        lv_chart_add_series(g_sweep_chart,
+                            lv_color_hex(g_sweep_series_colors[2]),
+                            LV_CHART_AXIS_PRIMARY_Y);
+    UI_CreateText(chart_panel,
+                  "Vd / V (log)",
+                  &lv_font_montserrat_16, 0xffffffu,
+                  64, chart_height - 30, chart_width - 82, 22,
+                  LV_TEXT_ALIGN_CENTER);
+
+    g_sweep_progress_bar =
+        UI_CreatePanel(g_sweep_curve_page,
+                       8,
+                       (lv_coord_t)LCD_PIXEL_HEIGHT -
+                       UI_COMMON_HEADER_HEIGHT - 28,
+                       (lv_coord_t)LCD_PIXEL_WIDTH - 16,
+                       22,
+                       0xadb8c2u,
+                       1);
+    lv_obj_set_style_border_color(g_sweep_progress_bar,
+                                  lv_color_hex(0x4a5c6du),
+                                  LV_PART_MAIN);
+    g_sweep_progress_indicator = lv_obj_create(g_sweep_progress_bar);
+    lv_obj_set_pos(g_sweep_progress_indicator, 1, 1);
+    lv_obj_set_size(g_sweep_progress_indicator, 1, 20);
+    lv_obj_clear_flag(g_sweep_progress_indicator, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_color(g_sweep_progress_indicator,
+                              lv_color_hex(0x4f91c7u),
+                              LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(g_sweep_progress_indicator, LV_OPA_COVER,
+                            LV_PART_MAIN);
+    lv_obj_set_style_border_width(g_sweep_progress_indicator, 0,
+                                  LV_PART_MAIN);
+    lv_obj_set_style_radius(g_sweep_progress_indicator, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(g_sweep_progress_indicator, 0, LV_PART_MAIN);
+    UI_SetSweepProgress(0u);
+    g_sweep_progress_label =
+        UI_CreateText(g_sweep_curve_page,
+                      "等待主控发送扫压数据",
+                      &ui_font_cn_20, 0xffffffu,
+                      16, (lv_coord_t)LCD_PIXEL_HEIGHT -
+                      UI_COMMON_HEADER_HEIGHT - 27,
+                      (lv_coord_t)LCD_PIXEL_WIDTH - 32, 20,
+                      LV_TEXT_ALIGN_CENTER);
+
+    g_sweep_control_panel = UI_CreatePanel(
+        g_sweep_curve_page,
+        (lv_coord_t)LCD_PIXEL_WIDTH - UI_SWEEP_DRAWER_WIDTH - 8,
+        6,
+        UI_SWEEP_DRAWER_WIDTH,
+        chart_height,
+        0x5f6464u,
+        2);
+    lv_obj_set_style_border_color(g_sweep_control_panel,
+                                  lv_color_hex(UI_COLOR_PURPLE),
+                                  LV_PART_MAIN);
+    lv_obj_set_style_border_width(g_sweep_control_panel, 2, LV_PART_MAIN);
+    UI_CreateText(g_sweep_control_panel, "扫压设置", &ui_font_cn_20,
+                  UI_COLOR_TEXT, 12, 8, 112, 30,
+                  LV_TEXT_ALIGN_LEFT);
+    UI_CreateButton(g_sweep_control_panel,
+                    "关闭",
+                    UI_COLOR_SURFACE,
+                    136,
+                    6,
+                    68,
+                    36,
+                    UI_SweepDrawerEvent,
+                    (void *)(uintptr_t)0u);
+
+    for (index = 0u; index < 4u; ++index)
+    {
+        g_sweep_path_buttons[index] =
+            UI_CreateButton(g_sweep_control_panel,
+                            path_names[index],
+                            UI_COLOR_SURFACE,
+                            18,
+                            52 + (lv_coord_t)index * 48,
+                            control_button_width,
+                            42,
+                            UI_SimpleActionEvent,
+                            (void *)&g_sweep_path_actions[index]);
+    }
+    UI_UpdateSweepPathStyle();
+
+    {
+        lv_obj_t *bias_button =
+            UI_CreateButton(g_sweep_control_panel,
+                            "终止电压:0.1 V",
+                            UI_COLOR_BLUE,
+                            18,
+                            252,
+                            control_button_width,
+                            52,
+                            UI_BiasOpenEvent,
+                            (void *)(uintptr_t)UI_BIAS_TARGET_SWEEP);
+
+        g_sweep_bias_value_label = lv_obj_get_child(bias_button, 0);
+        UI_UpdateSweepBiasLabel();
+    }
+
+    UI_CreateButton(g_sweep_control_panel,
+                    "开始扫压",
+                    UI_COLOR_GREEN,
+                    18,
+                    330,
+                    control_button_width,
+                    52,
+                    UI_SimpleActionEvent,
+                    (void *)&g_sweep_start_action);
+    UI_CreateButton(g_sweep_control_panel,
+                    "停止扫压",
+                    UI_COLOR_RED,
+                    18,
+                    394,
+                    control_button_width,
+                    52,
+                    UI_SimpleActionEvent,
+                    (void *)&g_sweep_stop_action);
+    UI_CreateText(g_sweep_control_panel,
+                  "关闭设置后曲线全屏显示",
+                  &ui_font_cn_20, UI_COLOR_STATUS,
+                  14, 458, UI_SWEEP_DRAWER_WIDTH - 28, 42,
+                  LV_TEXT_ALIGN_CENTER);
+
+    g_sweep_settings_button =
+        UI_CreateButton(g_sweep_curve_page,
+                        "设置",
+                        UI_COLOR_BLUE,
+                        (lv_coord_t)LCD_PIXEL_WIDTH - 82,
+                        12,
+                        70,
+                        40,
+                        UI_SweepDrawerEvent,
+                        (void *)(uintptr_t)1u);
+    g_sweep_engineering_button =
+        UI_CreateButton(g_sweep_curve_page,
+                        "参数页面 >",
+                        UI_COLOR_BLUE,
+                        (lv_coord_t)LCD_PIXEL_WIDTH,
+                        12,
+                        UI_SWEEP_ENGINEERING_BUTTON_WIDTH,
+                        UI_SWEEP_ENGINEERING_BUTTON_HEIGHT,
+                        UI_SweepEngineeringButtonEvent,
+                        NULL);
+    lv_obj_set_style_radius(g_sweep_engineering_button,
+                            UI_SWEEP_ENGINEERING_BUTTON_HEIGHT / 2,
+                            LV_PART_MAIN);
+    lv_obj_add_flag(g_sweep_engineering_button, LV_OBJ_FLAG_HIDDEN);
+    UI_RebuildSweepChart();
+    UI_SetSweepDrawerOpen(false);
+
+    g_page_built[UI_PAGE_SWEEP] = 1u;
+    UI_ActivatePage(UI_PAGE_SWEEP);
+    UI_SetSweepEngineeringPage(false, false);
+}
+
+uint32_t UI_Demo_Init(void)
+{
+    lv_obj_t *root_screen;
+    uint32_t index;
+
+    if (lv_scr_act() == NULL)
+    {
+        return UI_DEMO_ERROR;
+    }
+    if (g_sweep_chart_refresh_timer != NULL)
+    {
+        lv_timer_del(g_sweep_chart_refresh_timer);
+        g_sweep_chart_refresh_timer = NULL;
+    }
+
+    g_ui_click_count = 0u;
+    g_ui_last_button = 0u;
+    g_ui_current_page = UI_PAGE_HOME;
+    g_ui_reset_request_count = 0u;
+    g_ui_single_path = UI_SINGLE_PATH_CISS;
+    g_ui_sweep_path = 0u;
+    g_ui_single_bias_tenths = UI_BIAS_MIN_TENTHS;
+    g_ui_measure_all_bias_tenths = UI_BIAS_MIN_TENTHS;
+    g_ui_sweep_end_tenths = UI_BIAS_MIN_TENTHS;
+    g_ui_analysis_voltage_tenths = UI_BIAS_MIN_TENTHS;
+    g_ui_analysis_voltage_max_tenths = UI_BIAS_MIN_TENTHS;
+    g_ui_display_bias_tenths = UI_BIAS_MIN_TENTHS;
+    g_ui_display_path = UI_SINGLE_PATH_CISS;
+    g_ui_immediate_refresh_enabled = 0u;
+    g_keypad_target = UI_BIAS_TARGET_SINGLE;
+    g_status_label = NULL;
+    g_modal_overlay = NULL;
+    g_common_header = NULL;
+    g_header_back_button = NULL;
+    g_header_title_label = NULL;
+    g_header_connection_label = NULL;
+    g_header_bias_label = NULL;
+    g_header_path_label = NULL;
+    g_header_operation_label = NULL;
+    g_keypad_overlay = NULL;
+    g_keypad_title_label = NULL;
+    g_single_bias_value_label = NULL;
+    g_measure_all_bias_value_label = NULL;
+    g_sweep_bias_value_label = NULL;
+    g_sweep_chart = NULL;
+    g_sweep_progress_label = NULL;
+    g_sweep_progress_bar = NULL;
+    g_sweep_progress_indicator = NULL;
+    g_sweep_control_panel = NULL;
+    g_sweep_settings_button = NULL;
+    g_sweep_engineering_button = NULL;
+    g_sweep_curve_page = NULL;
+    g_sweep_engineering_page = NULL;
+    g_engineering_analysis_value_label = NULL;
+    g_engineering_quality_label = NULL;
+    g_engineering_slider_track = NULL;
+    g_engineering_slider_knob = NULL;
+    g_engineering_qrcode = NULL;
+    g_engineering_qr_mode_label = NULL;
+    g_engineering_qr_status_label = NULL;
+    g_engineering_qr_model_label = NULL;
+    g_keypad_value_label = NULL;
+    g_keypad_note_label = NULL;
+    (void)memset(g_page_containers, 0, sizeof(g_page_containers));
+    (void)memset(g_page_built, 0, sizeof(g_page_built));
+    (void)memset(g_single_path_buttons, 0, sizeof(g_single_path_buttons));
+    (void)memset(g_sweep_path_buttons, 0, sizeof(g_sweep_path_buttons));
+    (void)memset(g_all_result_labels, 0, sizeof(g_all_result_labels));
+    (void)memset(g_sweep_series, 0, sizeof(g_sweep_series));
+    (void)memset(g_engineering_parameter_value_labels, 0,
+                 sizeof(g_engineering_parameter_value_labels));
+    (void)memset(g_sweep_voltage, 0, sizeof(g_sweep_voltage));
+    (void)memset(g_sweep_capacitance, 0, sizeof(g_sweep_capacitance));
+    (void)memset(g_sweep_parallel_capacitance, 0,
+                 sizeof(g_sweep_parallel_capacitance));
+    (void)memset(g_sweep_dissipation, 0, sizeof(g_sweep_dissipation));
+    (void)memset(g_sweep_model_valid, 0, sizeof(g_sweep_model_valid));
+    (void)memset(g_sweep_valid, 0, sizeof(g_sweep_valid));
+    (void)memset(g_sweep_total_points, 0, sizeof(g_sweep_total_points));
+    (void)memset(g_sweep_cs_curve, 0, sizeof(g_sweep_cs_curve));
+    (void)memset(g_sweep_cp_curve, 0, sizeof(g_sweep_cp_curve));
+    (void)memset(g_sweep_d_curve, 0, sizeof(g_sweep_d_curve));
+    (void)memset(g_sweep_interpolation_ready, 0,
+                 sizeof(g_sweep_interpolation_ready));
+    (void)memset(g_keypad_buffer, 0, sizeof(g_keypad_buffer));
+    (void)strcpy(g_ui_actual_bias, "0.1V");
+    (void)strcpy(g_ui_actual_path, "CISS");
+    g_sweep_visible_mask = 0u;
+    g_sweep_probe_path = 0u;
+    g_sweep_probe_index = 0u;
+    g_sweep_probe_voltage = 0.0f;
+    g_sweep_probe_cs = 0.0f;
+    g_sweep_probe_cp = 0.0f;
+    g_sweep_probe_d = 0.0f;
+    g_sweep_probe_model_valid = 0u;
+    g_sweep_probe_interpolated = 0u;
+    g_sweep_probe_valid = 0u;
+    g_sweep_probe_tracking = 0u;
+    g_sweep_inspection_ready = 0u;
+    g_engineering_analysis_initialized = 0u;
+    g_engineering_ai_model_ready = 0u;
+    g_engineering_quality_state = UI_DEMO_AI_QUALITY_WAITING;
+    g_engineering_quality_class = 0u;
+    g_engineering_quality_clean_probability = 0.0f;
+    g_engineering_ai_model_url[0] = '\0';
+    g_sweep_last_tap_valid = 0u;
+    g_sweep_single_touch_moved = 0u;
+    g_sweep_last_tap_tick = 0u;
+    g_sweep_touch_press_point.x = 0;
+    g_sweep_touch_press_point.y = 0;
+    g_sweep_x_min_log_milli = UI_SWEEP_X_MIN_LOG_MILLI;
+    g_sweep_x_max_log_milli = UI_SWEEP_X_MAX_LOG_MILLI;
+    g_sweep_y_min_log_milli = UI_SWEEP_DEFAULT_Y_MIN_LOG_MILLI;
+    g_sweep_y_max_log_milli = UI_SWEEP_DEFAULT_Y_MAX_LOG_MILLI;
+    g_sweep_full_y_min_log_milli = UI_SWEEP_DEFAULT_Y_MIN_LOG_MILLI;
+    g_sweep_full_y_max_log_milli = UI_SWEEP_DEFAULT_Y_MAX_LOG_MILLI;
+    (void)memset(&g_sweep_gesture, 0, sizeof(g_sweep_gesture));
+    (void)memset(&g_sweep_back_swipe, 0,
+                 sizeof(g_sweep_back_swipe));
+    g_sweep_engineering_page_active = 0u;
+    g_sweep_subpage_animating = 0u;
+    g_sweep_chart_dirty = 0u;
+    g_latest_rg_ohm = 0.0f;
+    g_latest_rg_valid = 0u;
+
+    root_screen = UI_PrepareRootScreen();
+    for (index = 0u; index < 5u; ++index)
+    {
+        g_page_containers[index] = UI_CreatePageContainer(root_screen);
+    }
+    UI_CreateBiasKeypad();
+
+    UI_ShowInitialize();
+    UI_ShowSingle();
+    UI_ShowMeasureAll();
+    UI_ShowSweep();
+    UI_ShowHome();
+    g_sweep_chart_refresh_timer =
+        lv_timer_create(UI_SweepChartRefreshTimer,
+                        UI_SWEEP_CHART_REFRESH_MS,
+                        NULL);
+    g_ui_immediate_refresh_enabled = 1u;
+    return UI_DEMO_OK;
+}
+
+static void UI_RebuildSweepChart(void)
+{
+    uint32_t path;
+    int32_t minimum_y = UI_SWEEP_DEFAULT_Y_MIN_LOG_MILLI;
+    int32_t maximum_y = UI_SWEEP_DEFAULT_Y_MAX_LOG_MILLI;
+    uint32_t found_value = 0u;
+
+    if (g_sweep_chart == NULL)
+    {
+        return;
+    }
+
+    for (path = 0u; path < 3u; ++path)
+    {
+        uint32_t index;
+
+        if ((g_sweep_visible_mask & (1u << path)) == 0u)
+        {
+            continue;
+        }
+        for (index = 0u;
+             (index < g_sweep_total_points[path]) &&
+             (index < UI_SWEEP_MAX_POINTS);
+             ++index)
+        {
+            float capacitance = g_sweep_capacitance[path][index];
+            int32_t log_value;
+
+            if ((g_sweep_valid[path][index] == 0u) ||
+                !isfinite(capacitance) || (capacitance <= 0.0f))
+            {
+                continue;
+            }
+            log_value = (int32_t)(log10f(capacitance) * 1000.0f);
+            if (found_value == 0u)
+            {
+                minimum_y = log_value;
+                maximum_y = log_value;
+                found_value = 1u;
+            }
+            else
+            {
+                if (log_value < minimum_y)
+                {
+                    minimum_y = log_value;
+                }
+                if (log_value > maximum_y)
+                {
+                    maximum_y = log_value;
+                }
+            }
+        }
+    }
+
+    if (found_value != 0u)
+    {
+        minimum_y =
+            (int32_t)(floorf((float)minimum_y / 1000.0f) * 1000.0f);
+        maximum_y =
+            (int32_t)(ceilf((float)maximum_y / 1000.0f) * 1000.0f);
+        if (maximum_y <= minimum_y)
+        {
+            maximum_y = minimum_y + 1000;
+        }
+    }
+    g_sweep_full_y_min_log_milli = minimum_y;
+    g_sweep_full_y_max_log_milli = maximum_y;
+    if (g_sweep_inspection_ready == 0u)
+    {
+        g_sweep_x_min_log_milli = UI_SWEEP_X_MIN_LOG_MILLI;
+        g_sweep_x_max_log_milli = UI_SWEEP_X_MAX_LOG_MILLI;
+        g_sweep_y_min_log_milli = minimum_y;
+        g_sweep_y_max_log_milli = maximum_y;
+    }
+
+    for (path = 0u; path < 3u; ++path)
+    {
+        uint32_t index;
+        lv_chart_series_t *series = g_sweep_series[path];
+        uint32_t visible = g_sweep_visible_mask & (1u << path);
+
+        if (series == NULL)
+        {
+            continue;
+        }
+        lv_chart_hide_series(g_sweep_chart, series, visible == 0u);
+        lv_chart_set_all_value(g_sweep_chart, series, LV_CHART_POINT_NONE);
+        if (visible == 0u)
+        {
+            continue;
+        }
+
+        if (g_sweep_interpolation_ready[path] != 0u)
+        {
+            float minimum_log_voltage;
+            float maximum_log_voltage;
+
+            if (SweepInterpolation_GetLogVoltageRange(
+                    &g_sweep_cs_curve[path],
+                    &minimum_log_voltage,
+                    &maximum_log_voltage))
+            {
+                uint32_t render_index;
+
+                if (minimum_log_voltage <
+                    ((float)UI_SWEEP_X_MIN_LOG_MILLI / 1000.0f))
+                {
+                    minimum_log_voltage =
+                        (float)UI_SWEEP_X_MIN_LOG_MILLI / 1000.0f;
+                }
+                if (maximum_log_voltage >
+                    ((float)UI_SWEEP_X_MAX_LOG_MILLI / 1000.0f))
+                {
+                    maximum_log_voltage =
+                        (float)UI_SWEEP_X_MAX_LOG_MILLI / 1000.0f;
+                }
+
+                for (render_index = 0u;
+                     (render_index < UI_SWEEP_RENDER_POINTS) &&
+                     (maximum_log_voltage >= minimum_log_voltage);
+                     ++render_index)
+                {
+                    float ratio =
+                        (UI_SWEEP_RENDER_POINTS > 1u) ?
+                        ((float)render_index /
+                         (float)(UI_SWEEP_RENDER_POINTS - 1u)) : 0.0f;
+                    float log_voltage =
+                        minimum_log_voltage +
+                        ratio * (maximum_log_voltage -
+                                 minimum_log_voltage);
+                    float log_capacitance;
+
+                    if (!SweepInterpolation_EvaluateTransformed(
+                            &g_sweep_cs_curve[path], log_voltage,
+                            &log_capacitance))
+                    {
+                        continue;
+                    }
+                    lv_chart_set_next_value2(
+                        g_sweep_chart, series,
+                        (lv_coord_t)lroundf(log_voltage * 1000.0f),
+                        (lv_coord_t)lroundf(log_capacitance * 1000.0f));
+                }
+                continue;
+            }
+        }
+
+        for (index = 0u;
+             (index < g_sweep_total_points[path]) &&
+             (index < UI_SWEEP_MAX_POINTS);
+             ++index)
+        {
+            float voltage = g_sweep_voltage[path][index];
+            float capacitance = g_sweep_capacitance[path][index];
+            lv_coord_t x_value;
+            lv_coord_t y_value;
+
+            if ((g_sweep_valid[path][index] == 0u) ||
+                !isfinite(voltage) || !isfinite(capacitance) ||
+                (capacitance <= 0.0f))
+            {
+                continue;
+            }
+            if (voltage < 0.1f)
+            {
+                voltage = 0.1f;
+            }
+            x_value = (lv_coord_t)(log10f(voltage) * 1000.0f);
+            y_value = (lv_coord_t)(log10f(capacitance) * 1000.0f);
+            lv_chart_set_next_value2(g_sweep_chart, series,
+                                     x_value, y_value);
+        }
+    }
+    UI_ApplySweepViewport();
+    g_sweep_chart_dirty = 0u;
+}
+
+static void UI_RequestSweepChartRefresh(void)
+{
+    g_sweep_chart_dirty = 1u;
+    if ((g_sweep_chart_refresh_timer == NULL) &&
+        (g_ui_current_page == UI_PAGE_SWEEP) &&
+        (g_sweep_engineering_page_active == 0u))
+    {
+        UI_RebuildSweepChart();
+    }
+}
+
+static void UI_SweepChartRefreshTimer(lv_timer_t *timer)
+{
+    (void)timer;
+    if ((g_sweep_chart_dirty == 0u) ||
+        (g_ui_current_page != UI_PAGE_SWEEP) ||
+        (g_sweep_engineering_page_active != 0u) ||
+        (g_sweep_subpage_animating != 0u))
+    {
+        return;
+    }
+
+    UI_RebuildSweepChart();
+}
+
+void UI_Demo_SetConnection(uint32_t online)
+{
+    if (g_header_connection_label == NULL)
+    {
+        return;
+    }
+    lv_label_set_text(g_header_connection_label,
+                      (online != 0u) ? "主控:在线" : "主控:未连接");
+    lv_obj_set_style_text_color(g_header_connection_label,
+                                lv_color_hex((online != 0u) ?
+                                             UI_COLOR_GREEN :
+                                             UI_COLOR_ORANGE),
+                                LV_PART_MAIN);
+}
+
+void UI_Demo_SetStatusText(const char *text)
+{
+    if ((text != NULL) && (g_status_label != NULL))
+    {
+        lv_label_set_text(g_status_label, text);
+    }
+}
+
+void UI_Demo_SetActualBias(const char *bias_text)
+{
+    if (bias_text == NULL)
+    {
+        return;
+    }
+    (void)strncpy(g_ui_actual_bias, bias_text,
+                  sizeof(g_ui_actual_bias) - 1u);
+    g_ui_actual_bias[sizeof(g_ui_actual_bias) - 1u] = '\0';
+    UI_UpdateCommonStatus();
+}
+
+void UI_Demo_SetActualPath(const char *path_text)
+{
+    if (path_text == NULL)
+    {
+        return;
+    }
+    (void)strncpy(g_ui_actual_path, path_text,
+                  sizeof(g_ui_actual_path) - 1u);
+    g_ui_actual_path[sizeof(g_ui_actual_path) - 1u] = '\0';
+    UI_UpdateCommonStatus();
+}
+
+void UI_Demo_UpdateSingleCapacitance(uint32_t path,
+                                     const char *cs_text,
+                                     const char *cp_text,
+                                     const char *d_text,
+                                     uint32_t valid)
+{
+    if ((g_single_result_label == NULL) ||
+        (path != g_ui_single_path) ||
+        (cs_text == NULL) || (cp_text == NULL) || (d_text == NULL))
+    {
+        return;
+    }
+
+    lv_label_set_text_fmt(g_single_result_label,
+                          "Cs  %s pF\nCp  %s pF\nD   %s",
+                          cs_text, cp_text, d_text);
+    if (g_single_result_note_label != NULL)
+    {
+        lv_label_set_text(g_single_result_note_label,
+                          (valid != 0u) ?
+                          "测量结果有效" : "测量结果无效");
+        lv_obj_set_style_text_color(g_single_result_note_label,
+                                    lv_color_hex((valid != 0u) ?
+                                                 UI_COLOR_GREEN :
+                                                 UI_COLOR_RED),
+                                    LV_PART_MAIN);
+    }
+}
+
+void UI_Demo_UpdateAllCapacitance(uint32_t path,
+                                  const char *cs_text,
+                                  const char *cp_text,
+                                  const char *d_text,
+                                  uint32_t valid)
+{
+    static const char *const names[] = {"CISS", "COSS", "CRSS"};
+    lv_obj_t *label;
+
+    if ((path >= 3u) || (cs_text == NULL) || (cp_text == NULL) ||
+        (d_text == NULL))
+    {
+        return;
+    }
+    label = g_all_result_labels[path];
+    if (label == NULL)
+    {
+        return;
+    }
+    lv_label_set_text_fmt(label,
+                          "%s\n\nCs  %s pF\nCp  %s pF\nD   %s%s",
+                          names[path], cs_text, cp_text, d_text,
+                          (valid != 0u) ? "" : "  无效");
+    lv_obj_set_style_text_color(label,
+                                lv_color_hex((valid != 0u) ?
+                                             UI_COLOR_TEXT : UI_COLOR_RED),
+                                LV_PART_MAIN);
+}
+
+void UI_Demo_UpdateResistance(const char *resistance_text, uint32_t valid)
+{
+    if (resistance_text == NULL)
+    {
+        return;
+    }
+    if (valid != 0u)
+    {
+        float resistance;
+
+        if (UI_ParseNonnegativeDecimal(resistance_text, &resistance) &&
+            isfinite(resistance) &&
+            (resistance >= 0.0f))
+        {
+            g_latest_rg_ohm = resistance;
+            g_latest_rg_valid = 1u;
+            if (g_sweep_engineering_page_active != 0u)
+            {
+                UI_UpdateEngineeringPage();
+            }
+        }
+    }
+    if ((g_single_result_label == NULL) ||
+        (g_ui_single_path != UI_SINGLE_PATH_RG))
+    {
+        return;
+    }
+    lv_label_set_text_fmt(g_single_result_label, "RG\n%s Ω", resistance_text);
+    if (g_single_result_note_label != NULL)
+    {
+        lv_label_set_text(g_single_result_note_label,
+                          (valid != 0u) ?
+                          "电阻测量结果有效" : "电阻测量结果无效");
+        lv_obj_set_style_text_color(g_single_result_note_label,
+                                    lv_color_hex((valid != 0u) ?
+                                                 UI_COLOR_GREEN :
+                                                 UI_COLOR_RED),
+                                    LV_PART_MAIN);
+    }
+}
+
+void UI_Demo_ClearAllResults(void)
+{
+    static const char *const empty_text[] =
+    {
+        "CISS\n\nCs  -- pF\nCp  -- pF\nD   --",
+        "COSS\n\nCs  -- pF\nCp  -- pF\nD   --",
+        "CRSS\n\nCs  -- pF\nCp  -- pF\nD   --"
+    };
+    uint32_t path;
+
+    for (path = 0u; path < 3u; ++path)
+    {
+        if (g_all_result_labels[path] != NULL)
+        {
+            lv_label_set_text(g_all_result_labels[path], empty_text[path]);
+            lv_obj_set_style_text_color(g_all_result_labels[path],
+                                        lv_color_hex(UI_COLOR_TEXT),
+                                        LV_PART_MAIN);
+        }
+    }
+}
+
+void UI_Demo_ClearSweep(uint32_t path_or_all)
+{
+    uint32_t first_path;
+    uint32_t last_path;
+    uint32_t path;
+
+    if (path_or_all < 3u)
+    {
+        first_path = path_or_all;
+        last_path = path_or_all;
+        g_sweep_visible_mask = 1u << path_or_all;
+    }
+    else
+    {
+        first_path = 0u;
+        last_path = 2u;
+        g_sweep_visible_mask = 0x07u;
+    }
+
+    for (path = first_path; path <= last_path; ++path)
+    {
+        (void)memset(g_sweep_voltage[path], 0,
+                     sizeof(g_sweep_voltage[path]));
+        (void)memset(g_sweep_capacitance[path], 0,
+                     sizeof(g_sweep_capacitance[path]));
+        (void)memset(g_sweep_parallel_capacitance[path], 0,
+                     sizeof(g_sweep_parallel_capacitance[path]));
+        (void)memset(g_sweep_dissipation[path], 0,
+                     sizeof(g_sweep_dissipation[path]));
+        (void)memset(g_sweep_model_valid[path], 0,
+                     sizeof(g_sweep_model_valid[path]));
+        (void)memset(g_sweep_valid[path], 0,
+                     sizeof(g_sweep_valid[path]));
+        g_sweep_total_points[path] = 0u;
+        UI_ResetSweepInterpolation(path);
+    }
+    g_sweep_inspection_ready = 0u;
+    g_engineering_analysis_initialized = 0u;
+    UI_Demo_SetAIQualityState(UI_DEMO_AI_QUALITY_WAITING, 0u, 0.0f);
+    g_sweep_back_swipe.active = 0u;
+    UI_SetSweepEngineeringPage(false, false);
+    UI_UpdateSweepEngineeringButton(false);
+    g_sweep_last_tap_valid = 0u;
+    g_sweep_single_touch_moved = 0u;
+    g_sweep_x_min_log_milli = UI_SWEEP_X_MIN_LOG_MILLI;
+    g_sweep_x_max_log_milli = UI_SWEEP_X_MAX_LOG_MILLI;
+    (void)memset(&g_sweep_gesture, 0, sizeof(g_sweep_gesture));
+    UI_ResetSweepProbe();
+    if (g_sweep_progress_label != NULL)
+    {
+        lv_label_set_text(g_sweep_progress_label,
+                          "等待主控发送扫压数据");
+    }
+    if (g_sweep_progress_bar != NULL)
+    {
+        UI_SetSweepProgress(0u);
+    }
+    UI_RebuildSweepChart();
+}
+
+void UI_Demo_BeginSweep(uint32_t path, uint32_t total_points,
+                        uint32_t multi_path)
+{
+    if (path >= 3u)
+    {
+        return;
+    }
+    (void)memset(g_sweep_voltage[path], 0,
+                 sizeof(g_sweep_voltage[path]));
+    (void)memset(g_sweep_capacitance[path], 0,
+                 sizeof(g_sweep_capacitance[path]));
+    (void)memset(g_sweep_parallel_capacitance[path], 0,
+                 sizeof(g_sweep_parallel_capacitance[path]));
+    (void)memset(g_sweep_dissipation[path], 0,
+                 sizeof(g_sweep_dissipation[path]));
+    (void)memset(g_sweep_model_valid[path], 0,
+                 sizeof(g_sweep_model_valid[path]));
+    (void)memset(g_sweep_valid[path], 0,
+                 sizeof(g_sweep_valid[path]));
+    UI_ResetSweepInterpolation(path);
+    g_sweep_inspection_ready = 0u;
+    g_engineering_analysis_initialized = 0u;
+    UI_Demo_SetAIQualityState(UI_DEMO_AI_QUALITY_WAITING, 0u, 0.0f);
+    g_sweep_back_swipe.active = 0u;
+    UI_SetSweepEngineeringPage(false, false);
+    UI_UpdateSweepEngineeringButton(false);
+    g_sweep_last_tap_valid = 0u;
+    g_sweep_single_touch_moved = 0u;
+    g_sweep_x_min_log_milli = UI_SWEEP_X_MIN_LOG_MILLI;
+    g_sweep_x_max_log_milli = UI_SWEEP_X_MAX_LOG_MILLI;
+    (void)memset(&g_sweep_gesture, 0, sizeof(g_sweep_gesture));
+    UI_ResetSweepProbe();
+    g_sweep_total_points[path] =
+        (total_points > UI_SWEEP_MAX_POINTS) ?
+        UI_SWEEP_MAX_POINTS : total_points;
+    g_sweep_visible_mask = (multi_path != 0u) ? 0x07u : (1u << path);
+    if (g_sweep_progress_bar != NULL)
+    {
+        UI_SetSweepProgress(0u);
+    }
+    UI_RebuildSweepChart();
+}
+
+void UI_Demo_UpdateSweepPoint(uint32_t path,
+                              uint32_t point_index,
+                              uint32_t total_points,
+                              float bias_voltage_v,
+                              float series_capacitance_pf,
+                              float parallel_capacitance_pf,
+                              float dissipation_factor,
+                              uint32_t model_values_valid,
+                              const char *bias_text,
+                              const char *capacitance_text,
+                              uint32_t valid)
+{
+    static const char *const names[] = {"CISS", "COSS", "CRSS"};
+    uint32_t array_index;
+    uint8_t rebuild_interpolation;
+
+    if ((path >= 3u) || (point_index == 0u) ||
+        (point_index > UI_SWEEP_MAX_POINTS))
+    {
+        return;
+    }
+    array_index = point_index - 1u;
+    rebuild_interpolation = g_sweep_interpolation_ready[path];
+    if (rebuild_interpolation != 0u)
+    {
+        /* 收到补发或更新点时先使旧插值失效，防止显示旧曲线。 */
+        UI_ResetSweepInterpolation(path);
+    }
+    g_sweep_voltage[path][array_index] = bias_voltage_v;
+    g_sweep_capacitance[path][array_index] = series_capacitance_pf;
+    g_sweep_parallel_capacitance[path][array_index] =
+        parallel_capacitance_pf;
+    g_sweep_dissipation[path][array_index] = dissipation_factor;
+    g_sweep_model_valid[path][array_index] =
+        ((model_values_valid != 0u) &&
+         isfinite(parallel_capacitance_pf) &&
+         isfinite(dissipation_factor)) ? 1u : 0u;
+    g_sweep_valid[path][array_index] =
+        ((valid != 0u) && isfinite(series_capacitance_pf) &&
+         (series_capacitance_pf > 0.0f)) ? 1u : 0u;
+    if (total_points > g_sweep_total_points[path])
+    {
+        g_sweep_total_points[path] =
+            (total_points > UI_SWEEP_MAX_POINTS) ?
+            UI_SWEEP_MAX_POINTS : total_points;
+    }
+    if (rebuild_interpolation != 0u)
+    {
+        UI_BuildSweepInterpolation(path);
+    }
+
+    if ((g_sweep_progress_label != NULL) &&
+        (bias_text != NULL) && (capacitance_text != NULL))
+    {
+        lv_label_set_text_fmt(g_sweep_progress_label,
+                              "%s  %lu/%lu   Vd=%s V   Cs=%s pF%s",
+                              names[path],
+                              (unsigned long)point_index,
+                              (unsigned long)total_points,
+                              bias_text, capacitance_text,
+                              (valid != 0u) ? "" : "  无效");
+    }
+    if ((g_sweep_progress_bar != NULL) && (total_points != 0u))
+    {
+        uint32_t progress =
+            (point_index >= total_points) ? 1000u :
+            (point_index * 1000u) / total_points;
+
+        UI_SetSweepProgress(progress);
+    }
+    UI_RequestSweepChartRefresh();
+}
+
+void UI_Demo_SetSweepInspectionReady(void)
+{
+    uint32_t path;
+
+    for (path = 0u; path < 3u; ++path)
+    {
+        if (g_sweep_total_points[path] != 0u)
+        {
+            UI_BuildSweepInterpolation(path);
+        }
+    }
+    UI_UpdateEngineeringVoltageRange();
+    g_sweep_inspection_ready = 1u;
+    g_sweep_gesture.active = 0u;
+    g_sweep_gesture.block_single_touch = 0u;
+    UI_RebuildSweepChart();
+    UI_UpdateEngineeringPage();
+    UI_UpdateSweepEngineeringButton(true);
+    if (g_sweep_progress_label == NULL)
+    {
+        return;
+    }
+    if (g_sweep_probe_valid != 0u)
+    {
+        UI_UpdateSweepProbeLabel();
+    }
+    else
+    {
+        lv_label_set_text(
+            g_sweep_progress_label,
+            UI_IsSweepEngineeringReady() ?
+            "扫压完成  参数页面 >" :
+            "当前回路完成  等待其他回路");
+    }
+}
+
+void UI_Demo_SetAIModelUrl(const char *model_url)
+{
+    size_t length = 0u;
+
+    if (model_url != NULL)
+    {
+        length = strlen(model_url);
+    }
+    if ((model_url == NULL) || (length == 0u) ||
+        (length >= sizeof(g_engineering_ai_model_url)))
+    {
+        g_engineering_ai_model_ready = 0u;
+        g_engineering_ai_model_url[0] = '\0';
+    }
+    else
+    {
+        (void)memcpy(g_engineering_ai_model_url, model_url, length + 1u);
+        g_engineering_ai_model_ready = 1u;
+    }
+
+    UI_UpdateEngineeringQRCode();
+    if ((g_sweep_engineering_page_active != 0u) &&
+        (g_header_operation_label != NULL))
+    {
+        lv_label_set_text(g_header_operation_label,
+                          (g_engineering_ai_model_ready != 0u) ?
+                          "MODEL QR" : "DEMO QR");
+    }
+}
+
+void UI_Demo_SetAIQualityState(uint32_t state,
+                               uint32_t top_class,
+                               float clean_probability)
+{
+    if (state > UI_DEMO_AI_QUALITY_WAITING)
+    {
+        state = UI_DEMO_AI_QUALITY_ERROR;
+    }
+    g_engineering_quality_state = state;
+    g_engineering_quality_class = top_class;
+    g_engineering_quality_clean_probability = clean_probability;
+    UI_UpdateEngineeringQualityLabel();
+}
+
+uint32_t UI_Demo_CopySweepPath(uint32_t path,
+                               float *voltage_v,
+                               float *series_capacitance_pf,
+                               uint8_t *valid,
+                               uint32_t capacity)
+{
+    uint32_t count;
+
+    if ((path >= UI_DEMO_SWEEP_PATH_COUNT) ||
+        (voltage_v == NULL) ||
+        (series_capacitance_pf == NULL) ||
+        (valid == NULL) || (capacity == 0u))
+    {
+        return 0u;
+    }
+    count = g_sweep_total_points[path];
+    if (count > capacity)
+    {
+        count = capacity;
+    }
+    if (count == 0u)
+    {
+        return 0u;
+    }
+    (void)memcpy(voltage_v, g_sweep_voltage[path],
+                 count * sizeof(voltage_v[0]));
+    (void)memcpy(series_capacitance_pf, g_sweep_capacitance[path],
+                 count * sizeof(series_capacitance_pf[0]));
+    (void)memcpy(valid, g_sweep_valid[path],
+                 count * sizeof(valid[0]));
+    return count;
+}
+
+uint32_t UI_Demo_GetLatestResistance(float *resistance_ohm)
+{
+    if ((resistance_ohm == NULL) || (g_latest_rg_valid == 0u) ||
+        !isfinite(g_latest_rg_ohm) || (g_latest_rg_ohm <= 0.0f))
+    {
+        return 0u;
+    }
+    *resistance_ohm = g_latest_rg_ohm;
+    return 1u;
+}
+
+uint32_t UI_Demo_GetClickCount(void)
+{
+    return g_ui_click_count;
+}
+
+uint32_t UI_Demo_GetLastButton(void)
+{
+    return g_ui_last_button;
+}
+
+uint32_t UI_Demo_GetCurrentPage(void)
+{
+    return g_ui_current_page;
+}
+
+uint32_t UI_Demo_GetResetRequestCount(void)
+{
+    return g_ui_reset_request_count;
+}
+
+uint32_t UI_Demo_GetSinglePath(void)
+{
+    return g_ui_single_path;
+}
+
+uint32_t UI_Demo_GetSingleBiasTenths(void)
+{
+    return g_ui_single_bias_tenths;
+}
+
+uint32_t UI_Demo_GetMeasureAllBiasTenths(void)
+{
+    return g_ui_measure_all_bias_tenths;
+}
+
+uint32_t UI_Demo_GetSweepPath(void)
+{
+    return g_ui_sweep_path;
+}
+
+uint32_t UI_Demo_GetSweepEndTenths(void)
+{
+    return g_ui_sweep_end_tenths;
+}
