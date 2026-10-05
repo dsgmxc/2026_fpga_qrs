@@ -47,32 +47,43 @@
 //    PYNQ 的 mmio.write() 就是整字写,功能上不受影响。
 //=============================================================================
 //
-//  寄存器映射(基址 0x43C0_0000,字节偏移 → 字索引 a[6:2])
+//  寄存器映射(基址 0x43C0_0000,字节偏移 → 字索引 a[7:2])
 //
-//    0x00 5'h00 CTRL        0x28 5'h0A I_A
-//    0x04 5'h01 STATUS      0x2C 5'h0B Q_A
-//    0x08 5'h02 NCO_FREQ    0x30 5'h0C I_B
-//    0x0C 5'h03 NCO_PHASE   0x34 5'h0D Q_B
-//    0x10 5'h04 EXC_AMP     0x38 5'h0E MAG_A
-//    0x14 5'h05 BIAS_CODE   0x3C 5'h0F PHASE_A
-//    0x18 5'h06 RANGE_SEL   0x40 5'h10 MAG_B
-//    0x1C 5'h07 RELAY_CFG   0x44 5'h11 PHASE_B
-//    0x20 5'h08 CIC_DECIM   0x48 5'h12 VERSION    <-- 已实现
-//    0x24 5'h09 SETTLE_CFG  0x4C 5'h13 SCRATCH    <-- 已实现
-//                           0x50 5'h14 LCD_CTRL   <-- 2026-10-01 新增
-//                           0x54 5'h15 LCD_FILL   <-- 2026-10-01 新增
-//                           0x58 5'h16 LCD_FB_BASE0    <-- 2026-10-02 新增
-//                           0x5C 5'h17 LCD_FB_BASE1    <-- 2026-10-02 新增
-//                           0x60 5'h18 LCD_SWAP        <-- 2026-10-02 新增
-//                           0x64 5'h19 LCD_FB_STATUS   <-- 2026-10-02 新增
-//                           0x68 5'h1A TOUCH_STATUS    <-- 2026-10-02 新增
-//                           0x6C 5'h1B TOUCH_PT0       <-- 2026-10-02 新增
-//                           0x70 5'h1C TOUCH_PT1       <-- 2026-10-02 新增
-//                           0x74 / 0x78 / 0x7C 预留给 P4 安全链(WATCHDOG_KICK /
-//                           FAULT_LATCH / SAFETY_STATE),**本次不实现**
+//    0x00 6'h00 CTRL        0x28 6'h0A I_A
+//    0x04 6'h01 STATUS      0x2C 6'h0B Q_A
+//    0x08 6'h02 NCO_FREQ    0x30 6'h0C I_B
+//    0x0C 6'h03 NCO_PHASE   0x34 6'h0D Q_B
+//    0x10 6'h04 EXC_AMP     0x38 6'h0E MAG_A
+//    0x14 6'h05 BIAS_CODE   0x3C 6'h0F PHASE_A  <-- 2026-10-05 实现
+//    0x18 6'h06 RANGE_SEL   0x40 6'h10 MAG_B
+//    0x1C 6'h07 RELAY_CFG   0x44 6'h11 PHASE_B
+//    0x20 6'h08 CIC_DECIM   0x48 6'h12 VERSION    <-- 已实现
+//    0x24 6'h09 SETTLE_CFG  0x4C 6'h13 SCRATCH    <-- 已实现
+//                           0x50 6'h14 LCD_CTRL   <-- 2026-10-01 新增
+//                           0x54 6'h15 LCD_FILL   <-- 2026-10-01 新增
+//                           0x58 6'h16 LCD_FB_BASE0    <-- 2026-10-02 新增
+//                           0x5C 6'h17 LCD_FB_BASE1    <-- 2026-10-02 新增
+//                           0x60 6'h18 LCD_SWAP        <-- 2026-10-02 新增
+//                           0x64 6'h19 LCD_FB_STATUS   <-- 2026-10-02 新增
+//                           0x68 6'h1A TOUCH_STATUS    <-- 2026-10-02 新增
+//                           0x6C 6'h1B TOUCH_PT0       <-- 2026-10-02 新增
+//                           0x70 6'h1C TOUCH_PT1       <-- 2026-10-02 新增
+//                           0x74 6'h1D DBG0            <-- 2026-10-03 新增
+//                           0x78 6'h1E DBG1            <-- 2026-10-03 新增
+//                           0x7C 6'h1F DBG2            <-- 2026-10-03 新增
+//                           0x80 6'h20 DDS_FREQ        <-- 2026-10-05 新增
+//                           0x84 6'h21 CV_CTRL         <-- 2026-10-05 新增
+//                                     ★ [0] dac_rst_n:软件放行 dac_1220 的初始化。
+//                                       复位值 0=按在复位 —— 见端口区 CV_CTRL 的长注释。
+//                                       为什么不放 0x18:那是 RANGE_SEL 的规格位置。
 //
-//  ⚠️ 加完这 7 个后 32 个地址【全满】。再要加寄存器,必须先改
-//     C_S_AXI_ADDR_WIDTH 7→8 + BD Refresh Module Reference(决策 Q27)。
+//  ⚠️ 0x00~0x7C 这 32 个槽位【已于 2026-10-03 全满】—— DBG0/1/2 占掉了原计划
+//     留给 P4 安全链(WATCHDOG_KICK / FAULT_LATCH / SAFETY_STATE)的
+//     0x74/0x78/0x7C。**上面那句"预留给 P4"是 2026-10-02 写的,已过时。**
+//     再加寄存器就必须扩地址,本次即按原预案执行:C_S_AXI_ADDR_WIDTH 7→8
+//     (决策 Q27)⇒ 可用槽位 32 → 64,DDS_FREQ 落在第 33 个(0x80)。
+//     ⚠️ BD 里 cv_sys_0 是 module_ref(不是打包 IP),改完 ADDR_WIDTH 后
+//        需要 Refresh Module Reference,BD 才能看到新的地址宽度。
 //
 //  ⚠️ C_S_AXI_ADDR_WIDTH 必须 >= 7。用 5 位时 0x4C & 0x1F = 0x0C,
 //     会与 NCO_PHASE 混叠。
@@ -80,7 +91,7 @@
 
 module cv_axi_lite_slave #(
     parameter integer C_S_AXI_DATA_WIDTH = 32,
-    parameter integer C_S_AXI_ADDR_WIDTH = 7,
+    parameter integer C_S_AXI_ADDR_WIDTH = 8,
     parameter [31:0]  VERSION_CONST      = 32'h0001_0000    // v1.0.0
 )(
     //-------------------------------------------------------------------------
@@ -97,7 +108,7 @@ module cv_axi_lite_slave #(
     //-------------------------------------------------------------------------
     // 写地址通道 AW
     //-------------------------------------------------------------------------
-    (* X_INTERFACE_PARAMETER = "XIL_INTERFACENAME S_AXI,PROTOCOL AXI4LITE,ADDR_WIDTH 7,DATA_WIDTH 32,READ_WRITE_MODE READ_WRITE,HAS_BURST 0,HAS_LOCK 0,HAS_CACHE 0,HAS_PROT 0,HAS_QOS 0,HAS_REGION 0,HAS_WSTRB 1,HAS_BRESP 1,HAS_RRESP 1,SUPPORTS_NARROW_BURST 0,MAX_BURST_LENGTH 1,NUM_READ_OUTSTANDING 1,NUM_WRITE_OUTSTANDING 1,ID_WIDTH 0,AWUSER_WIDTH 0,ARUSER_WIDTH 0,WUSER_WIDTH 0,RUSER_WIDTH 0,BUSER_WIDTH 0,FREQ_HZ 50000000" *)
+    (* X_INTERFACE_PARAMETER = "XIL_INTERFACENAME S_AXI,PROTOCOL AXI4LITE,ADDR_WIDTH 8,DATA_WIDTH 32,READ_WRITE_MODE READ_WRITE,HAS_BURST 0,HAS_LOCK 0,HAS_CACHE 0,HAS_PROT 0,HAS_QOS 0,HAS_REGION 0,HAS_WSTRB 1,HAS_BRESP 1,HAS_RRESP 1,SUPPORTS_NARROW_BURST 0,MAX_BURST_LENGTH 1,NUM_READ_OUTSTANDING 1,NUM_WRITE_OUTSTANDING 1,ID_WIDTH 0,AWUSER_WIDTH 0,ARUSER_WIDTH 0,WUSER_WIDTH 0,RUSER_WIDTH 0,BUSER_WIDTH 0,FREQ_HZ 50000000" *)
     (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 S_AXI AWADDR"      *) input  wire [C_S_AXI_ADDR_WIDTH-1:0]  s_axi_awaddr,
     (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 S_AXI AWPROT"      *) input  wire [2:0]                     s_axi_awprot,
     (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 S_AXI AWVALID"     *) input  wire                            s_axi_awvalid,
@@ -158,6 +169,48 @@ module cv_axi_lite_slave #(
     //     "读状态/写清零"同址是这类寄存器的常规做法。
     output wire                                 cfg_lcd_clr_sticky,
 
+    //-------------------------------------------------------------------------
+    // 模拟前端配置(2026-10-05 加:DAC1220 偏压 + AD9833 激励频率)
+    //   ⚠️ 与 cfg_lcd_* 同例 —— 【不是 AXI 端口,不要加 X_INTERFACE_INFO】:
+    //      普通线网,在 cv_sys 内部消化,不引出顶层、不产生 BD 引脚。
+    //      位域 mask 同样交给消费侧做(本层出寄存器原值)。
+    //-------------------------------------------------------------------------
+    output wire [C_S_AXI_DATA_WIDTH-1:0]        cfg_bias_code,  // 0x14 [19:0] → dac_1220.code
+    output wire                                 cfg_bias_set,   // 0x14 写 → 1 拍脉冲 → dac_1220.set_in
+    output wire [C_S_AXI_DATA_WIDTH-1:0]        cfg_dds_freq,   // 0x80 [27:0] → adc_9833.code
+    output wire                                 cfg_dds_set,    // 0x80 写 → 1 拍脉冲 → adc_9833.set_in
+
+    //-------------------------------------------------------------------------
+    // CV_CTRL(0x84)—— 2026-10-05 加。复位值【0】,即 dac_1220 上电被按在复位态。
+    //
+    //   🔴 为什么必须有这个位(dac_1220 复位图案是【双向窗口】,不是下限):
+    //     DAC1220 的串行复位靠三段高电平的宽度认(手册 Figure 12 / Table 5):
+    //       t16 = 208.3~325.5 µs、t18 = 416.7~732.4 µs、t19 = 833.3~976.6 µs
+    //     —— **上界与下界都有效**,超上界复位【不触发】。
+    //     dac_1220.v 里的常数(13000/28500/45000 拍)是按 50 MHz 折的,
+    //     而这块模块跑的是 s_axi_aclk = PS FCLK0,板上 BOOT.BIN 把它留在
+    //     **27.7778 MHz** ⇒ 三段变成 468/1026/1620 µs,全部超上界
+    //     ⇒ 复位不触发 ⇒ CMR 配置与自校准被忽略 ⇒ DIR 写入无效
+    //     ⇒ 输出停在芯片上电默认 DIR=0 = **−10 V**(实测症状)。
+    //     ⚠️ 两组窗口折成拍数【不重叠】(t16 @27.78 M 是 5787~9044 拍,
+    //        @50 M 是 10415~16275 拍)⇒ **改常数修不了**,只能让初始化
+    //        在一个【已知频率】下才放行。
+    //   ⇒ 由软件在 apply_fclk0() 把 FCLK0 置到 50.000 MHz 之后写 0x84=1 放行。
+    //   ⇒ 这也顺带解释了 09-19 为什么是好的:当时的顶层 qrs.v 用 clk_wiz_0
+    //      固定的 50 MHz,天然满足窗口;换成 PS FCLK0 之后才引入本缺陷。
+    //
+    //   ⚠️ 复位值取 0(按在复位)而不是 1,是为了**不违反本文件的读回契约**:
+    //      若取 1,寄存器显示"已放行"而 DAC 实际初始化失败,就是「寄存器说谎」。
+    //      取 0 时读回 0 与硬件真实状态一致。下游 bias_set 上电脉冲
+    //      本来就等 dac_init_done 才发,而 init_done 在未放行时恒 0 —— 自洽。
+    //-------------------------------------------------------------------------
+    output wire                                 cfg_dac_rst_n,  // 0x84[0] → dac_1220.rst_n
+
+    // ⚠️ 输入(不是输出):dac_1220 的 init_done,给上面的上电脉冲【开门】用。
+    //    没有它那个脉冲就是空放 —— 逐状态核对见下面 §set 脉冲 的说明。
+    //    同为普通线网,不是 AXI 端口,不要加 X_INTERFACE_INFO。
+    input  wire                                 dac_init_done,
+
     // 调试观测输入(2026-10-03 加,来源 lcd_fb_reader,只读)
     //   · 0x74 本帧 m_axi_rvalid 拍数(满帧 = 256×600 = 153600)
     //   · 0x78 最近一次 AR 握手成功时的地址
@@ -196,27 +249,45 @@ module cv_axi_lite_slave #(
 //     ⇒ 这也顺带解释了 bit[1] 为什么没被 vblank_cnt 占用:vblank_cnt 从 bit[2] 起。
 
     //=========================================================================
-    //  字索引:字节地址 [6:2] → 5 位寄存器编号(0x00 ~ 0x1F)
+    //  字索引:字节地址 [7:2] → 6 位寄存器编号(0x00 ~ 0x3F)
+    //    ⚠️ 2026-10-05 由 [6:2]/5 位扩到 [7:2]/6 位(决策 Q27,ADDR_WIDTH 7→8)。
+    //       原 32 个槽位在 DBG0/1/2 加入后已满,DDS_FREQ 只能落在 0x80。
     //=========================================================================
-    localparam [4:0] IDX_VERSION  = 5'h12;  // 0x48
-    localparam [4:0] IDX_SCRATCH  = 5'h13;  // 0x4C
-    localparam [4:0] IDX_LCD_CTRL = 5'h14;  // 0x50
-    localparam [4:0] IDX_LCD_FILL = 5'h15;  // 0x54
+    localparam [5:0] IDX_BIAS_CODE = 6'h05;  // 0x14 <-- 2026-10-05 实现
+    localparam [5:0] IDX_VERSION  = 6'h12;  // 0x48
+    localparam [5:0] IDX_SCRATCH  = 6'h13;  // 0x4C
+    localparam [5:0] IDX_LCD_CTRL = 6'h14;  // 0x50
+    localparam [5:0] IDX_LCD_FILL = 6'h15;  // 0x54
 
-    localparam [4:0] IDX_FB_BASE0  = 5'h16;  // 0x58
-    localparam [4:0] IDX_FB_BASE1  = 5'h17;  // 0x5C
-    localparam [4:0] IDX_LCD_SWAP  = 5'h18;  // 0x60
-    localparam [4:0] IDX_FB_STATUS = 5'h19;  // 0x64
-    localparam [4:0] IDX_TC_STATUS = 5'h1A;  // 0x68
-    localparam [4:0] IDX_TC_PT0    = 5'h1B;  // 0x6C
-    localparam [4:0] IDX_TC_PT1    = 5'h1C;  // 0x70
+    localparam [5:0] IDX_FB_BASE0  = 6'h16;  // 0x58
+    localparam [5:0] IDX_FB_BASE1  = 6'h17;  // 0x5C
+    localparam [5:0] IDX_LCD_SWAP  = 6'h18;  // 0x60
+    localparam [5:0] IDX_FB_STATUS = 6'h19;  // 0x64
+    localparam [5:0] IDX_TC_STATUS = 6'h1A;  // 0x68
+    localparam [5:0] IDX_TC_PT0    = 6'h1B;  // 0x6C
+    localparam [5:0] IDX_TC_PT1    = 6'h1C;  // 0x70
 
-    // 调试观测(2026-10-03 加)—— 地址窗口本来就只有 0x00~0x7C,
+    // 调试观测(2026-10-03 加)—— 当时地址窗口只有 0x00~0x7C,
     //   这三个是仅剩的空位(cv_regs.py 与 cv_sys.v 里原先标着"预留 P4 安全链",
     //   实际全工程无处使用 ⇒ 现在启用,并把那两处注释改掉)。
-    localparam [4:0] IDX_DBG0      = 5'h1D;  // 0x74 本帧 rvalid 拍数
-    localparam [4:0] IDX_DBG1      = 5'h1E;  // 0x78 最近 AR 地址
-    localparam [4:0] IDX_DBG2      = 5'h1F;  // 0x7C 状态快照
+    localparam [5:0] IDX_DBG0      = 6'h1D;  // 0x74 本帧 rvalid 拍数
+    localparam [5:0] IDX_DBG1      = 6'h1E;  // 0x78 最近 AR 地址
+    localparam [5:0] IDX_DBG2      = 6'h1F;  // 0x7C 状态快照
+
+    // DDS 激励频率(AD9833)—— 2026-10-05 加。
+    //   🔑 这是扩地址空间【唯一】的动机:0x00~0x7C 已满,只能落 0x80。
+    //   [27:0] = AD9833 的 FREQREG 原值,f_out = code × 25 MHz / 2^28。
+    //   复位值 0x0A3D70A ⇒ 10 737 418 × 25e6 / 2^28 ≈ 1.0000 MHz ——
+    //   与 adc_9833.v 上电初始化序列里本来就写死的那个值一致,
+    //   此处只是让它【可被 PS 改写】,不改上电行为。
+    localparam [5:0] IDX_DDS_FREQ  = 6'h20;  // 0x80
+
+    // CV_CTRL(0x84)—— 2026-10-05 加,`dac_1220` 初始化的软件放行位。
+    //   ⚠️ **为什么不放 0x18**:`0x18` 已被测量主链规格占给 `RANGE_SEL`
+    //      (见 report/source_design_checklist.md §3 表 line 406)。
+    //      那一位 RTL 尚未实现,但**规格是 M9「接口设计」的正文**,
+    //      不能为了图方便挪用。⇒ 落到扩展区,紧邻同属模拟前端的 DDS_FREQ(0x80)。
+    localparam [5:0] IDX_CV_CTRL   = 6'h21;  // 0x84
 
     //=========================================================================
     //  写通道
@@ -283,6 +354,9 @@ module cv_axi_lite_slave #(
     reg [C_S_AXI_DATA_WIDTH-1:0] lcd_fill;
     reg [C_S_AXI_DATA_WIDTH-1:0] fb_base0;
     reg [C_S_AXI_DATA_WIDTH-1:0] fb_base1;
+    reg [C_S_AXI_DATA_WIDTH-1:0] bias_code;   // 0x14  2026-10-05 加
+    reg [C_S_AXI_DATA_WIDTH-1:0] cv_ctrl;     // 0x84  2026-10-05 加(bit0 = dac_rst_n)
+    reg [C_S_AXI_DATA_WIDTH-1:0] dds_freq;    // 0x80  2026-10-05 加
 
     // ⚠️ 2026-10-01 由 if-else 链改为 case —— 与读通道写法一致,便于继续扩表。
     always @(posedge s_axi_aclk) begin
@@ -292,9 +366,43 @@ module cv_axi_lite_slave #(
             lcd_fill <= 32'h0000_0000;      //    上电默认走厂商彩条那条路径。
             fb_base0 <= 32'h0000_0000;      //    复位 = 0 也是【有意为之】:
             fb_base1 <= 32'h0000_0000;      //    src_sel 不为 2 时基址根本不被使用,
+            //-------------------------------------------------------------------------
+            // 🔴 偏压复位值【不是 0】—— 这是安全设计,不是笔误,改之前先读完本段。
+            //
+            //   DAC1220 模块层的实测传递关系(docs/dac1220_interface.md §八,
+            //   板上三点实测 −5/0/+5 V)是:
+            //       V_module = −10 + 20 × code / 1048575
+            //   ⇒ code = 0 ⇒ **−10 V**。经外部 10:1 高压级 ⇒ 偏压 **−100 V**。
+            //   ⇒ 若复位值取 0,上电后偏压会停在 −100 V,而不是人们以为的 0 V。
+            //
+            //   0x80000 / 0xFFFFF = 1/2 满量程 ⇒ V_module = 0 V ⇒ 偏压 0 V。
+            //   上电停在 0 V 是无条件安全的中点(不依赖高压级是否支持负压)。
+            //
+            //   ⚠️ 配套:复位值只有配上【上电自动发一次 bias_set】才真的到达 DAC,
+            //      否则寄存器显示 0 V 而 DAC 仍停在它自己的默认码上 ——
+            //      那就是「寄存器说谎」,违反本项目对 0x60 立下的同一条规矩
+            //      (读回必须是【已生效】值,不是【已请求】值)。见下面 §set 脉冲。
+            //-------------------------------------------------------------------------
+            bias_code <= 32'h0008_0000;     // 中位码 = 0 V 偏压
+            // DDS 复位值 = 1.0000 MHz。⚠️ 这一个是【真值】不是意图:
+            //   adc_9833.v 的上电初始化序列本来就写死 0x0A3D70A,
+            //   此处只是让寄存器与硬件实际状态对得上,并给 PS 一个改写入口。
+            dds_freq  <= 32'h0A3D_70A;      // 10 737 418 × 25 MHz / 2^28 ≈ 1 MHz
+            // 🔴 CV_CTRL 复位 = 0 ⇒ **dac_1220 上电就被按在复位态,不跑初始化**。
+            //    放行权交给软件(必须在 apply_fclk0() 之后)——
+            //    理由见端口区 CV_CTRL 那段。**这不是笔误,改之前先读完那段。**
+            //    ⚠️ 连带:上面 bias_code 的上电脉冲要等 dac_init_done,
+            //       未放行时它恒 0 ⇒ 脉冲不发,寄存器 0 V 与 DAC 状态不会互相说谎。
+            cv_ctrl   <= 32'h0000_0000;     // bit0 dac_rst_n = 0 = 保持复位
         end else if (do_write) begin        //    PS 必须先写基址再切源,顺序错就是黑屏。
-            case (awaddr_r[6:2])
+            case (awaddr_r[7:2])
                 IDX_SCRATCH  : scratch  <= wdata_r;   // 未实现 WSTRB:整字写
+                IDX_BIAS_CODE: bias_code <= wdata_r;
+                // ⚠️ 这里【掩码到 bit0】,与其它寄存器"整字写"的写法【刻意不同】:
+                //    0x84 是控制寄存器,只有 [0] 有效。若整字存,软件写 0xFFFFFFFF
+                //    会读回 0xFFFFFFFF —— [31:1] 是谎报。读回必须是已生效值。
+                IDX_CV_CTRL  : cv_ctrl   <= {31'b0, wdata_r[0]};   // 0x84,只取 bit0
+                IDX_DDS_FREQ : dds_freq  <= wdata_r;
                 IDX_LCD_CTRL : lcd_ctrl <= wdata_r;
                 IDX_LCD_FILL : lcd_fill <= wdata_r;
                 IDX_FB_BASE0 : fb_base0 <= wdata_r;
@@ -322,7 +430,7 @@ module cv_axi_lite_slave #(
             lcd_swap_tgt_r <= 1'b0;
         end else begin
             lcd_swap_req_r <= 1'b0;                  // 默认清 ⇒ 只在写当拍为高
-            if (do_write && (awaddr_r[6:2] == IDX_LCD_SWAP)) begin
+            if (do_write && (awaddr_r[7:2] == IDX_LCD_SWAP)) begin
                 lcd_swap_req_r <= 1'b1;
                 lcd_swap_tgt_r <= wdata_r[0];        // 目标缓冲索引
             end
@@ -341,9 +449,58 @@ module cv_axi_lite_slave #(
             clr_sticky_r <= 1'b0;
         end else begin
             clr_sticky_r <= 1'b0;                    // 默认清 ⇒ 只在写当拍为高
-            if (do_write && (awaddr_r[6:2] == IDX_FB_STATUS)) begin
+            if (do_write && (awaddr_r[7:2] == IDX_FB_STATUS)) begin
                 clr_sticky_r <= 1'b1;                // 写入值无关:写什么都清
             end
+        end
+    end
+
+    //=========================================================================
+    //  BIAS_CODE(0x14)/ DDS_FREQ(0x80)写 —— 命令语义,1 拍脉冲
+    //
+    //  【为什么不能只靠上面的电平寄存器块】下游 dac_1220 / adc_9833 的
+    //    set_in 是**沿触发**的。若只给电平,PS 连写两次同一个码值时电平不变
+    //    ⇒ 采不到沿 ⇒ 第二次请求丢失。这与 0x60 LCD_SWAP 需要
+    //    cfg_lcd_swap_req 脉冲是**同一条理由**(见文件尾设计备忘)。
+    //
+    //  ★ 【上电自动发一次 bias_set】—— 配套上面 bias_code 的复位值。
+    //    🔴 必须等 dac_init_done 才发(2026-10-05 逐状态核对后修正,原实现是空放)。
+    //       理由:dac_1220.v 把 set_in 的上升沿锁进 set_pending,但**那一句写在
+    //       NORMAL_WAIT 分支【内部】**,不在 case 语句之后 ——
+    //       所以只有 FSM 正处于 NORMAL_WAIT 时到来的沿才被记住,
+    //       IDLE / DELAY / INIT / CAL / CAL_WAIT 期间来的沿【直接丢掉】。
+    //       而该模块上电走 IDLE →(PWR_WAIT 200 ms)→ INIT → CAL →
+    //       CAL_WAIT → NORMAL_WAIT,init_done 在 CAL_WAIT 出口才拉高
+    //       ⇒ 复位刚放手就发脉冲 = 空放,寄存器会显示 0 V 而 DAC 停在默认码上。
+    //    ⚠️ 不能按 adc_9833.v 类推:它的同一句写在 case **之后**(always 块顶层),
+    //       任何状态都收 ⇒ 两个模块的 set_in 语义【不同】。
+    //    ⚠️ 若将来删掉这段,必须同时把 bias_code 复位值改回 0 ——
+    //       否则寄存器显示 0 V、DAC 却停在别的码上,即「寄存器说谎」。
+    //    ⚠️ DDS 侧【不发】上电脉冲:adc_9833 的初始化序列已经把频率置成 1 MHz,
+    //       (init 两帧 0x570A/0x428F 反推 = 0x0A3D70A,与本寄存器复位值逐位相同)
+    //       再发一次只是重复写同一个值,没有信息量。
+    //=========================================================================
+    reg bias_set_r;
+    reg dds_set_r;
+    reg bias_pwr_done;
+
+    always @(posedge s_axi_aclk) begin
+        if (!s_axi_aresetn) begin
+            bias_set_r    <= 1'b0;
+            dds_set_r     <= 1'b0;
+            bias_pwr_done <= 1'b0;
+        end else begin
+            bias_set_r <= 1'b0;                      // 默认清 ⇒ 只在下面两种情形为高
+            dds_set_r  <= 1'b0;
+
+            if (dac_init_done && !bias_pwr_done) begin
+                bias_set_r    <= 1'b1;               // init_done 抬起后那一次
+                bias_pwr_done <= 1'b1;
+            end
+            // ⚠️ 下面两行写在上电脉冲【之后】= 同拍优先级更高,
+            //    与 adc_9833.v 里 set_pending 的写法是同一个套路。
+            if (do_write && (awaddr_r[7:2] == IDX_BIAS_CODE)) bias_set_r <= 1'b1;
+            if (do_write && (awaddr_r[7:2] == IDX_DDS_FREQ )) dds_set_r  <= 1'b1;
         end
     end
 
@@ -355,6 +512,16 @@ module cv_axi_lite_slave #(
     assign cfg_lcd_fb_base1  = fb_base1;
     assign cfg_lcd_swap_tgt  = lcd_swap_tgt_r;
     assign cfg_lcd_swap_req  = lcd_swap_req_r;
+
+    // 模拟前端(2026-10-05)
+    assign cfg_bias_code = bias_code;
+    assign cfg_bias_set  = bias_set_r;
+    assign cfg_dds_freq  = dds_freq;
+    assign cfg_dds_set   = dds_set_r;
+
+    // 0x84 CV_CTRL —— 只引出 bit0。⚠️ 它是**电平**不是脉冲:
+    //   与上面两个 set 不同,它表示"保持放行",不是"触发一次"。
+    assign cfg_dac_rst_n = cv_ctrl[0];
 
     //=========================================================================
     //  读通道
@@ -391,7 +558,7 @@ module cv_axi_lite_slave #(
             tch_pt0_hold <= 32'h0000_0000;
             tch_pt1_hold <= 32'h0000_0000;
         end else if (s_axi_arvalid && s_axi_arready
-                     && (s_axi_araddr[6:2] == IDX_TC_STATUS)) begin
+                     && (s_axi_araddr[7:2] == IDX_TC_STATUS)) begin
             tch_pt0_hold <= sts_touch_pt0;
             tch_pt1_hold <= sts_touch_pt1;
         end
@@ -412,9 +579,12 @@ module cv_axi_lite_slave #(
         if (!s_axi_aresetn) begin
             rdata_r <= 32'h0000_0000;
         end else if (s_axi_arvalid && s_axi_arready) begin
-            case (s_axi_araddr[6:2])
+            case (s_axi_araddr[7:2])
                 IDX_VERSION  : rdata_r <= VERSION_CONST;
                 IDX_SCRATCH  : rdata_r <= scratch;
+                IDX_BIAS_CODE: rdata_r <= bias_code;   // 0x14 2026-10-05
+                IDX_CV_CTRL  : rdata_r <= cv_ctrl;     // 0x84 2026-10-05 (bit0 = dac_rst_n)
+                IDX_DDS_FREQ : rdata_r <= dds_freq;    // 0x80 2026-10-05
                 IDX_LCD_CTRL : rdata_r <= lcd_ctrl;
                 IDX_LCD_FILL : rdata_r <= lcd_fill;
                 IDX_FB_BASE0 : rdata_r <= fb_base0;
@@ -466,6 +636,8 @@ module cv_axi_lite_slave #(
     //    2026-10-01 起有 cfg_lcd_ctrl / cfg_lcd_fill;
     //    2026-10-02 起再加 cfg_lcd_fb_base0/1、cfg_lcd_swap_tgt/req、
     //    sts_lcd_status、sts_touch_status/pt0/pt1 —— 共 11 个寄存器对上号。
+    //    2026-10-05 起再加 cfg_bias_code/set、cfg_dds_freq/set(模拟前端),
+    //    并把 C_S_AXI_ADDR_WIDTH 由 7 扩到 8(见文件头寄存器映射的说明)。
     //    扩表时按寄存器逐个加即可,地址不变。
     //
     //  【为什么要 cfg_lcd_swap_tgt 与 cfg_lcd_swap_req 两个信号】

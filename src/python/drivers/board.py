@@ -199,6 +199,61 @@ def apply_fclk0(mhz=cv_regs.FCLK0_DESIGN_MHZ, verify=True, quiet=False):
     return actual
 
 
+def release_dac(mon, quiet=False):
+    """放行 `dac_1220` 的初始化(写 0x84 CV_CTRL[0] = 1)。返回 FCLK0 真值(MHz)。
+
+    🔴 **必须在 `apply_fclk0()` 之后调用** —— 这是本函数的全部意义。
+       `dac_1220.v` 靠 DAC1220 手册 Figure 12 / Table 5 的**串行复位图案**让芯片
+       复位(该芯片没有复位引脚),而那个图案的三段高电平是**双向窗口**:
+
+           t16 = 208.3~325.5 µs   t18 = 416.7~732.4 µs   t19 = 833.3~976.6 µs
+
+       代码里的常数按 **50 MHz** 折(13000 / 28500 / 45000 拍),但本模块跑的是
+       PS FCLK0 —— 板上 `BOOT.BIN` 把它留在 **27.778 MHz**,
+       于是三段变成 **468 / 1026 / 1620 µs,全部超上界** ⇒ **复位根本不触发**
+       ⇒ CMR 配置与自校准被忽略 ⇒ DIR 写入无效
+       ⇒ 输出停在芯片上电默认 DIR=0 = **−10 V**(2026-10-05 实测到的症状)。
+
+       ⇒ 所以 `cv_sys.v` 里 `dac_1220.rst_n` **不再直连 `s_axi_aresetn`**,
+         而与 `0x84[0]` 相与(复位值 0 = 按在复位)。本函数是唯一的放行点。
+
+    ⚠️ 反解窗口:`t19 = 45000 拍` 是最紧的一项 ⇒ **FCLK0 ∈ [46.1, 54.0] MHz**
+       才是合法的(见 `cv_regs.FCLK0_DAC_RST_WINDOW_MHZ` 的三项推导)。
+       **本函数主动查这一个条件并拒绝放行**,不做静默放行 ——
+       静默放行的代价是"寄存器显示 5.0 V、DAC 实际出 −10 V",最难查的一种坏法。
+
+    ⚠️ **改常数是修不了的**:把窗口折成拍数,27.78 MHz 与 50 MHz 两组合法区间
+       在三段上**全都不重叠** ⇒ 没有一组常数能同时覆盖两个频率。
+       ⇒ 唯一的解就是"保证初始化在设计频率下跑",也就是本函数的存在理由。
+
+    ✅ 连带好处:`bias_code` 的复位值与上电脉冲本来就等 `dac_init_done`
+       (见 `cv_axi_lite_slave.v` §set 脉冲)⇒ 放行后约 800 ms(50 MHz 下
+       200 ms 等待 + 复位图案 + 600 ms 自校准)**自动**把 PS 最后写过的偏压码
+       送到 DAC,不需要再点一次界面。放行前写进 `0x14` 的值不会丢。
+    """
+    actual = fclk0_real_mhz()
+    lo, hi = cv_regs.FCLK0_DAC_RST_WINDOW_MHZ
+    if not (lo <= actual <= hi):
+        raise BoardError(
+            f"FCLK0 = {actual:.4f} MHz **不在 DAC 复位图案的合法窗口内** "
+            f"[{lo}~{hi} MHz],拒绝放行。\n"
+            f"  ⇒ 此时放行,三段高电平会超出手册双向窗口上界(见本函数文档),\n"
+            f"     复位不触发 ⇒ 偏压恒停在 −10 V,而且**寄存器看起来是正常的**。\n"
+            f"  ⇒ 先调 `apply_fclk0()` 把 FCLK0 补到 "
+            f"{cv_regs.FCLK0_DESIGN_MHZ:.0f} MHz(开机默认 27.78 在窗口外,\n"
+            f"     是 BOOT.BIN 留下的,属预期现象不是故障)。"
+        )
+
+    held = mon.dac_release()
+    if not quiet:
+        if held:
+            print(f"[dac] 已放行初始化 @ FCLK0 {actual:.4f} MHz —— "
+                  f"约 {(cv_regs.DAC_INIT_MS / 1000.0):.1f} s 后偏压生效")
+        else:
+            print(f"[dac] 已经是放行态(FCLK0 {actual:.4f} MHz)—— 无需重复放行")
+    return actual
+
+
 def board_info(mon):
     """开机自检信息汇总。打印用。"""
     from pynq import Clocks

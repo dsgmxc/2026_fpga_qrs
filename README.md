@@ -12,7 +12,7 @@
 | `src/c_ui/` | **本队新增** —— PS 侧**用 C 写的 LVGL 界面进程**(内含厂商 LVGL 8.2.0 第三方源码) | 3.3.5.1 工程包 |
 | `sim/` | 仿真**平台**(测试台 + 验证报告) | 3.3.5.1 工程包 |
 | `sim/logs/` | 仿真原始日志预留位(⚠️ **当前为空**,见下) | 3.3.5.1 工程包 |
-| `build/` | 综合与实现报告(`system_wrapper_*.rpt` 共 4 份,见下) | 3.3.5.1 工程包 |
+| `build/` | 综合与实现报告(`system_wrapper_*.rpt` 共 4 份)+ BD 改动脚本(`bd_add_dac_dds.tcl`),见下 | 3.3.5.1 工程包 |
 | `build/agent/` | 智能体工作流脚本 | 3.3.5.3 设计报告 |
 | `board/` | 上板工程、运行脚本与实测输出(位流 + 服务单元 + 实测存档) | 3.3.5.1 工程包 |
 | `board/measurements/` | **本队新增** —— 逐次上板实测**存档**(含位流 md5、预期 vs 实测、原始终端输出) | 3.3.5.1 工程包 |
@@ -87,6 +87,19 @@ FAIL 行),原始文本属于"跑一次就能再出来"的中间产物,不入库�
 ⚠️ 这 4 份对应的是**当前入库位流**(`board/qrs.bit`)那一版实现,**两者须同批更新**。
 ⚠️ 工程目录里另有 7 份 `.rpt`(`power` / `bus_skew` / `control_sets` / `route_status` 等),
 与 M3 三项无关,未入库。
+
+### `build/bd_add_dac_dds.tcl` —— Block Design 侧改动脚本
+
+对应必做点 **M5「可复现的构建脚本」**。RTL 侧 `cv_sys.v` 新增 6 个端口、AXI4-Lite 地址宽度
+由 7 位扩到 8 位后,**BD 不会自动跟上** —— `cv_sys_0` 是 `module_ref`(HDL 模块引用),
+BD 把旧的端口清单与 `ADDR_WIDTH=7` 缓存住了,不刷新就看不到新端口。
+
+脚本做 5 件事:移除 `io.xdc`(`IS_ENABLED=0`,内容已并入 `led.xdc`)→ 刷新 `cv_sys_0` 的
+module reference → 把 6 个新端口引出成顶层端口(名字与 `led.xdc` 一致)→ 接 pin → 校验。
+**在 Vivado Tcl Console 里 `source` 执行**,脚本正文写清了每步的实测依据。
+
+> ⚠️ 本脚本**不是**「一键从零重建工程」的完整构建脚本,只覆盖 BD 侧那一处改动;
+> 从零复现的完整步骤见 `docs/dev_workflow.md`。
 
 ---
 

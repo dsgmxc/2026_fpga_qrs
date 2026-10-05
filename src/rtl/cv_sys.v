@@ -63,7 +63,7 @@
 
 module cv_sys #(
     parameter integer C_S_AXI_DATA_WIDTH = 32,
-    parameter integer C_S_AXI_ADDR_WIDTH = 7,
+    parameter integer C_S_AXI_ADDR_WIDTH = 8,
     parameter [31:0]  VERSION_CONST      = 32'h0001_0000,   // v1.0.0
     // ⚠️ v3 起 LCD_ID 【本层已不再使用】—— 时序参数改由 lcd_timing 自己的
     //    parameter 承载(那里才是唯一副本)。保留此参数只为不动已刷过的端口边界;
@@ -85,7 +85,7 @@ module cv_sys #(
     (* X_INTERFACE_INFO = "xilinx.com:signal:reset:1.0 S_AXI_ARESETN RST" *)
     input  wire                                 s_axi_aresetn,
 
-    (* X_INTERFACE_PARAMETER = "XIL_INTERFACENAME S_AXI,PROTOCOL AXI4LITE,ADDR_WIDTH 7,DATA_WIDTH 32,READ_WRITE_MODE READ_WRITE,HAS_BURST 0,HAS_LOCK 0,HAS_CACHE 0,HAS_PROT 0,HAS_QOS 0,HAS_REGION 0,HAS_WSTRB 1,HAS_BRESP 1,HAS_RRESP 1,SUPPORTS_NARROW_BURST 0,MAX_BURST_LENGTH 1,NUM_READ_OUTSTANDING 1,NUM_WRITE_OUTSTANDING 1,ID_WIDTH 0,AWUSER_WIDTH 0,ARUSER_WIDTH 0,WUSER_WIDTH 0,RUSER_WIDTH 0,BUSER_WIDTH 0,FREQ_HZ 50000000" *)
+    (* X_INTERFACE_PARAMETER = "XIL_INTERFACENAME S_AXI,PROTOCOL AXI4LITE,ADDR_WIDTH 8,DATA_WIDTH 32,READ_WRITE_MODE READ_WRITE,HAS_BURST 0,HAS_LOCK 0,HAS_CACHE 0,HAS_PROT 0,HAS_QOS 0,HAS_REGION 0,HAS_WSTRB 1,HAS_BRESP 1,HAS_RRESP 1,SUPPORTS_NARROW_BURST 0,MAX_BURST_LENGTH 1,NUM_READ_OUTSTANDING 1,NUM_WRITE_OUTSTANDING 1,ID_WIDTH 0,AWUSER_WIDTH 0,ARUSER_WIDTH 0,WUSER_WIDTH 0,RUSER_WIDTH 0,BUSER_WIDTH 0,FREQ_HZ 50000000" *)
     (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 S_AXI AWADDR"      *) input  wire [C_S_AXI_ADDR_WIDTH-1:0]    s_axi_awaddr,
     (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 S_AXI AWPROT"      *) input  wire [2:0]                       s_axi_awprot,
     (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 S_AXI AWVALID"     *) input  wire                              s_axi_awvalid,
@@ -178,7 +178,39 @@ module cv_sys #(
     output wire        touch_rst_n,
     inout  wire        touch_int,
     inout  wire        touch_scl,
-    inout  wire        touch_sda
+    inout  wire        touch_sda,
+
+    //-------------------------------------------------------------------------
+    //  模拟前端(2026-10-05 加)—— DAC1220 偏压 + AD9833 激励,各 3 根线
+    //
+    //  ⚠️ 这是【6 根独立输出脚】,不是 3 根共享总线 + 2 个片选 ——
+    //     dac_1220.v 与 adc_9833.v 内部【各自】例化了一个 u_spi_master,
+    //     两个从设备之间没有任何共用信号。
+    //
+    //  ⚠️ DDS 三根线的内部信号名沿用 adc_9833.v 的端口名
+    //     (adc_sclk / adc_sync / adc_mosi)—— 那是该模块当初按"复用 spi_master"
+    //     写下的**历史名**,实际用途就是 AD9833 的 SCLK / FSYNC / SDATA。
+    //     本层对外改用 dds_* 命名,例化处显式对接,不让这个歧义再往上传。
+    //
+    //  ⚠️ 球号:六个都属 J4 扩展口,电平全是 LVCMOS33。
+    //     DAC 三根全在 BANK34;DDS 的 T11 在 BANK34、T5/U7 在 BANK13
+    //     (J4 第 2 脚夹在一排 BANK13 脚中间)。约束见 src/constrs/led.xdc。
+    //-------------------------------------------------------------------------
+    //  ⚠️ 叫 dds_sclk 而不是 dds_clk —— 名字不是随便起的:
+    //     端口名若以 `clk` 结尾,IP Integrator 会【自动把它推断成一条时钟接口】
+    //     (xilinx.com:signal:clock:1.0),然后因为拿不到 FREQ_HZ 报
+    //     CRITICAL WARNING: [IP_Flow 19-4751] Bus Interface 'dds_clk':
+    //     FREQ_HZ bus parameter is missing for output clock interface.
+    //     实测已复现(2026-10-05,刷新 module reference 时)。
+    //     而 dds_sclk 本质是 SPI 移位时钟、【不是时钟域】—— 声明成时钟接口是
+    //     语义错误(像 lcd_clk 那样补 FREQ_HZ 才是错的修法,那是给真时钟域用的)。
+    //     改叫 _sclk 后与 dac_sclk 对称,推断不再触发。
+    output wire        dac_sclk,    // → DAC1220 SCLK  (J4-36 / W15 / BANK34)
+    output wire        dac_cs,      // → DAC1220 CS    (J4-32 / W13 / BANK34)
+    output wire        dac_mosi,    // → DAC1220 SDIO  (J4-34 / Y14 / BANK34)
+    output wire        dds_sclk,    // → AD9833  SCLK  (J4-4  / T5  / BANK13)
+    output wire        dds_sync,    // → AD9833  FSYNC (J4-6  / U7  / BANK13)
+    output wire        dds_data     // → AD9833  SDATA (J4-2  / T11 / BANK34)
 );
 
     //=========================================================================
@@ -209,6 +241,18 @@ module cv_sys #(
     wire [31:0] sts_touch_status;
     wire [31:0] sts_touch_pt0;
     wire [31:0] sts_touch_pt1;
+
+    // 模拟前端配置(2026-10-05 加)—— 同样必须在从机例化【之前】声明
+    wire [31:0] cfg_bias_code;      // 0x14 [19:0] → dac_1220.code
+    wire        cfg_bias_set;       // 0x14 写 → 1 拍脉冲 → dac_1220.set_in
+    wire        cfg_dac_rst_n;      // 0x84[0] → 与 s_axi_aresetn 与后驱动 dac_1220.rst_n
+    wire [31:0] cfg_dds_freq;       // 0x80 [27:0] → adc_9833.code
+    wire        cfg_dds_set;        // 0x80 写 → 1 拍脉冲 → adc_9833.set_in
+    // dac_1220 的 init_done —— 【回送给从机】给上电脉冲开门。
+    //   ⚠️ 方向是从机收、DAC 发,所以它在从机端口表里是 input。
+    //      dac_1220 的 set_in 只在 NORMAL_WAIT 状态里才锁存,不等 init_done
+    //      就发脉冲 = 空放(详见 cv_axi_lite_slave.v §set 脉冲 的核对记录)。
+    wire        dac_init_done;
 
     //=========================================================================
     //  1. AXI4-Lite 从机 —— 例化结构不变(v2 起内部扩了 2 个寄存器)
@@ -255,7 +299,15 @@ module cv_sys #(
         .sts_dbg_state    (sts_dbg_state   ),
         .sts_touch_status (sts_touch_status),
         .sts_touch_pt0    (sts_touch_pt0   ),
-        .sts_touch_pt1    (sts_touch_pt1   )
+        .sts_touch_pt1    (sts_touch_pt1   ),
+
+        // 模拟前端(2026-10-05)
+        .cfg_bias_code    (cfg_bias_code   ),
+        .cfg_bias_set     (cfg_bias_set    ),
+        .cfg_dac_rst_n    (cfg_dac_rst_n   ),
+        .cfg_dds_freq     (cfg_dds_freq    ),
+        .cfg_dds_set      (cfg_dds_set     ),
+        .dac_init_done    (dac_init_done   )
     );
 
     //=========================================================================
@@ -481,6 +533,78 @@ module cv_sys #(
         .sts_touch_status (sts_touch_status),
         .sts_touch_pt0    (sts_touch_pt0   ),
         .sts_touch_pt1    (sts_touch_pt1   )
+    );
+
+    //=========================================================================
+    //  7. 模拟前端(2026-10-05 加)—— DAC1220 偏压 + AD9833 激励
+    //
+    //  【为什么放 clk_axi 域】两个模块的时序参数都是按 50 MHz 写死的
+    //    (dac_1220.v 的 PWR_WAIT / CAL_WAIT_T 注释写着"@50MHz";
+    //     adc_9833.v 的 PWR_WAIT 同理),而 clk_axi 正是【设计 50 MHz】。
+    //    与 gt911_ctrl 放同一个域 ⇒ 与 cfg_* 之间无 CDC,少一处风险。
+    //
+    //  🔴 【2026-10-05 更正】本段此前写着「clk_axi 开机默认 27.78 MHz,
+    //     "毫秒"会按比例变长,**对这里的一次性上电握手没有影响**」——
+    //     **后半句是错的,而且正是 bug 藏身之处。**
+    //
+    //     只有【下限型】的等待(200 ms 晶振起振、600 ms 校准、30 ms 建立、
+    //     SPI 半周期、字节间隔)才"变长无害"。dac_1220 的**串行复位图案
+    //     是双向窗口**(手册 Figure 12 / Table 5):
+    //         t16 = 208.3~325.5 µs、t18 = 416.7~732.4 µs、t19 = 833.3~976.6 µs
+    //     常数按 50 MHz 折的,跑到 27.78 MHz 就变成
+    //         468 / 1026 / 1620 µs —— 三段**全部超上界**
+    //     ⇒ 复位不触发 ⇒ CMR 配置与自校准被忽略 ⇒ DIR 写入无效
+    //     ⇒ 输出停在芯片上电默认 DIR=0 = **−10 V**(用户实测到的症状)。
+    //     ⚠️ 两组窗口折成拍数**不重叠**(t16 @27.78 M = 5787~9044 拍,
+    //        @50 M = 10415~16275 拍)⇒ 改常数修不了。
+    //
+    //     ⇒ 处置:dac_1220 的 rst_n 不再直连 s_axi_aresetn,而与
+    //       `cfg_dac_rst_n`(0x84[0],复位值 **0**)相与。
+    //       软件在 `apply_fclk0()` 把 FCLK0 置到 50.000 MHz **之后**
+    //       写 0x84=1 放行 ⇒ 初始化必然跑在设计频率上。
+    //     ✅ adc_9833 不受影响:它的时序常数**全是下限型**(PWR_WAIT 与
+    //        1024 拍帧间隔),没有双向窗口,慢一点无害 —— 故照旧直连。
+    //
+    //  【init_done】dac_1220 的 `init_done` 已接回从机(给 bias_code 的
+    //    上电脉冲开门,必须在 NORMAL_WAIT 才发);adc_9833 的仍接空 ——
+    //    DDS 侧不发上电脉冲,不需要它。将来若要观测,开 ILA 比占槽位省事。
+    //
+    //  【上电时序】dac_1220:200 ms 等待 + 六段复位图案 + 600 ms 自校准;
+    //    adc_9833:200 ms 等待 + 4 帧初始化(其中就已经把频率置成 1 MHz)。
+    //    ⚠️ 时序从**软件写 0x84=1 那一刻**起算(开机时 DAC 一直按在复位态),
+    //       不再是从位流加载起算。这段时间里到来的 bias_set 脉冲会被
+    //       dac_1220 内部的 set_pending 锁住,等它就绪再消费 —— 不会丢;
+    //       且从机侧的上电脉冲本来就等 dac_init_done,不会空放。
+    //=========================================================================
+    dac_1220 #(
+        .PWR_WAIT    (32'd10000000),   // 200 ms @50 MHz(手册要求晶振起振 ≥25 ms)
+        .CAL_WAIT_T  (32'd30000000),   // 600 ms 自校准等待(手册 300–500 ms)
+        .SETTLE_WAIT (32'd1500000)     // 30 ms DIR 建立等待
+    ) u_dac_1220 (
+        .clk_50m   (s_axi_aclk          ),
+        // 🔴 不是 s_axi_aresetn 直连 —— 初始化必须等软件把 FCLK0 补到
+        //    50.000 MHz 之后才放行(写 0x84[0]=1)。理由见下面 §上电时序:
+        //    三段复位图案是有【双向窗口】的,超上界就完全不复位。
+        .rst_n     (s_axi_aresetn & cfg_dac_rst_n),
+        .dac_sclk  (dac_sclk            ),
+        .dac_cs    (dac_cs              ),
+        .dac_mosi  (dac_mosi            ),
+        .code      (cfg_bias_code[19:0] ),   // 0x14,20 位
+        .set_in    (cfg_bias_set        ),   // 0x14 写脉冲 + 上电那一次
+        .init_done (dac_init_done       )   // → 从机,给上电脉冲开门(必须有)
+    );
+
+    adc_9833 #(
+        .PWR_WAIT (32'd10000000)       // 200 ms @50 MHz
+    ) u_adc_9833 (
+        .clk_50m   (s_axi_aclk          ),
+        .rst_n     (s_axi_aresetn       ),
+        .adc_sclk  (dds_sclk            ),   // ⚠️ 模块内的历史命名,实际是:
+        .adc_sync  (dds_sync            ),   //    adc_sclk → AD9833 SCLK
+        .adc_mosi  (dds_data            ),   //    adc_sync → FSYNC / adc_mosi → SDATA
+        .code      (cfg_dds_freq[27:0]  ),   // 0x80,f_out = code × 25 MHz / 2^28
+        .set_in    (cfg_dds_set         ),   // 0x80 写脉冲(上电不发,见从机注释)
+        .init_done ()                        // 未引出,见上
     );
 
 endmodule

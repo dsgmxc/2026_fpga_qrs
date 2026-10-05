@@ -1,5 +1,5 @@
 ﻿<?xml version="1.0" encoding="UTF-8" standalone="no" ?>
-<EDKSYSTEM EDWVERSION="1.2" TIMESTAMP="Fri Oct  2 21:40:22 2026" VIVADOVERSION="2025.2">
+<EDKSYSTEM EDWVERSION="1.2" TIMESTAMP="Mon Oct  5 16:23:03 2026" VIVADOVERSION="2025.2">
 
   <SYSTEMINFO ARCH="zynq" DEVICE="7z020" NAME="system" PACKAGE="clg400" SPEEDGRADE="-2"/>
 
@@ -107,6 +107,36 @@
     <PORT DIR="IO" NAME="FIXED_IO_0_ps_srstb" SIGIS="undef" SIGNAME="processing_system7_0_PS_SRSTB">
       <CONNECTIONS>
         <CONNECTION INSTANCE="processing_system7_0" PORT="PS_SRSTB"/>
+      </CONNECTIONS>
+    </PORT>
+    <PORT DIR="O" NAME="dac_cs" SIGIS="undef" SIGNAME="cv_sys_0_dac_cs">
+      <CONNECTIONS>
+        <CONNECTION INSTANCE="cv_sys_0" PORT="dac_cs"/>
+      </CONNECTIONS>
+    </PORT>
+    <PORT DIR="O" NAME="dac_mosi" SIGIS="undef" SIGNAME="cv_sys_0_dac_mosi">
+      <CONNECTIONS>
+        <CONNECTION INSTANCE="cv_sys_0" PORT="dac_mosi"/>
+      </CONNECTIONS>
+    </PORT>
+    <PORT DIR="O" NAME="dac_sclk" SIGIS="undef" SIGNAME="cv_sys_0_dac_sclk">
+      <CONNECTIONS>
+        <CONNECTION INSTANCE="cv_sys_0" PORT="dac_sclk"/>
+      </CONNECTIONS>
+    </PORT>
+    <PORT DIR="O" NAME="dds_data" SIGIS="undef" SIGNAME="cv_sys_0_dds_data">
+      <CONNECTIONS>
+        <CONNECTION INSTANCE="cv_sys_0" PORT="dds_data"/>
+      </CONNECTIONS>
+    </PORT>
+    <PORT DIR="O" NAME="dds_sclk" SIGIS="undef" SIGNAME="cv_sys_0_dds_sclk">
+      <CONNECTIONS>
+        <CONNECTION INSTANCE="cv_sys_0" PORT="dds_sclk"/>
+      </CONNECTIONS>
+    </PORT>
+    <PORT DIR="O" NAME="dds_sync" SIGIS="undef" SIGNAME="cv_sys_0_dds_sync">
+      <CONNECTIONS>
+        <CONNECTION INSTANCE="cv_sys_0" PORT="dds_sync"/>
       </CONNECTIONS>
     </PORT>
     <PORT DIR="O" NAME="lcd_bl" SIGIS="undef" SIGNAME="cv_sys_0_lcd_bl">
@@ -231,7 +261,7 @@
         <PARAMETER NAME="EDK_IPTYPE" VALUE="BUS"/>
       </PARAMETERS>
       <PORTS>
-        <PORT DIR="O" LEFT="6" NAME="M00_AXI_araddr" RIGHT="0" SIGIS="undef" SIGNAME="axi_smc_M00_AXI_araddr">
+        <PORT DIR="O" LEFT="7" NAME="M00_AXI_araddr" RIGHT="0" SIGIS="undef" SIGNAME="axi_smc_M00_AXI_araddr">
           <CONNECTIONS>
             <CONNECTION INSTANCE="cv_sys_0" PORT="s_axi_araddr"/>
           </CONNECTIONS>
@@ -251,7 +281,7 @@
             <CONNECTION INSTANCE="cv_sys_0" PORT="s_axi_arvalid"/>
           </CONNECTIONS>
         </PORT>
-        <PORT DIR="O" LEFT="6" NAME="M00_AXI_awaddr" RIGHT="0" SIGIS="undef" SIGNAME="axi_smc_M00_AXI_awaddr">
+        <PORT DIR="O" LEFT="7" NAME="M00_AXI_awaddr" RIGHT="0" SIGIS="undef" SIGNAME="axi_smc_M00_AXI_awaddr">
           <CONNECTIONS>
             <CONNECTION INSTANCE="cv_sys_0" PORT="s_axi_awaddr"/>
           </CONNECTIONS>
@@ -602,7 +632,7 @@
           </PORTMAPS>
         </BUSINTERFACE>
         <BUSINTERFACE BUSNAME="axi_smc_M00_AXI" DATAWIDTH="32" NAME="M00_AXI" TYPE="MASTER" VLNV="xilinx.com:interface:aximm:1.0">
-          <PARAMETER NAME="ADDR_WIDTH" VALUE="7"/>
+          <PARAMETER NAME="ADDR_WIDTH" VALUE="8"/>
           <PARAMETER NAME="ARUSER_WIDTH" VALUE="0"/>
           <PARAMETER NAME="AWUSER_WIDTH" VALUE="0"/>
           <PARAMETER NAME="BUSER_WIDTH" VALUE="0"/>
@@ -663,7 +693,7 @@
         <ADDRESSBLOCK ACCESS="" INTERFACE="S_AXI" NAME="reg0" RANGE="4096" USAGE="register"/>
       </ADDRESSBLOCKS>
       <PARAMETERS>
-        <PARAMETER NAME="C_S_AXI_ADDR_WIDTH" VALUE="7"/>
+        <PARAMETER NAME="C_S_AXI_ADDR_WIDTH" VALUE="8"/>
         <PARAMETER NAME="C_S_AXI_DATA_WIDTH" VALUE="32"/>
         <PARAMETER NAME="LCD_ID" VALUE="0x7016"/>
         <PARAMETER NAME="VERSION_CONST" VALUE="0x00010000"/>
@@ -673,6 +703,36 @@
         <PARAMETER NAME="C_HIGHADDR" VALUE="0x43C00FFF"/>
       </PARAMETERS>
       <PORTS>
+        <PORT DIR="O" NAME="dac_cs" SIGIS="undef" SIGNAME="cv_sys_0_dac_cs">
+          <CONNECTIONS>
+            <CONNECTION INSTANCE="External_Ports" PORT="dac_cs"/>
+          </CONNECTIONS>
+        </PORT>
+        <PORT DIR="O" NAME="dac_mosi" SIGIS="undef" SIGNAME="cv_sys_0_dac_mosi">
+          <CONNECTIONS>
+            <CONNECTION INSTANCE="External_Ports" PORT="dac_mosi"/>
+          </CONNECTIONS>
+        </PORT>
+        <PORT DIR="O" NAME="dac_sclk" SIGIS="undef" SIGNAME="cv_sys_0_dac_sclk">
+          <CONNECTIONS>
+            <CONNECTION INSTANCE="External_Ports" PORT="dac_sclk"/>
+          </CONNECTIONS>
+        </PORT>
+        <PORT DIR="O" NAME="dds_data" SIGIS="undef" SIGNAME="cv_sys_0_dds_data">
+          <CONNECTIONS>
+            <CONNECTION INSTANCE="External_Ports" PORT="dds_data"/>
+          </CONNECTIONS>
+        </PORT>
+        <PORT DIR="O" NAME="dds_sclk" SIGIS="undef" SIGNAME="cv_sys_0_dds_sclk">
+          <CONNECTIONS>
+            <CONNECTION INSTANCE="External_Ports" PORT="dds_sclk"/>
+          </CONNECTIONS>
+        </PORT>
+        <PORT DIR="O" NAME="dds_sync" SIGIS="undef" SIGNAME="cv_sys_0_dds_sync">
+          <CONNECTIONS>
+            <CONNECTION INSTANCE="External_Ports" PORT="dds_sync"/>
+          </CONNECTIONS>
+        </PORT>
         <PORT DIR="O" NAME="lcd_bl" SIGIS="undef" SIGNAME="cv_sys_0_lcd_bl">
           <CONNECTIONS>
             <CONNECTION INSTANCE="External_Ports" PORT="lcd_bl"/>
@@ -778,7 +838,7 @@
             <CONNECTION INSTANCE="processing_system7_0" PORT="FCLK_CLK0"/>
           </CONNECTIONS>
         </PORT>
-        <PORT DIR="I" LEFT="6" NAME="s_axi_araddr" RIGHT="0" SIGIS="undef" SIGNAME="axi_smc_M00_AXI_araddr">
+        <PORT DIR="I" LEFT="7" NAME="s_axi_araddr" RIGHT="0" SIGIS="undef" SIGNAME="axi_smc_M00_AXI_araddr">
           <CONNECTIONS>
             <CONNECTION INSTANCE="axi_smc" PORT="M00_AXI_araddr"/>
           </CONNECTIONS>
@@ -803,7 +863,7 @@
             <CONNECTION INSTANCE="axi_smc" PORT="M00_AXI_arvalid"/>
           </CONNECTIONS>
         </PORT>
-        <PORT DIR="I" LEFT="6" NAME="s_axi_awaddr" RIGHT="0" SIGIS="undef" SIGNAME="axi_smc_M00_AXI_awaddr">
+        <PORT DIR="I" LEFT="7" NAME="s_axi_awaddr" RIGHT="0" SIGIS="undef" SIGNAME="axi_smc_M00_AXI_awaddr">
           <CONNECTIONS>
             <CONNECTION INSTANCE="axi_smc" PORT="M00_AXI_awaddr"/>
           </CONNECTIONS>
@@ -901,7 +961,7 @@
       </PORTS>
       <BUSINTERFACES>
         <BUSINTERFACE BUSNAME="axi_smc_M00_AXI" DATAWIDTH="32" NAME="S_AXI" TYPE="SLAVE" VLNV="xilinx.com:interface:aximm:1.0">
-          <PARAMETER NAME="ADDR_WIDTH" VALUE="7"/>
+          <PARAMETER NAME="ADDR_WIDTH" VALUE="8"/>
           <PARAMETER NAME="ARUSER_WIDTH" VALUE="0"/>
           <PARAMETER NAME="AWUSER_WIDTH" VALUE="0"/>
           <PARAMETER NAME="BUSER_WIDTH" VALUE="0"/>

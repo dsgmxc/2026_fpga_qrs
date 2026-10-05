@@ -250,6 +250,36 @@ class CVMonitor(DefaultIP):
         self._require("BIAS_CODE")
         self._write("BIAS_CODE", code)
 
+    # -----------------------------------------------------------------------
+    # DAC1220 初始化放行(0x84 CV_CTRL)—— 2026-10-05
+    #   ⚠️ 本层只做【裸寄存器访问 + 读回校验】。
+    #      「FCLK0 在不在窗口内」那一层判断在 `drivers/board.py::release_dac()`
+    #      —— 因为这里反向 import drivers 会成环,而那里本来就有 BoardError。
+    # -----------------------------------------------------------------------
+    def dac_rst_held(self):
+        """读 CV_CTRL,返回 True 表示 DAC **仍被按在复位态**(0x84[0] == 0)。"""
+        self._require("CV_CTRL")
+        return (self._read("CV_CTRL") & cv_regs.CV_CTRL_DAC_RST_N) == 0
+
+    def dac_release(self):
+        """放行 dac_1220 的初始化(写 0x84[0] = 1)。幂等。
+
+        返回 True = 这一次真的把 DAC 从复位态放了出来;
+        返回 False = 调用前就已经是放行态(重复调用无害)。
+
+        🔴 调用前请先确保 FCLK0 已是设计值 —— 用
+           `drivers.board.release_dac(mon)`,它替你查这一条。
+        """
+        was_held = self.dac_rst_held()
+        self._write("CV_CTRL", cv_regs.CV_CTRL_DAC_RST_N)
+        # 读回校验:与 lcd.select / set_bias 同一个契约 —— 读回必须是【已生效】值
+        if self.dac_rst_held():
+            raise RuntimeError(
+                "写 0x84 = 1 后读回仍是被按在复位态 —— 位流与代码不匹配。\n"
+                "  该位是 2026-10-05 才加的;旧位流里 0x84 会被静默忽略(读回 0)。"
+            )
+        return was_held
+
     def set_decim(self, R):
         """写 CIC_DECIM(抽取率 R)。
 

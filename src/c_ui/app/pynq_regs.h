@@ -31,6 +31,25 @@ extern "C" {
 /* ------------------------------------------------------------------ */
 /* 寄存器字节偏移(cv_regs.py 的 REG 表)                                */
 /* ------------------------------------------------------------------ */
+#define CV_REG_BIAS_CODE     0x14u   /* RW [19:0] → dac_1220.code          */
+#define CV_REG_DDS_FREQ      0x80u   /* RW [27:0] → adc_9833.code          */
+#define CV_REG_CV_CTRL       0x84u   /* RW [0] dac_rst_n ★ 见下             */
+
+/* CV_CTRL(0x84)—— dac_1220 初始化的放行位。2026-10-05 加。
+ *
+ * 🔴 **复位值 = 0 = DAC 被按在复位态,初始化不跑。**
+ *    DAC1220 没有复位引脚,靠一串**三段高电平的串行复位图案**复位,而那三段是
+ *    **双向窗口**(手册 Figure 12 / Table 5):t16 = 208.3~325.5 µs、
+ *    t18 = 416.7~732.4 µs、t19 = 833.3~976.6 µs —— **超上界就不触发**。
+ *    dac_1220.v 的常数按 50 MHz 折,而本模块跑 PS FCLK0;板上 BOOT.BIN 把
+ *    FCLK0 留在 **27.778 MHz** ⇒ 三段变成 468/1026/1620 µs,全部超上界
+ *    ⇒ 复位不触发 ⇒ DIR 写入无效 ⇒ 输出停在芯片默认的 **−10 V**。
+ *
+ * ✅ **放行由 Python 侧独占**(`drivers/board.py::release_dac()`,它先验 FCLK0
+ *    在不在 [46.1, 54.0] MHz 窗口内,不在就拒绝)。**C 侧只读不写** ——
+ *    避免两个写入方;这里只负责把"还没放行"这件事**喊出来**,不要静默。
+ */
+#define CV_CTRL_DAC_RST_N    0x1u    /* [0] 1 = 已放行 / 0 = 仍按在复位     */
 #define CV_REG_LCD_CTRL      0x50u   /* RW [1:0] src_sel                   */
 #define CV_REG_LCD_FILL      0x54u   /* RW [23:0] RGB888 整屏填充          */
 #define CV_REG_FB_BASE0      0x58u   /* RW 帧缓存 0 物理基址(64 KB 对齐)  */
@@ -72,6 +91,85 @@ extern "C" {
 #define CV_FB_AXIERR(s)      ((uint32_t)(((s) >> 20) & 0x1u))
 #define CV_FB_VBLANK_CNT(s)  ((uint32_t)(((s) >> 2) & 0x1FFu))
 #define CV_FB_SWAP_CNT(s)    ((uint32_t)(((s) >> 11) & 0xFFu))
+
+/* ------------------------------------------------------------------ */
+/* 模拟前端:偏压(DAC1220)/ 激励(AD9833)                              */
+/* ------------------------------------------------------------------ */
+/* 0x14 [19:0] → dac_1220.code。DAC 是**模块级 ±10 V**:
+ *     V_module = −10 + 20 × code / 1048575
+ * 再到被栅极看到的偏压,还要乘【外部高压级的 10:1】——
+ *     V_bias = V_module × 10        ⇒ 量程 −100 V … +100 V
+ *
+ * 🔴 **那个 10:1 是硬件接线,不是寄存器。** 换一块高压板就得改这个常量,
+ *    而 RTL / 寄存器映射一个字都不用动 —— 这正是换算放在 PS 侧的理由。
+ *
+ * ⚠️ `code = 0` 是 **−100 V**,不是 0 V。空闲态用中位码(见 CV_BIAS_CODE_MID)。
+ *    界面的偏压范围是 0.1–100.0 V(只走正向半轴),下限对应 code ≈ 0x8020C。 */
+#define CV_BIAS_CODE_MAX     0xFFFFFu      /* 20 位满量程 = 1048575 */
+#define CV_BIAS_CODE_MID     0x80000u      /* 中位码 = 0 V 偏压(RTL 复位值) */
+#define CV_BIAS_HV_RATIO     10.0f         /* 外部高压级倍数(硬件,非寄存器) */
+#define CV_BIAS_TENTHS_MIN   1u            /* 0.1 V —— 界面下限 */
+#define CV_BIAS_TENTHS_MAX   1000u         /* 100.0 V —— 界面上限 */
+
+/**
+ * @brief 偏压 → 偏压码(**全精度**,不经 0.1 V 量化)。越界夹到 [0, 0xFFFFF]。
+ *
+ * ⚠️ 扫压必须走这个,不能走 @ref cv_bias_tenths_to_code。
+ *    索引间隔在低压段每步增量会小于 0.1 V,先取整到 0.1 V 再换算,
+ *    最前面一串点会**塌成同一个 0.1 V**(实测:60 点里前 6 点重复),
+ *    而低压段恰恰是 C-V 斜率最大、最不该丢点的地方。
+ *    0.1 V 量化只该用在**界面显示**上。
+ */
+static inline uint32_t cv_bias_volts_to_code(float volts)
+{
+    float module_v = volts / CV_BIAS_HV_RATIO;
+    float raw      = (module_v + 10.0f) * 1048575.0f / 20.0f;
+
+    if (raw < 0.0f)       { raw = 0.0f; }
+    if (raw > 1048575.0f) { raw = 1048575.0f; }
+    return (uint32_t)(raw + 0.5f);
+}
+
+/**
+ * @brief 0.1 V 计数 → 偏压码。界面的 0.1 V 栅格用这个。
+ * @note  `tenths = 0` → `0x80000`(0 V);`1000` → `0xFFFFF`(+100 V)。
+ */
+static inline uint32_t cv_bias_tenths_to_code(uint32_t tenths)
+{
+    return cv_bias_volts_to_code((float)tenths / 10.0f);
+}
+
+/** @brief 偏压码 → 偏压(V),全精度。 */
+static inline float cv_bias_code_to_volts(uint32_t code)
+{
+    float module_v = -10.0f +
+        (20.0f * (float)(code & CV_BIAS_CODE_MAX) / 1048575.0f);
+
+    return module_v * CV_BIAS_HV_RATIO;
+}
+
+/**
+ * @brief 偏压码 → 0.1 V 计数(四舍五入)。把回读值变成人看的数字。
+ * @note  负偏压返回 0 —— 界面的量程是正向半轴,负半轴不往外显示。
+ */
+static inline uint32_t cv_bias_code_to_tenths(uint32_t code)
+{
+    float tenths = cv_bias_code_to_volts(code) * 10.0f;
+
+    return (tenths <= 0.0f) ? 0u : (uint32_t)(tenths + 0.5f);
+}
+
+/* 0x80 [27:0] → adc_9833.code:f_out = code × MCLK / 2^28
+ * ⚠️ MCLK 是 AD9833 **板载焊死的 25 MHz 晶振**,FPGA 供不了(决策 D10)
+ *    ⇒ 这里只能写常量。换晶体就要改这一行 + cv_regs.py 的 DDS_MCLK_HZ。 */
+#define CV_DDS_MCLK_HZ       25000000u
+#define CV_DDS_FREQ_1MHZ     0x0A3D70Au    /* 10737418 → 999 999.98 Hz */
+
+/** @brief 频率 → 28 位频率字。 */
+static inline uint32_t cv_dds_hz_to_code(uint32_t hz)
+{
+    return (uint32_t)(((double)hz * 268435456.0) / (double)CV_DDS_MCLK_HZ + 0.5);
+}
 
 /* ------------------------------------------------------------------ */
 /* 面板                                                                */

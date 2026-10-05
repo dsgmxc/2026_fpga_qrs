@@ -1,0 +1,571 @@
+==========================================================================
+  MOSFET C-V 在线监测平台 · PS 侧启动
+==========================================================================
+  VERSION      0x00010000
+  link_check   True
+  fclk0_real   27.7778 MHz
+  fclk0_pynq   41.6667 MHz (PYNQ 算的,不是真值)
+  fclk0_expect 50.0
+  pclk_window  (40.8, 67.2)
+[cv_monitor] VERSION  = 0x00010000  (expect 0x00010000)
+[cv_monitor] SCRATCH  = 0xDEADBEEF / 0xA5A55A5A  (expect 0xDEADBEEF / 0xA5A55A5A)
+[cv_monitor] link_check: PASS
+
+--- FCLK0(就是像素时钟)---
+  改前 27.7778 MHz(DIV0=6 DIV1=6)  ← BOOT.BIN 留下的默认值
+[fclk0] 50.0000 MHz (IO_PLL 1000 / DIV0 20 / DIV1 1)  ✓ 在窗口内 [40.8~67.2]
+  改后 50.0000 MHz(设计值 50.0 MHz)
+  📌 口径:写文档一律写「设计值 50 MHz / 真值 50.0000 MHz」
+
+--- 显示通路 ---
+  帧缓存 fb0=0x38100000  fb1=0x38230000(1228800 B / 块,64 KB 对齐)
+
+--- 触摸通路 ---
+  <TouchEvent NEW  seq=  0 count=0 pen=0 err=0 (   0,   0)>   (没碰屏时 seq 不动、pen_down=0 属正常)
+
+--- 界面 ---
+[ui] 启动:/home/xilinx/c_ui_src/c_ui --axi-base 0x43C00000 --poll-ms 10 --fb0 0x38100000 --fb1 0x38230000
+[ui] ⚠️ 需要读 /dev/mem —— 本进程必须是 root(main.py 已经是)
+  👀 屏上应当出现前序那套 LVGL 界面(首页)。点一下按钮看页面切不切。
+  ⚠️ 触摸的坐标轴是否要翻转,以 tools/touch_probe.py 的实测为准。
+──── c_ui 启动 ────
+  axi_base = 0x43C00000   fb0 = 0x38100000   fb1 = 0x38230000   poll = 10 ms   touch = 开
+[regs] /dev/mem 已映射 AXI 0x43C00000(4096 B)
+[disp] direct_mode 双缓冲就绪:fb0=0x38100000 fb1=0x38230000 前台=0(非缓存映射;无 DMA2D,矩形同步走 CPU memcpy)
+[touch] 链路检查:0x68 = 0x00000300(seq=3 count=0 pen=0 err=0)
+[indev] 指针设备已注册(坐标来自 PL 的 0x68/0x6C/0x70)
+[main] 等第一帧画完再切到 DDR 源(期间屏上应显示厂商彩条)…
+[main] 首帧已提交(flush=1),已切到 DDR 源(0x50 = 2)
+[touch] PL 报过总线错(err 粘滞位置起,0x68=0x00000310)。
+        这是**历史累计**标志,只有重新配置 PL 才清 ——
+        本次只报告一次,之后正常读。若触摸一直无反应,
+        那才需要查 I2C 上拉 / GT911 底板。
+
+[main] 收到退出信号,收尾…
+
+──── c_ui 统计 ────
+  disp  flush=1  换址=1  矩形同步=1  flush错=0  换址超时=0  最近错误=0
+  前台物理地址 = 0x38230000
+  touch 轮询=3425  新帧=1  错误=1  越界点=0  LVGL读取=1879
+  touch 末态 seq=3 count=0 pen=0 err=1 raw68=0x00000310
+  UI    点击=0  页面=0  被拒的测量指令=0
+  0x64 = 0x00080C61  underrun=1  axierr=0  vblank_cnt=280  swap_cnt=1
+  ⚠️  underrun 已置起(粘滞,写 0x60 清):PL 取数时帧缓存还没备好。
+      上板判据是「跑 60 s 后必须为 0」,见 display_probe.py。
+───────────────────
+[main] 屏已切回厂商彩条(0x50 = 0)
+==========================================================================
+  MOSFET C-V 在线监测平台 · PS 侧启动
+==========================================================================
+  VERSION      0x00010000
+  link_check   True
+  fclk0_real   27.7778 MHz
+  fclk0_pynq   41.6667 MHz (PYNQ 算的,不是真值)
+  fclk0_expect 50.0
+  pclk_window  (40.8, 67.2)
+[cv_monitor] VERSION  = 0x00010000  (expect 0x00010000)
+[cv_monitor] SCRATCH  = 0xDEADBEEF / 0xA5A55A5A  (expect 0xDEADBEEF / 0xA5A55A5A)
+[cv_monitor] link_check: PASS
+
+--- FCLK0(就是像素时钟)---
+  改前 27.7778 MHz(DIV0=6 DIV1=6)  ← BOOT.BIN 留下的默认值
+[fclk0] 50.0000 MHz (IO_PLL 1000 / DIV0 20 / DIV1 1)  ✓ 在窗口内 [40.8~67.2]
+  改后 50.0000 MHz(设计值 50.0 MHz)
+  📌 口径:写文档一律写「设计值 50 MHz / 真值 50.0000 MHz」
+
+--- 显示通路 ---
+  帧缓存 fb0=0x38100000  fb1=0x38230000(1228800 B / 块,64 KB 对齐)
+
+--- 触摸通路 ---
+  <TouchEvent NEW  seq=  0 count=0 pen=0 err=0 (   0,   0)>   (没碰屏时 seq 不动、pen_down=0 属正常)
+
+--- 界面 ---
+[ui] 启动:/home/xilinx/c_ui_src/c_ui --axi-base 0x43C00000 --poll-ms 10 --fb0 0x38100000 --fb1 0x38230000
+[ui] ⚠️ 需要读 /dev/mem —— 本进程必须是 root(main.py 已经是)
+  👀 屏上应当出现前序那套 LVGL 界面(首页)。点一下按钮看页面切不切。
+  ⚠️ 触摸的坐标轴是否要翻转,以 tools/touch_probe.py 的实测为准。
+──── c_ui 启动 ────
+  axi_base = 0x43C00000   fb0 = 0x38100000   fb1 = 0x38230000   poll = 10 ms   touch = 开
+[regs] /dev/mem 已映射 AXI 0x43C00000(4096 B)
+[disp] direct_mode 双缓冲就绪:fb0=0x38100000 fb1=0x38230000 前台=0(非缓存映射;无 DMA2D,矩形同步走 CPU memcpy)
+[touch] 链路检查:0x68 = 0x00000410(seq=4 count=0 pen=0 err=1)
+[indev] 指针设备已注册(坐标来自 PL 的 0x68/0x6C/0x70)
+[main] 等第一帧画完再切到 DDR 源(期间屏上应显示厂商彩条)…
+[touch] PL 报过总线错(err 粘滞位置起,0x68=0x00000410)。
+        这是**历史累计**标志,只有重新配置 PL 才清 ——
+        本次只报告一次,之后正常读。若触摸一直无反应,
+        那才需要查 I2C 上拉 / GT911 底板。
+[main] 首帧已提交(flush=1),已切到 DDR 源(0x50 = 2)
+[touch] 按下 (890,163) 点数 1
+[touch] 抬起
+[touch] 按下 (65,21) 点数 1
+[touch] 抬起
+[touch] 按下 (454,449) 点数 1
+[touch] 抬起
+[touch] 按下 (46,48) 点数 1
+[touch] 抬起
+[touch] 按下 (46,39) 点数 1
+[touch] 抬起
+[touch] 按下 (642,393) 点数 1
+[touch] 抬起
+[touch] 按下 (40,13) 点数 1
+[touch] 抬起
+
+[main] 收到退出信号,收尾…
+
+──── c_ui 统计 ────
+  disp  flush=14  换址=14  矩形同步=15  flush错=0  换址超时=0  最近错误=0
+  前台物理地址 = 0x38100000
+  touch 轮询=21636  新帧=50  错误=1  越界点=0  LVGL读取=11819
+  touch 末态 seq=78 count=0 pen=0 err=1 raw68=0x00004E10
+  UI    点击=6  页面=0  被拒的测量指令=0
+  0x64 = 0x00087658  underrun=1  axierr=0  vblank_cnt=406  swap_cnt=14
+  ⚠️  underrun 已置起(粘滞,写 0x60 清):PL 取数时帧缓存还没备好。
+      上板判据是「跑 60 s 后必须为 0」,见 display_probe.py。
+───────────────────
+[main] 屏已切回厂商彩条(0x50 = 0)
+==========================================================================
+  MOSFET C-V 在线监测平台 · PS 侧启动
+==========================================================================
+  VERSION      0x00010000
+  link_check   True
+  fclk0_real   27.7778 MHz
+  fclk0_pynq   41.6667 MHz (PYNQ 算的,不是真值)
+  fclk0_expect 50.0
+  pclk_window  (40.8, 67.2)
+[cv_monitor] VERSION  = 0x00010000  (expect 0x00010000)
+[cv_monitor] SCRATCH  = 0xDEADBEEF / 0xA5A55A5A  (expect 0xDEADBEEF / 0xA5A55A5A)
+[cv_monitor] link_check: PASS
+
+--- FCLK0(就是像素时钟)---
+  改前 27.7778 MHz(DIV0=6 DIV1=6)  ← BOOT.BIN 留下的默认值
+[fclk0] 50.0000 MHz (IO_PLL 1000 / DIV0 20 / DIV1 1)  ✓ 在窗口内 [40.8~67.2]
+  改后 50.0000 MHz(设计值 50.0 MHz)
+  📌 口径:写文档一律写「设计值 50 MHz / 真值 50.0000 MHz」
+
+--- 显示通路 ---
+  帧缓存 fb0=0x38100000  fb1=0x38230000(1228800 B / 块,64 KB 对齐)
+
+--- 触摸通路 ---
+  <TouchEvent NEW  seq=  3 count=0 pen=0 err=0 (   0,   0)>   (没碰屏时 seq 不动、pen_down=0 属正常)
+
+--- 界面 ---
+[ui] 启动:/home/xilinx/c_ui_src/c_ui --axi-base 0x43C00000 --poll-ms 10 --fb0 0x38100000 --fb1 0x38230000
+[ui] ⚠️ 需要读 /dev/mem —— 本进程必须是 root(main.py 已经是)
+  👀 屏上应当出现前序那套 LVGL 界面(首页)。点一下按钮看页面切不切。
+  ⚠️ 触摸的坐标轴是否要翻转,以 tools/touch_probe.py 的实测为准。
+──── c_ui 启动 ────
+  axi_base = 0x43C00000   fb0 = 0x38100000   fb1 = 0x38230000   poll = 10 ms   touch = 开
+[regs] /dev/mem 已映射 AXI 0x43C00000(4096 B)
+[disp] direct_mode 双缓冲就绪:fb0=0x38100000 fb1=0x38230000 前台=0(非缓存映射;无 DMA2D,矩形同步走 CPU memcpy)
+[touch] 链路检查:0x68 = 0x00000300(seq=3 count=0 pen=0 err=0)
+[indev] 指针设备已注册(坐标来自 PL 的 0x68/0x6C/0x70)
+[main] 等第一帧画完再切到 DDR 源(期间屏上应显示厂商彩条)…
+[main] 首帧已提交(flush=1),已切到 DDR 源(0x50 = 2)
+[touch] PL 报过总线错(err 粘滞位置起,0x68=0x00000310)。
+        这是**历史累计**标志,只有重新配置 PL 才清 ——
+        本次只报告一次,之后正常读。若触摸一直无反应,
+        那才需要查 I2C 上拉 / GT911 底板。
+[touch] 按下 (290,399) 点数 1
+[touch] 抬起
+[touch] 按下 (61,15) 点数 1
+[touch] 抬起
+[touch] 按下 (713,362) 点数 1
+[touch] 抬起
+[touch] 按下 (68,26) 点数 1
+[touch] 抬起
+[touch] 按下 (393,356) 点数 1
+[touch] 抬起
+[touch] 按下 (622,133) 点数 1
+[touch] 抬起
+[touch] 按下 (758,135) 点数 1
+[touch] 抬起
+[proto] 第 1 次测量指令(RequestPointAll)被拒:本轮未接测量链。
+        ⇒ UI 会显示「UART7发送失败」,这是**预期的**,
+          不代表触屏或界面有问题。
+          要接的话:把 `ui_process.py` 那侧做成协议对端,
+          再把本文件换掉(不要往这里塞测量逻辑)。
+[touch] 按下 (193,104) 点数 1
+[touch] 抬起
+[touch] 按下 (737,394) 点数 1
+[touch] 抬起
+[touch] 按下 (44,41) 点数 1
+[touch] 抬起
+[touch] 按下 (717,223) 点数 1
+[touch] 抬起
+[touch] 按下 (505,114) 点数 1
+[touch] 抬起
+[touch] 按下 (689,94) 点数 1
+[touch] 抬起
+[touch] 按下 (892,124) 点数 1
+[touch] 抬起
+[touch] 按下 (505,106) 点数 1
+[touch] 抬起
+[touch] 按下 (344,97) 点数 1
+[touch] 抬起
+[touch] 按下 (495,116) 点数 1
+[touch] 抬起
+[touch] 按下 (670,115) 点数 1
+[touch] 抬起
+[touch] 按下 (922,132) 点数 1
+[touch] 抬起
+[touch] 按下 (708,106) 点数 1
+[touch] 抬起
+[touch] 按下 (513,123) 点数 1
+[touch] 抬起
+[touch] 按下 (352,108) 点数 1
+[touch] 抬起
+[touch] 按下 (53,25) 点数 1
+[touch] 抬起
+[touch] 按下 (891,409) 点数 1
+[touch] 抬起
+[touch] 按下 (1008,126) 点数 1
+[touch] 抬起
+[touch] 按下 (997,88) 点数 1
+[touch] 抬起
+[touch] 按下 (942,256) 点数 1
+[touch] 抬起
+[touch] 按下 (966,185) 点数 1
+[touch] 抬起
+[touch] 按下 (958,215) 点数 1
+[touch] 抬起
+[touch] 按下 (966,152) 点数 1
+[touch] 抬起
+[touch] 按下 (978,91) 点数 1
+[touch] 抬起
+[touch] 按下 (51,15) 点数 1
+[touch] 抬起
+[touch] 按下 (891,417) 点数 1
+[touch] 抬起
+[touch] 按下 (51,35) 点数 1
+[touch] 抬起
+[touch] 按下 (689,236) 点数 1
+[touch] 抬起
+[touch] 按下 (249,326) 点数 1
+[touch] 抬起
+[touch] 按下 (265,314) 点数 1
+[touch] 抬起
+[touch] 按下 (753,380) 点数 1
+[touch] 抬起
+[touch] 按下 (534,110) 点数 1
+[touch] 抬起
+[touch] 按下 (728,121) 点数 1
+[touch] 抬起
+[touch] 按下 (876,97) 点数 1
+[touch] 抬起
+[touch] 按下 (63,29) 点数 1
+[touch] 抬起
+[touch] 按下 (374,355) 点数 1
+[touch] 抬起
+[touch] 按下 (78,10) 点数 1
+[touch] 抬起
+[touch] 按下 (64,26) 点数 1
+[touch] 抬起
+
+[main] 收到退出信号,收尾…
+
+──── c_ui 统计 ────
+  disp  flush=86  换址=86  矩形同步=162  flush错=0  换址超时=0  最近错误=0
+  前台物理地址 = 0x38100000
+  touch 轮询=15677  新帧=328  错误=1  越界点=0  LVGL读取=8605
+  touch 末态 seq=229 count=0 pen=0 err=1 raw68=0x0000E510
+  UI    点击=39  页面=0  被拒的测量指令=15
+  0x64 = 0x000AB648  underrun=1  axierr=0  vblank_cnt=402  swap_cnt=86
+  ⚠️  underrun 已置起(粘滞,写 0x60 清):PL 取数时帧缓存还没备好。
+      上板判据是「跑 60 s 后必须为 0」,见 display_probe.py。
+───────────────────
+[main] 屏已切回厂商彩条(0x50 = 0)
+==========================================================================
+  MOSFET C-V 在线监测平台 · PS 侧启动
+==========================================================================
+  VERSION      0x00010000
+  link_check   True
+  fclk0_real   27.7778 MHz
+  fclk0_pynq   41.6667 MHz (PYNQ 算的,不是真值)
+  fclk0_expect 50.0
+  pclk_window  (40.8, 67.2)
+[cv_monitor] VERSION  = 0x00010000  (expect 0x00010000)
+[cv_monitor] SCRATCH  = 0xDEADBEEF / 0xA5A55A5A  (expect 0xDEADBEEF / 0xA5A55A5A)
+[cv_monitor] link_check: PASS
+
+--- FCLK0(就是像素时钟)---
+  改前 27.7778 MHz(DIV0=6 DIV1=6)  ← BOOT.BIN 留下的默认值
+[fclk0] 50.0000 MHz (IO_PLL 1000 / DIV0 20 / DIV1 1)  ✓ 在窗口内 [40.8~67.2]
+  改后 50.0000 MHz(设计值 50.0 MHz)
+  📌 口径:写文档一律写「设计值 50 MHz / 真值 50.0000 MHz」
+
+--- 显示通路 ---
+  帧缓存 fb0=0x38100000  fb1=0x38230000(1228800 B / 块,64 KB 对齐)
+
+--- 触摸通路 ---
+  <TouchEvent NEW  seq=  0 count=0 pen=0 err=0 (   0,   0)>   (没碰屏时 seq 不动、pen_down=0 属正常)
+
+--- 界面 ---
+[ui] 启动:/home/xilinx/c_ui_src/c_ui --axi-base 0x43C00000 --poll-ms 10 --fb0 0x38100000 --fb1 0x38230000
+[ui] ⚠️ 需要读 /dev/mem —— 本进程必须是 root(main.py 已经是)
+  👀 屏上应当出现前序那套 LVGL 界面(首页)。点一下按钮看页面切不切。
+  ⚠️ 触摸的坐标轴是否要翻转,以 tools/touch_probe.py 的实测为准。
+──── c_ui 启动 ────
+  axi_base = 0x43C00000   fb0 = 0x38100000   fb1 = 0x38230000   poll = 10 ms   touch = 开
+[regs] /dev/mem 已映射 AXI 0x43C00000(4096 B)
+[disp] direct_mode 双缓冲就绪:fb0=0x38100000 fb1=0x38230000 前台=0(非缓存映射;无 DMA2D,矩形同步走 CPU memcpy)
+[touch] 链路检查:0x68 = 0x00000300(seq=3 count=0 pen=0 err=0)
+[indev] 指针设备已注册(坐标来自 PL 的 0x68/0x6C/0x70)
+[main] 等第一帧画完再切到 DDR 源(期间屏上应显示厂商彩条)…
+[main] 首帧已提交(flush=1),已切到 DDR 源(0x50 = 2)
+[touch] 按下 (371,225) 点数 1
+[touch] 抬起
+[touch] PL 报过总线错(err 粘滞位置起,0x68=0x00000D10)。
+        这是**历史累计**标志,只有重新配置 PL 才清 ——
+        本次只报告一次,之后正常读。若触摸一直无反应,
+        那才需要查 I2C 上拉 / GT911 底板。
+[touch] 按下 (39,24) 点数 1
+[touch] 抬起
+
+[main] 收到退出信号,收尾…
+
+──── c_ui 统计 ────
+  disp  flush=5  换址=5  矩形同步=5  flush错=0  换址超时=0  最近错误=0
+  前台物理地址 = 0x38230000
+  touch 轮询=8350  新帧=12  错误=1  越界点=0  LVGL读取=4570
+  touch 末态 seq=23 count=0 pen=0 err=1 raw68=0x00001710
+  UI    点击=2  页面=0  被拒的测量指令=0
+  0x64 = 0x00082EA9  underrun=1  axierr=0  vblank_cnt=426  swap_cnt=5
+  ⚠️  underrun 已置起(粘滞,写 0x60 清):PL 取数时帧缓存还没备好。
+      上板判据是「跑 60 s 后必须为 0」,见 display_probe.py。
+───────────────────
+[main] 屏已切回厂商彩条(0x50 = 0)
+[ui] 进程退出,退出码 0
+[main] 界面已退出,屏切到纯色(避免残留画面看着像卡死)
+==========================================================================
+  MOSFET C-V 在线监测平台 · PS 侧启动
+==========================================================================
+  VERSION      0x00010000
+  link_check   True
+  fclk0_real   27.7778 MHz
+  fclk0_pynq   41.6667 MHz (PYNQ 算的,不是真值)
+  fclk0_expect 50.0
+  pclk_window  (40.8, 67.2)
+[cv_monitor] VERSION  = 0x00010000  (expect 0x00010000)
+[cv_monitor] SCRATCH  = 0xDEADBEEF / 0xA5A55A5A  (expect 0xDEADBEEF / 0xA5A55A5A)
+[cv_monitor] link_check: PASS
+
+--- FCLK0(就是像素时钟)---
+  改前 27.7778 MHz(DIV0=6 DIV1=6)  ← BOOT.BIN 留下的默认值
+[fclk0] 50.0000 MHz (IO_PLL 1000 / DIV0 20 / DIV1 1)  ✓ 在窗口内 [40.8~67.2]
+  改后 50.0000 MHz(设计值 50.0 MHz)
+  📌 口径:写文档一律写「设计值 50 MHz / 真值 50.0000 MHz」
+
+--- 显示通路 ---
+  帧缓存 fb0=0x38100000  fb1=0x38230000(1228800 B / 块,64 KB 对齐)
+
+--- 触摸通路 ---
+  <TouchEvent NEW  seq=  0 count=0 pen=0 err=0 (   0,   0)>   (没碰屏时 seq 不动、pen_down=0 属正常)
+
+--- 界面 ---
+[ui] 启动:/home/xilinx/c_ui_src/c_ui --axi-base 0x43C00000 --poll-ms 10 --fb0 0x38100000 --fb1 0x38230000
+[ui] ⚠️ 需要读 /dev/mem —— 本进程必须是 root(main.py 已经是)
+  👀 屏上应当出现前序那套 LVGL 界面(首页)。点一下按钮看页面切不切。
+  ⚠️ 触摸的坐标轴是否要翻转,以 tools/touch_probe.py 的实测为准。
+──── c_ui 启动 ────
+  axi_base = 0x43C00000   fb0 = 0x38100000   fb1 = 0x38230000   poll = 10 ms   touch = 开
+[regs] /dev/mem 已映射 AXI 0x43C00000(4096 B)
+[disp] direct_mode 双缓冲就绪:fb0=0x38100000 fb1=0x38230000 前台=0(非缓存映射;无 DMA2D,矩形同步走 CPU memcpy)
+[touch] 链路检查:0x68 = 0x00000300(seq=3 count=0 pen=0 err=0)
+[indev] 指针设备已注册(坐标来自 PL 的 0x68/0x6C/0x70)
+[proto] 空实现已装载:测量指令不会真的发出(本轮范围)
+[main] 等第一帧画完再切到 DDR 源(期间屏上应显示厂商彩条)…
+[main] 首帧已提交(flush=1),已切到 DDR 源(0x50 = 2)
+[touch] PL 报过总线错(err 粘滞位置起,0x68=0x00000310)。
+        这是**历史累计**标志,只有重新配置 PL 才清 ——
+        本次只报告一次,之后正常读。若触摸一直无反应,
+        那才需要查 I2C 上拉 / GT911 底板。
+==========================================================================
+  MOSFET C-V 在线监测平台 · PS 侧启动
+==========================================================================
+  VERSION      0x00010000
+  link_check   True
+  fclk0_real   27.7778 MHz
+  fclk0_pynq   41.6667 MHz (PYNQ 算的,不是真值)
+  fclk0_expect 50.0
+  pclk_window  (40.8, 67.2)
+[cv_monitor] VERSION  = 0x00010000  (expect 0x00010000)
+[cv_monitor] SCRATCH  = 0xDEADBEEF / 0xA5A55A5A  (expect 0xDEADBEEF / 0xA5A55A5A)
+[cv_monitor] link_check: PASS
+
+--- FCLK0(就是像素时钟)---
+  改前 27.7778 MHz(DIV0=6 DIV1=6)  ← BOOT.BIN 留下的默认值
+[fclk0] 50.0000 MHz (IO_PLL 1000 / DIV0 20 / DIV1 1)  ✓ 在窗口内 [40.8~67.2]
+  改后 50.0000 MHz(设计值 50.0 MHz)
+  📌 口径:写文档一律写「设计值 50 MHz / 真值 50.0000 MHz」
+
+--- 显示通路 ---
+  帧缓存 fb0=0x38100000  fb1=0x38230000(1228800 B / 块,64 KB 对齐)
+
+--- 触摸通路 ---
+  <TouchEvent NEW  seq=  0 count=0 pen=0 err=0 (   0,   0)>   (没碰屏时 seq 不动、pen_down=0 属正常)
+
+--- 界面 ---
+[ui] 启动:/home/xilinx/c_ui_src/c_ui --axi-base 0x43C00000 --poll-ms 10 --fb0 0x38100000 --fb1 0x38230000
+[ui] ⚠️ 需要读 /dev/mem —— 本进程必须是 root(main.py 已经是)
+  👀 屏上应当出现前序那套 LVGL 界面(首页)。点一下按钮看页面切不切。
+  ⚠️ 触摸的坐标轴是否要翻转,以 tools/touch_probe.py 的实测为准。
+──── c_ui 启动 ────
+  axi_base = 0x43C00000   fb0 = 0x38100000   fb1 = 0x38230000   poll = 10 ms   touch = 开
+[regs] /dev/mem 已映射 AXI 0x43C00000(4096 B)
+[disp] direct_mode 双缓冲就绪:fb0=0x38100000 fb1=0x38230000 前台=0(非缓存映射;无 DMA2D,矩形同步走 CPU memcpy)
+[touch] 链路检查:0x68 = 0x00000510(seq=5 count=0 pen=0 err=1)
+[indev] 指针设备已注册(坐标来自 PL 的 0x68/0x6C/0x70)
+[proto] 已接管测量指令(C 侧直写寄存器,方案 A)
+        激励 = 1000000 Hz(0x80 = 0xA3D70A)
+        偏压 = 0.0 V(0x14 = 0x80000)
+        扫压驻留 = 300 ms(可用 CV_SWEEP_DWELL_MS 覆盖)
+        ⚠️ 回路切换 / Cs 读数尚无硬件,只回显到界面
+[main] 等第一帧画完再切到 DDR 源(期间屏上应显示厂商彩条)…
+[touch] PL 报过总线错(err 粘滞位置起,0x68=0x00000510)。
+        这是**历史累计**标志,只有重新配置 PL 才清 ——
+        本次只报告一次,之后正常读。若触摸一直无反应,
+        那才需要查 I2C 上拉 / GT911 底板。
+[main] 首帧已提交(flush=1),已切到 DDR 源(0x50 = 2)
+
+[main] 收到退出信号,收尾…
+
+──── c_ui 统计 ────
+  disp  flush=1  换址=1  矩形同步=1  flush错=0  换址超时=0  最近错误=0
+  前台物理地址 = 0x38230000
+  touch 轮询=2213  新帧=1  错误=1  越界点=0  LVGL读取=1211
+  touch 末态 seq=5 count=0 pen=0 err=1 raw68=0x00000510
+  UI    点击=0  页面=0  等读数的测量指令=0
+  模拟前端  偏压写=1  回读核对失败=0
+  0x64 = 0x000809ED  underrun=1  axierr=0  vblank_cnt=123  swap_cnt=1
+  ⚠️  underrun 已置起(粘滞,写 0x60 清):PL 取数时帧缓存还没备好。
+      上板判据是「跑 60 s 后必须为 0」,见 display_probe.py。
+───────────────────
+[main] 屏已切回厂商彩条(0x50 = 0)
+==========================================================================
+  MOSFET C-V 在线监测平台 · PS 侧启动
+==========================================================================
+  VERSION      0x00010000
+  link_check   True
+  fclk0_real   27.7778 MHz
+  fclk0_pynq   41.6667 MHz (PYNQ 算的,不是真值)
+  fclk0_expect 50.0
+  pclk_window  (40.8, 67.2)
+[cv_monitor] VERSION  = 0x00010000  (expect 0x00010000)
+[cv_monitor] SCRATCH  = 0xDEADBEEF / 0xA5A55A5A  (expect 0xDEADBEEF / 0xA5A55A5A)
+[cv_monitor] link_check: PASS
+
+--- FCLK0(就是像素时钟)---
+  改前 27.7778 MHz(DIV0=6 DIV1=6)  ← BOOT.BIN 留下的默认值
+[fclk0] 50.0000 MHz (IO_PLL 1000 / DIV0 20 / DIV1 1)  ✓ 在窗口内 [40.8~67.2]
+  改后 50.0000 MHz(设计值 50.0 MHz)
+  📌 口径:写文档一律写「设计值 50 MHz / 真值 50.0000 MHz」
+
+--- DAC 初始化放行(0x84 CV_CTRL)---
+[dac] 已放行初始化 @ FCLK0 50.0000 MHz —— 约 0.8 s 后偏压生效
+
+--- 显示通路 ---
+  帧缓存 fb0=0x38100000  fb1=0x38230000(1228800 B / 块,64 KB 对齐)
+
+--- 触摸通路 ---
+  <TouchEvent NEW  seq=  0 count=0 pen=0 err=0 (   0,   0)>   (没碰屏时 seq 不动、pen_down=0 属正常)
+
+--- 界面 ---
+[ui] 启动:/home/xilinx/c_ui_src/c_ui --axi-base 0x43C00000 --poll-ms 10 --fb0 0x38100000 --fb1 0x38230000
+[ui] ⚠️ 需要读 /dev/mem —— 本进程必须是 root(main.py 已经是)
+  👀 屏上应当出现前序那套 LVGL 界面(首页)。点一下按钮看页面切不切。
+  ⚠️ 触摸的坐标轴是否要翻转,以 tools/touch_probe.py 的实测为准。
+──── c_ui 启动 ────
+  axi_base = 0x43C00000   fb0 = 0x38100000   fb1 = 0x38230000   poll = 10 ms   touch = 开
+[regs] /dev/mem 已映射 AXI 0x43C00000(4096 B)
+[disp] direct_mode 双缓冲就绪:fb0=0x38100000 fb1=0x38230000 前台=0(非缓存映射;无 DMA2D,矩形同步走 CPU memcpy)
+[touch] 链路检查:0x68 = 0x00000000(seq=0 count=0 pen=0 err=0)
+[indev] 指针设备已注册(坐标来自 PL 的 0x68/0x6C/0x70)
+[proto] 已接管测量指令(C 侧直写寄存器,方案 A)
+        激励 = 1000000 Hz(0x80 = 0xA3D70A)
+        偏压 = 0.0 V(0x14 = 0x80000)
+        扫压驻留 = 300 ms(可用 CV_SWEEP_DWELL_MS 覆盖)
+        ⚠️ 回路切换 / Cs 读数尚无硬件,只回显到界面
+[main] 等第一帧画完再切到 DDR 源(期间屏上应显示厂商彩条)…
+[main] 首帧已提交(flush=1),已切到 DDR 源(0x50 = 2)
+[touch] PL 报过总线错(err 粘滞位置起,0x68=0x00000210)。
+        这是**历史累计**标志,只有重新配置 PL 才清 ——
+        本次只报告一次,之后正常读。若触摸一直无反应,
+        那才需要查 I2C 上拉 / GT911 底板。
+[touch] 按下 (377,392) 点数 1
+[touch] 抬起
+[touch] 按下 (990,88) 点数 1
+[touch] 抬起
+[touch] 按下 (939,325) 点数 1
+[touch] 抬起
+[touch] 按下 (456,339) 点数 1
+[touch] 抬起
+[touch] 按下 (695,456) 点数 1
+[touch] 抬起
+[touch] 按下 (971,352) 点数 1
+[touch] 抬起
+[touch] 按下 (464,331) 点数 1
+[touch] 抬起
+[touch] 按下 (698,343) 点数 1
+[touch] 抬起
+[touch] 按下 (462,339) 点数 1
+[touch] 抬起
+[touch] 按下 (750,455) 点数 1
+[touch] 抬起
+[touch] 按下 (968,414) 点数 1
+[touch] 抬起
+[proto] 扫压开始:CISS,0.10 V → 5.00 V,60 点,每点 300 ms
+        ⚠️ 只有偏压真的在走;Cs 曲线为空(待 DLIA)
+[proto] 扫压结束:60 点已下发到 DAC
+[touch] 按下 (45,31) 点数 1
+[touch] 抬起
+[touch] 按下 (358,408) 点数 1
+[touch] 抬起
+[touch] 按下 (58,21) 点数 1
+[touch] 抬起
+[touch] 按下 (608,275) 点数 1
+[touch] 抬起
+[touch] 按下 (236,308) 点数 1
+[touch] 抬起
+[touch] 按下 (308,394) 点数 1
+[touch] 抬起
+[touch] 按下 (324,450) 点数 1
+[touch] 抬起
+[touch] 按下 (686,348) 点数 1
+[touch] 抬起
+[touch] 按下 (325,385) 点数 1
+[touch] 抬起
+[touch] 按下 (291,428) 点数 1
+[touch] 抬起
+[touch] 按下 (701,467) 点数 1
+[touch] 抬起
+[proto] 偏压 → 10.00 V  (0x14 = 0x8CCCC,模块级 1.000 V ×10)
+[touch] 按下 (250,507) 点数 1
+[touch] 抬起
+[proto] 点测 CISS @ 10.00 V:偏压已下发,**未取读数**(DLIA 未实现)
+[touch] 按下 (232,324) 点数 1
+[touch] 抬起
+[touch] 按下 (232,293) 点数 1
+[touch] 抬起
+[touch] 按下 (316,397) 点数 1
+[touch] 抬起
+[touch] 按下 (320,435) 点数 1
+[touch] 抬起
+[touch] 按下 (326,444) 点数 1
+[touch] 抬起
+[touch] 按下 (699,449) 点数 1
+[touch] 抬起
+[proto] 偏压 → 10.00 V  (0x14 = 0x8CCCC,模块级 1.000 V ×10)
+[touch] 按下 (263,312) 点数 1
+[touch] 抬起
+[touch] 按下 (721,327) 点数 1
+[touch] 抬起
+[touch] 按下 (298,399) 点数 1
+[touch] 抬起
+[touch] 按下 (318,450) 点数 1
+[touch] 抬起
+[touch] 按下 (314,449) 点数 1
+[touch] 抬起
+[touch] 按下 (700,458) 点数 1
+[touch] 抬起
+[proto] 偏压 → 100.00 V  (0x14 = 0xFFFFF,模块级 10.000 V ×10)

@@ -70,8 +70,12 @@ TOP_MODULE_VLNV = "xilinx.com:module_ref:cv_sys:1.0"      # .hwh 里的 VLNV
 # ---------------------------------------------------------------------------
 # 寄存器(字节偏移)
 # ---------------------------------------------------------------------------
-# ⚠️ 地址窗口只有 0x00 ~ 0x7C(5 位字索引)。2026-10-03 起 32 个编号**已用满**,
-#    再要加必须先把 C_S_AXI_ADDR_WIDTH 由 7 升到 8。
+# ⚠️ 地址窗口 = 0x00 ~ 0xFC(6 位字索引)。
+#    2026-10-03 起 7 位/32 个编号**已用满**(连 DBG0/1/2 吃掉三个预留都不够),
+#    2026-10-05 为加 `DDS_FREQ(0x80)` 把 `C_S_AXI_ADDR_WIDTH` 由 7 升到 8 ⇒ **64 个**。
+#    📌 升位宽不是改个 parameter 就完事:BD 里的 `cv_sys_0` 是 module_ref,
+#       会缓存旧 ADDR_WIDTH 与旧端口清单,必须刷新 module reference
+#       (`build/bd_add_dac_dds.tcl`)。实测:不刷新时 `system.bd` 里一直写着 `"7"`。
 REG = {
     # ---- 测量主链(PL 侧尚未实现,见 PL_IMPLEMENTED_REGS)-------------------
     "CTRL":       0x00,   # RW  [0]start [1]soft_rst [2]ac_en [3]relay_en [4]cal_mode
@@ -79,7 +83,9 @@ REG = {
     "NCO_FREQ":   0x08,   # RW
     "NCO_PHASE":  0x0C,   # RW
     "EXC_AMP":    0x10,   # RW
-    "BIAS_CODE":  0x14,   # RW
+    "BIAS_CODE":  0x14,   # RW  [19:0] → dac_1220.code ★ 2026-10-05 已实现,见 BIAS_* 常量
+                          #     ⚠️ **20 位不是 16 位**。写 = 立即发 1 拍 set_in 脉冲
+                          #        (dac_1220 沿触发 ⇒ 连写同一个值不会丢)
     "RANGE_SEL":  0x18,   # RW
     "RELAY_CFG":  0x1C,   # RW
     "CIC_DECIM":  0x20,   # RW
@@ -125,6 +131,18 @@ REG = {
     "DBG_BEATS":  0x74,   # RO  拍数 + **数据内容证据**,见 DBG1_BIT
     "DBG_ARADDR": 0x78,   # RO  最近一次 AR 握手成功时的地址
     "DBG_STATE":  0x7C,   # RO  状态快照,见 DBG2_BIT
+
+    # ---- 模拟前端(2026-10-05 落地)--------------------------------------
+    "DDS_FREQ":   0x80,   # RW  [27:0] → adc_9833.code ★ 见 DDS_* 常量
+                          #     ⚠️ 是 0x80,靠 8→**8 位地址宽度**才够得着
+                          #     复位值 = 1.0000 MHz,与 adc_9833 的初始化序列**逐位相同**
+
+    "CV_CTRL":    0x84,   # RW  [0] dac_rst_n ★ 2026-10-05
+                          #     🔴 **复位值 = 0 = dac_1220 被按在复位态,不跑初始化。**
+                          #     软件必须在 apply_fclk0() 把 FCLK0 补到 50 MHz **之后**
+                          #     写 1 放行 —— 否则三段复位图案会超出手册双向窗口上界,
+                          #     复位不触发、DIR 写入无效、输出停在 −10 V。见 DAC_RST_*。
+                          #     ⚠️ 不是 0x18:0x18 是 RANGE_SEL 的规格位置(测量主链)。
 }
 
 # 0x74 的位布局(2026-10-03 二次修订)。出处:RTL `lcd_fb_reader.v` §6。
@@ -228,6 +246,103 @@ TOUCH_PT_BIT = {
 SIGNED_REGS = ("I_A", "Q_A", "I_B", "Q_B")
 
 # ---------------------------------------------------------------------------
+# 模拟前端换算(2026-10-05)
+# ---------------------------------------------------------------------------
+# 🔴 DAC1220 → 偏压:板上**有一级外部高压放大,比例 10:1**。
+#    即 DAC 模块出 10 V,被测器件上就是 100 V。**这一级不在寄存器里** ——
+#    寄存器只管 20 位码值,倍数完全由硬件接线决定,软件改不了。
+#
+# 模块级传递函数(板上三点实测过 −5 / 0 / +5 V,见 docs/dac1220_interface.md):
+#     V_module = -10 + 20 * code / 1048575
+#
+# 三个端点(右边都乘了 10):
+#     code = 0        → V_module = -10.0 V → 偏压 **-100.0 V**  ← ⚠️ 危险端,不是 0 V!
+#     code = 0x80000  → V_module =   0.0 V → 偏压    0.0 V      ← ★ 复位值取这里
+#     code = 0xFFFFF  → V_module = +10.0 V → 偏压 +100.0 V
+#
+# ⚠️ 复位值之所以取**中位**而不是 0:码值 0 会让上电偏压停在 **-100 V**,
+#    而"0 码"极易被误读成"0 V"。中位是唯一不依赖高压级极性的安全点。
+#    RTL 侧的落地见 cv_axi_lite_slave.v 的 bias_code 复位值 + 上电 set 脉冲。
+BIAS_CODE_MAX    = 0xFFFFF       # 20 位满量程(1048575)
+BIAS_CODE_MID    = 0x80000       # 复位值 = 0 V 偏压
+BIAS_MODULE_VMIN = -10.0         # 模块级端点(V)
+BIAS_MODULE_VMAX = +10.0
+BIAS_HV_RATIO    = 10.0          # ★ 外部高压级倍数(硬件接线,非寄存器)
+BIAS_VOLT_MIN    = BIAS_MODULE_VMIN * BIAS_HV_RATIO    # -100.0 V
+BIAS_VOLT_MAX    = BIAS_MODULE_VMAX * BIAS_HV_RATIO    # +100.0 V
+
+
+def bias_volts_to_code(volts):
+    """偏压(V,**含** 10:1 高压级)→ 20 位 DAC 码。超出 ±100 V 夹到端点。"""
+    module_v = volts / BIAS_HV_RATIO
+    raw = (module_v - BIAS_MODULE_VMIN) * BIAS_CODE_MAX / \
+          (BIAS_MODULE_VMAX - BIAS_MODULE_VMIN)
+    return max(0, min(BIAS_CODE_MAX, int(round(raw))))
+
+
+def bias_code_to_volts(code):
+    """20 位 DAC 码 → 偏压(V,**含** 10:1 高压级)。把读回值翻成人看的数。"""
+    module_v = BIAS_MODULE_VMIN + \
+        (BIAS_MODULE_VMAX - BIAS_MODULE_VMIN) * (int(code) & BIAS_CODE_MAX) / BIAS_CODE_MAX
+    return module_v * BIAS_HV_RATIO
+
+
+# 激励频率:AD9833 板载晶振 **25 MHz,焊死,不可由 FPGA 供 MCLK**(决策 D10)
+#     f_out = code * 25 MHz / 2^28
+# ⚠️ 决策 D08 定激励**固定 1 MHz** —— 0x80 是留给将来扫频的接口,当前不要扫。
+DDS_MCLK_HZ    = 25_000_000
+DDS_PHASE_BITS = 28
+DDS_FREQ_1MHZ  = 0x0A3D70A       # 10737418 ← round(1e6 * 2^28 / 25e6)
+
+
+def dds_hz_to_code(hz):
+    """激励频率(Hz)→ 28 位 AD9833 频率码。夹到 [0, MCLK/2]。"""
+    raw = int(round(float(hz) * (1 << DDS_PHASE_BITS) / DDS_MCLK_HZ))
+    return max(0, min((1 << DDS_PHASE_BITS) - 1, raw))
+
+
+def dds_code_to_hz(code):
+    """28 位频率码 → 激励频率(Hz)。"""
+    return (int(code) & ((1 << DDS_PHASE_BITS) - 1)) * DDS_MCLK_HZ / \
+           float(1 << DDS_PHASE_BITS)
+
+
+# ---------------------------------------------------------------------------
+# CV_CTRL(0x84)—— dac_1220 初始化的软件放行位
+# ---------------------------------------------------------------------------
+CV_CTRL_DAC_RST_N = 0x1          # [0] 1 = 放行(开始初始化)/ 0 = 按在复位
+
+# 🔴 **FCLK0 能落在哪个区间,这个 DAC 才初始化得起来** —— 由 dac_1220.v 的
+#    复位图案常数与手册的双向窗口反解得到,三个约束取交集:
+#
+#      t16 = 13000 拍 / f ∈ [208.3, 325.5] µs  ⇒  f ∈ [39.9, 62.4] MHz
+#      t18 = 28500 拍 / f ∈ [416.7, 732.4] µs  ⇒  f ∈ [38.9, 68.4] MHz
+#      t19 = 45000 拍 / f ∈ [833.3, 976.6] µs  ⇒  f ∈ [46.1, 54.0] MHz
+#      ─────────────────────────────────────────────────────────────
+#      **交集 f ∈ [46.1, 54.0] MHz**  ← 最紧的是 t19
+#
+#    ⇒ 50.000 MHz(设计值)在窗口正中,余量 ±7.9%。
+#    ⚠️ 板上 BOOT.BIN 的默认 **27.78 MHz 远在窗口外** —— 这正是
+#       「偏压一直是 −10 V」的真因:复位根本没触发。
+#    ⚠️ **这个窗口不能靠改常数拓宽**:把窗口折成【拍数】,两个频率下的
+#       合法区间【三段全都不重叠】——
+#                   @27.78 MHz      @50 MHz
+#         t16        5786~9042      10415~16275
+#         t18       11575~20344     20835~36620
+#         t19       23147~27128     41665~48830
+#       ⇒ 没有一组常数能同时覆盖两个频率。**只能保证初始化在设计频率下跑。**
+FCLK0_DAC_RST_WINDOW_MHZ = (46.1, 54.0)
+
+# 放行之后,DAC 多久才真的能接受偏压码(单位 ms,@50 MHz)。
+#   由 dac_1220.v 的三个参数反推,全部是**下限型**(慢一点无害):
+#     PWR_WAIT    = 10 000 000 拍 = 200.0 ms  (手册要求晶振起振 ≥25 ms)
+#     init_delay  =     87 500 拍 =   1.75 ms (六段复位图案)
+#     CAL_WAIT_T  = 30 000 000 拍 = 600.0 ms  (手册自校准 300~500 ms)
+#   ⇒ 合计 ≈ 801.8 ms。这一段里到来的 set_in 会被 dac_1220 的 set_pending
+#     锁住,等它就绪再消费 —— **不会丢**,所以"先写 0x14 再放行"是安全的。
+DAC_INIT_MS = 801.8
+
+# ---------------------------------------------------------------------------
 # 面板与帧缓存布局(与 `docs/display_subsystem.md` §3/§4 一致)
 # ---------------------------------------------------------------------------
 PANEL_WIDTH   = 1024
@@ -260,14 +375,24 @@ PCLK_WINDOW_MHZ    = (40.8, 67.2)  # 屏手册允许窗口 —— FCLK0 落在�
 #    测量主链(CTRL…PHASE_B)对应的 RTL 模块尚未进 BD。
 #    🆕 2026-10-03 第 33 次位流追加 DBG_BEATS / DBG_ARADDR / DBG_STATE(0x74/0x78/0x7C),
 #       并把 FB_STATUS(0x64)的**写**变成"清粘滞"命令。
+#    🆕 2026-10-05 位流追加 **BIAS_CODE(0x14)** 与 **DDS_FREQ(0x80)**
+#       (DAC1220 偏压 + AD9833 激励),同时把地址宽度 7→8。
+#    🆕 2026-10-05 追加 **CV_CTRL(0x84)** —— dac_1220 初始化的软件放行位。
+#       原因:FCLK0 开机默认 27.78 MHz,三段复位图案全部超出手册双向窗口上界
+#       ⇒ 复位不触发 ⇒ 偏压恒 −10 V。故把 DAC 的 rst_n 交给软件在改频之后放行。
 PL_IMPLEMENTED_REGS = (
     "VERSION", "SCRATCH",
+    "BIAS_CODE", "DDS_FREQ", "CV_CTRL",
     "LCD_CTRL", "LCD_FILL", "FB_BASE0", "FB_BASE1", "LCD_SWAP", "FB_STATUS",
     "TOUCH_STATUS", "TOUCH_PT0", "TOUCH_PT1",
     "DBG_BEATS", "DBG_ARADDR", "DBG_STATE",
 )
 PL_HAS_LCD   = True      # lcd_timing / lcd_fb_reader / lcd_vblank_ctrl 已进位流
 PL_HAS_TOUCH = True      # i2c_master / gt911_ctrl 已进位流
+PL_HAS_DAC   = True      # dac_1220(偏压)已进位流 —— 2026-10-05
+PL_HAS_DDS   = True      # adc_9833(激励)已进位流 —— 2026-10-05
+# ⚠️ 但**测量主链仍不在**:DLIA / CORDIC / 继电器 / 扫压编排都还没有,
+#    所以"设置偏压"能改硬件输出,"开始扫压"目前只能改变偏压(测不到 C 值)。
 
 # ---------------------------------------------------------------------------
 # 板上路径与运行约束

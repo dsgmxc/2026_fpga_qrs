@@ -94,6 +94,15 @@ def boot(args):
         print(f"  📌 口径:写文档一律写「设计值 {cv_regs.FCLK0_DESIGN_MHZ:.0f} MHz / "
               f"真值 {actual:.4f} MHz」")
 
+    # ---- 2b. 放行 DAC1220 的初始化 ★ 2026-10-05 ---------------------------
+    # 🔴 **必须排在 apply_fclk0() 之后**,而且**不能并进上面那个 if/else 里**
+    #    —— 就算 user 用 --no-clocks,也还得按实际 FCLK0 判断一次能不能放行。
+    #    原因见 drivers/board.release_dac() 的长文档:
+    #    DAC 的串行复位图案是**双向窗口**,FCLK0 只有在 [46.1, 54.0] MHz
+    #    才复位得起来;板上 BOOT.BIN 默认的 27.78 MHz 在窗口外 ⇒ 偏压恒 −10 V。
+    print("\n--- DAC 初始化放行(0x84 CV_CTRL)---")
+    board.release_dac(mon)
+
     # ---- 3. 帧缓存 --------------------------------------------------------
     print("\n--- 显示通路 ---")
     lcd = LcdPanel(mon).allocate()

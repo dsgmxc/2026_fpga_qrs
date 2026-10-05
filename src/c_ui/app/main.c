@@ -8,8 +8,9 @@
  *   往 **DDR 双帧缓存**里画;PL 侧的 `lcd_fb_reader` 按行读出去。
  *   触摸坐标从 PL 的寄存器里读。
  *
- *   ⇒ **它不管测量。** 测量指令(`DisplayProtocol_Request*`)本轮是空实现,
- *     见 `pynq_protocol_stub.c`。
+ *   ⇒ **它不管测量。** 测量指令(`DisplayProtocol_Request*`)由
+ *     `pynq_protocol.c` 接管:偏压/激励**真的写 PL 寄存器**,但
+ *     **Cs 读数还不存在**(DLIA 未实现)——详见那个文件的文件头。
  * ────────────────────────────────────────────────────────────────────────
  *
  * 📌 【命令行契约】与 `src/python/drivers/ui_process.py` 的文件头一致。
@@ -74,9 +75,11 @@ static uint32_t g_touch_errors;
 int      pynq_touch_debug_line(char *buf, unsigned len);
 uint32_t LV_PortIndev_GetOutOfRangeCount(void);
 uint32_t DisplayProtocol_GetRefusedCount(void);
-/* 协议层生命周期 —— 定义在 pynq_protocol_stub.c。
+uint32_t DisplayProtocol_GetBiasWriteCount(void);
+uint32_t DisplayProtocol_GetBiasVerifyFailCount(void);
+/* 协议层生命周期 —— 定义在 pynq_protocol.c。
    两者都必须在 UI_Demo_Init() **之后**调用:Init 会动 LVGL 对象(在线标志/状态栏),
-   Process 会按需把回读的数据写进界面。 */
+   Process 里跑扫压步进状态机(按驻留时间下发下一个偏压点)。 */
 void     DisplayProtocol_Init(void);
 void     DisplayProtocol_Process(void);
 
@@ -213,10 +216,14 @@ static void dump_stats(void)
            (unsigned)g_touch_errors, (unsigned)LV_PortIndev_GetOutOfRangeCount(),
            (unsigned)LV_PortIndev_GetReadCount());
     printf("  touch 末态 %s\n", line);
-    printf("  UI    点击=%u  页面=%u  被拒的测量指令=%u\n",
+    printf("  UI    点击=%u  页面=%u  等读数的测量指令=%u\n",
            (unsigned)UI_Demo_GetClickCount(),
            (unsigned)UI_Demo_GetCurrentPage(),
            (unsigned)DisplayProtocol_GetRefusedCount());
+    /* 偏压写没写进去,看这两项 —— 比盯万用表快 */
+    printf("  模拟前端  偏压写=%u  回读核对失败=%u\n",
+           (unsigned)DisplayProtocol_GetBiasWriteCount(),
+           (unsigned)DisplayProtocol_GetBiasVerifyFailCount());
 
     /* 帧缓存欠载是"PS 供给跟不上 PL 取数"的直接证据 —— 单列一行,别埋在计数里 */
     uint32_t st = cv_reg_read(CV_REG_FB_STATUS);

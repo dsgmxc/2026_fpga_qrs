@@ -46,7 +46,8 @@ src/c_ui/
     pynq_disp.c                 LVGL 显示驱动(direct_mode 双缓冲)
     pynq_touch.c                触摸数据生产者(读 0x68/0x6C/0x70)
     pynq_indev.c                LVGL 输入驱动(缓存转发)
-    pynq_protocol_stub.c        DisplayProtocol_* 空实现
+    pynq_protocol.c             DisplayProtocol_* 真实现(偏压/激励写 PL 寄存器)
+    _retired/pynq_protocol_stub.c  退役的空实现,保留供报告对照(不进编译)
     main.c                      入口 + 主循环(只做装配)
 ```
 
