@@ -74,17 +74,16 @@ typedef enum
 {
     UI_PAGE_HOME = 0u,
     UI_PAGE_INITIALIZE = 1u,
-    UI_PAGE_SINGLE = 2u,
-    UI_PAGE_MEASURE_ALL = 3u,
-    UI_PAGE_SWEEP = 4u
+    UI_PAGE_MEASURE = 2u,     /* 原 UI_PAGE_SINGLE ⊕ UI_PAGE_MEASURE_ALL 合并 */
+    UI_PAGE_SWEEP = 3u,
+    UI_PAGE_RESULTS = 4u      /* 投影视图:进入时重绘,不持有数据 */
 } UI_Page;
 
 typedef enum
 {
-    UI_BIAS_TARGET_SINGLE = 0u,
-    UI_BIAS_TARGET_MEASURE_ALL = 1u,
-    UI_BIAS_TARGET_SWEEP = 2u,
-    UI_BIAS_TARGET_ANALYSIS = 3u
+    UI_BIAS_TARGET_SINGLE = 0u,   /* 合并页:单回路与「全部」共用同一偏压 */
+    UI_BIAS_TARGET_SWEEP = 1u,
+    UI_BIAS_TARGET_ANALYSIS = 2u
 } UI_BiasTarget;
 
 #define UI_DISPLAY_PATH_ALL       4u
@@ -129,13 +128,14 @@ static lv_obj_t *g_header_path_label;
 static lv_obj_t *g_header_operation_label;
 static lv_obj_t *g_page_containers[5];
 static uint8_t g_page_built[5];
-static lv_obj_t *g_single_path_buttons[4];
+static lv_obj_t *g_single_path_buttons[5];   /* CISS/COSS/CRSS/RG/全部 */
 static lv_obj_t *g_sweep_path_buttons[4];
 static lv_obj_t *g_single_bias_value_label;
-static lv_obj_t *g_measure_all_bias_value_label;
 static lv_obj_t *g_sweep_bias_value_label;
 static lv_obj_t *g_single_result_label;
 static lv_obj_t *g_single_result_note_label;
+static lv_obj_t *g_single_result_panel;      /* 测量页:单回路结果视图 */
+static lv_obj_t *g_measure_all_result_panel; /* 测量页:「全部」三路结果视图 */
 static lv_obj_t *g_all_result_labels[3];
 static lv_obj_t *g_sweep_chart;
 static lv_obj_t *g_sweep_progress_label;
@@ -169,7 +169,6 @@ static uint32_t g_ui_reset_request_count;
 static uint32_t g_ui_single_path;
 static uint32_t g_ui_sweep_path;
 static uint32_t g_ui_single_bias_tenths;
-static uint32_t g_ui_measure_all_bias_tenths;
 static uint32_t g_ui_sweep_end_tenths;
 static uint32_t g_ui_analysis_voltage_tenths;
 static uint32_t g_ui_analysis_voltage_max_tenths;
@@ -242,7 +241,8 @@ static const UI_Action g_single_path_actions[] =
     {210u, "当前选择:CISS"},
     {211u, "当前选择:COSS"},
     {212u, "当前选择:CRSS"},
-    {213u, "当前选择:RG"}
+    {213u, "当前选择:RG"},
+    {214u, "当前选择:全部"}
 };
 
 static const UI_Action g_sweep_path_actions[] =
@@ -255,8 +255,6 @@ static const UI_Action g_sweep_path_actions[] =
 
 static const UI_Action g_single_measure_action =
     {220u, "状态:单点测量指令发送完成"};
-static const UI_Action g_measure_all_action =
-    {230u, "状态:一键测量指令发送完成"};
 static const UI_Action g_sweep_start_action =
     {320u, "状态:扫压指令发送完成"};
 static const UI_Action g_sweep_stop_action =
@@ -264,13 +262,14 @@ static const UI_Action g_sweep_stop_action =
 
 static void UI_ShowHome(void);
 static void UI_ShowInitialize(void);
-static void UI_ShowSingle(void);
-static void UI_ShowMeasureAll(void);
+static void UI_ShowMeasure(void);
 static void UI_ShowSweep(void);
+static void UI_ShowResults(void);
+static void UI_ResultsRefresh(void);
 static void UI_UpdateSinglePathStyle(void);
+static void UI_UpdateMeasureResultMode(void);
 static void UI_UpdateSweepPathStyle(void);
 static void UI_UpdateSingleBiasLabel(void);
-static void UI_UpdateMeasureAllBiasLabel(void);
 static void UI_UpdateSweepBiasLabel(void);
 static void UI_UpdateCommonStatus(void);
 static void UI_CreateBiasKeypad(void);
@@ -309,10 +308,11 @@ static void UI_RecordAction(uint32_t action_code)
 static void UI_UpdateSinglePathStyle(void)
 {
     static const uint32_t accent_colors[] =
-        {UI_COLOR_BLUE, UI_COLOR_GREEN, UI_COLOR_ORANGE, UI_COLOR_PURPLE};
+        {UI_COLOR_BLUE, UI_COLOR_GREEN, UI_COLOR_ORANGE, UI_COLOR_PURPLE,
+         UI_COLOR_CYAN};
     uint32_t index;
 
-    for (index = 0u; index < 4u; ++index)
+    for (index = 0u; index < 5u; ++index)
     {
         lv_obj_t *button = g_single_path_buttons[index];
 
@@ -341,6 +341,34 @@ static void UI_UpdateSinglePathStyle(void)
                                           LV_PART_MAIN);
             lv_obj_set_style_border_width(button, 1, LV_PART_MAIN);
         }
+    }
+
+    UI_UpdateMeasureResultMode();
+}
+
+/*
+ * 测量页的结果区有两种视图,取决于「测量回路」选的是单路还是「全部」:
+ *   单路  → 大号单组读数(CS/CP/D)
+ *   全部  → 三张卡片并排(CISS / COSS / CRSS)
+ * 两个面板常驻,只切 HIDDEN 标志,不重建控件。
+ */
+static void UI_UpdateMeasureResultMode(void)
+{
+    if ((g_single_result_panel == NULL) ||
+        (g_measure_all_result_panel == NULL))
+    {
+        return;
+    }
+
+    if (g_ui_single_path == UI_DISPLAY_PATH_ALL)
+    {
+        lv_obj_add_flag(g_single_result_panel, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(g_measure_all_result_panel, LV_OBJ_FLAG_HIDDEN);
+    }
+    else
+    {
+        lv_obj_clear_flag(g_single_result_panel, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(g_measure_all_result_panel, LV_OBJ_FLAG_HIDDEN);
     }
 }
 
@@ -391,18 +419,6 @@ static void UI_UpdateSingleBiasLabel(void)
             "偏压设置:%lu.%lu V",
             (unsigned long)(g_ui_single_bias_tenths / 10u),
             (unsigned long)(g_ui_single_bias_tenths % 10u));
-    }
-}
-
-static void UI_UpdateMeasureAllBiasLabel(void)
-{
-    if (g_measure_all_bias_value_label != NULL)
-    {
-        lv_label_set_text_fmt(
-            g_measure_all_bias_value_label,
-            "统一偏压:%lu.%lu V",
-            (unsigned long)(g_ui_measure_all_bias_tenths / 10u),
-            (unsigned long)(g_ui_measure_all_bias_tenths % 10u));
     }
 }
 
@@ -1393,14 +1409,17 @@ static void UI_ResetSweepProbe(void)
     }
 }
 
-static void UI_ApplySweepViewport(void)
+/* 把当前对数视口施加到**指定**图表上。
+   结果页的「扫压结果」是扫压页的投影,两张图共用同一套视口参数,
+   所以这里必须能传图表进来,不能写死 g_sweep_chart。 */
+static void UI_ApplyChartViewport(lv_obj_t *chart)
 {
     int32_t x_span;
     int32_t y_span;
     uint32_t x_major_count;
     uint32_t y_major_count;
 
-    if (g_sweep_chart == NULL)
+    if (chart == NULL)
     {
         return;
     }
@@ -1431,22 +1450,27 @@ static void UI_ApplySweepViewport(void)
         y_major_count = 6u;
     }
 
-    lv_chart_set_range(g_sweep_chart, LV_CHART_AXIS_PRIMARY_X,
+    lv_chart_set_range(chart, LV_CHART_AXIS_PRIMARY_X,
                        (lv_coord_t)g_sweep_x_min_log_milli,
                        (lv_coord_t)g_sweep_x_max_log_milli);
-    lv_chart_set_range(g_sweep_chart, LV_CHART_AXIS_PRIMARY_Y,
+    lv_chart_set_range(chart, LV_CHART_AXIS_PRIMARY_Y,
                        (lv_coord_t)g_sweep_y_min_log_milli,
                        (lv_coord_t)g_sweep_y_max_log_milli);
-    lv_chart_set_axis_tick(g_sweep_chart,
+    lv_chart_set_axis_tick(chart,
                            LV_CHART_AXIS_PRIMARY_X,
                            6, 3, (lv_coord_t)x_major_count,
                            1, true, 38);
-    lv_chart_set_axis_tick(g_sweep_chart,
+    lv_chart_set_axis_tick(chart,
                            LV_CHART_AXIS_PRIMARY_Y,
                            6, 3, (lv_coord_t)y_major_count,
                            1, true, 58);
-    lv_chart_set_div_line_count(g_sweep_chart, 0u, 0u);
-    lv_chart_refresh(g_sweep_chart);
+    lv_chart_set_div_line_count(chart, 0u, 0u);
+    lv_chart_refresh(chart);
+}
+
+static void UI_ApplySweepViewport(void)
+{
+    UI_ApplyChartViewport(g_sweep_chart);
 }
 
 static void UI_ResetSweepViewport(void)
@@ -2514,7 +2538,7 @@ static void UI_CreateCommonStatusHeader(lv_obj_t *screen)
                       UI_COLOR_TEXT, 84, 12, 146, 28,
                       LV_TEXT_ALIGN_LEFT);
     g_header_connection_label =
-        UI_CreateText(g_common_header, "主控:未连接", &ui_font_cn_20,
+        UI_CreateText(g_common_header, "后端:未连接", &ui_font_cn_20,
                       UI_COLOR_ORANGE, 234, 12, 158, 28,
                       LV_TEXT_ALIGN_CENTER);
     g_header_bias_label =
@@ -2562,10 +2586,11 @@ static lv_obj_t *UI_PrepareRootScreen(void)
     g_keypad_overlay = NULL;
     g_keypad_title_label = NULL;
     g_single_bias_value_label = NULL;
-    g_measure_all_bias_value_label = NULL;
     g_sweep_bias_value_label = NULL;
     g_single_result_label = NULL;
     g_single_result_note_label = NULL;
+    g_single_result_panel = NULL;
+    g_measure_all_result_panel = NULL;
     g_sweep_chart = NULL;
     g_sweep_progress_label = NULL;
     g_sweep_progress_bar = NULL;
@@ -2616,11 +2641,11 @@ static void UI_ActivatePage(UI_Page page)
 {
     static const char *const page_titles[] =
     {
-        "首页", "系统初始化", "单点测量", "一键测量", "扫压测量"
+        "首页", "系统复位", "单点测量", "扫压测量", "结果汇总"
     };
     static const char *const page_status[] =
     {
-        "系统就绪", "等待操作", "请选择回路", "等待测量", "等待扫压"
+        "系统就绪", "等待操作", "请选择回路", "等待扫压", "等待测量"
     };
     uint32_t index;
 
@@ -2684,6 +2709,19 @@ static void UI_ActivatePage(UI_Page page)
     UI_UpdateCommonStatus();
 
     /*
+     * 结果页是「投影视图」—— 自己不持有数据,进入时从各源页面重新取一次。
+     * 因此用户在任何页面测完之后再点进结果页,看到的就是刚测出的那份数据。
+     */
+    if (page == UI_PAGE_MEASURE)
+    {
+        UI_UpdateMeasureResultMode();
+    }
+    else if (page == UI_PAGE_RESULTS)
+    {
+        UI_ResultsRefresh();
+    }
+
+    /*
      * 输入定时器可能刚好排在显示刷新定时器之后运行。页面切换完成后
      * 立即刷新，可避免再等待一个默认刷新周期才开始绘制新页面。
      */
@@ -2732,7 +2770,7 @@ static void UI_SimpleActionEvent(lv_event_t *event)
     }
 
     if ((action->action_code >= 210u) &&
-        (action->action_code <= 213u))
+        (action->action_code <= 214u))
     {
         g_ui_single_path = action->action_code - 210u;
         UI_UpdateSinglePathStyle();
@@ -2746,14 +2784,12 @@ static void UI_SimpleActionEvent(lv_event_t *event)
     }
     else if (action->action_code == 220u)
     {
-        command_queued =
+        /* 合并页:「全部」派发到 RequestPointAll,其余派发到单路 RequestPoint。
+           与扫压页 320u 的分派写法一致。 */
+        command_queued = (g_ui_single_path == UI_DISPLAY_PATH_ALL) ?
+            DisplayProtocol_RequestPointAll(g_ui_single_bias_tenths) :
             DisplayProtocol_RequestPoint(g_ui_single_path,
                                          g_ui_single_bias_tenths);
-    }
-    else if (action->action_code == 230u)
-    {
-        command_queued =
-            DisplayProtocol_RequestPointAll(g_ui_measure_all_bias_tenths);
     }
     else if (action->action_code == 320u)
     {
@@ -2788,7 +2824,7 @@ static void UI_SimpleActionEvent(lv_event_t *event)
         else
         {
             lv_label_set_text(g_status_label,
-                              "状态:UART7发送失败,重新尝试");
+                              "状态:指令发送失败,重新尝试");
         }
     }
 }
@@ -2812,16 +2848,16 @@ static void UI_HomeButtonEvent(lv_event_t *event)
             UI_ShowInitialize();
             break;
 
-        case UI_PAGE_SINGLE:
-            UI_ShowSingle();
-            break;
-
-        case UI_PAGE_MEASURE_ALL:
-            UI_ShowMeasureAll();
+        case UI_PAGE_MEASURE:
+            UI_ShowMeasure();
             break;
 
         case UI_PAGE_SWEEP:
             UI_ShowSweep();
+            break;
+
+        case UI_PAGE_RESULTS:
+            UI_ShowResults();
             break;
 
         default:
@@ -2834,10 +2870,10 @@ static void UI_ShowHome(void)
 {
     static const char *const button_text[] =
     {
-        "初始化\n主控复位与安全启动",
-        "单点测量\n选择回路与偏压",
-        "一键测量\n三回路统一测量",
-        "扫压测量\n显示MOSFET C-V曲线"
+        "系统复位\n复位后端与安全启动",
+        "单点测量\n单回路与全部",
+        "扫压测量\n显示MOSFET C-V曲线",
+        "结果汇总\n数据与波形"
     };
     static const uint32_t button_colors[] =
     {
@@ -2957,8 +2993,8 @@ static void UI_InitModalConfirmEvent(lv_event_t *event)
     {
         lv_label_set_text(g_status_label,
                           command_queued ?
-                          "状态:主控复位指令发送完成" :
-                          "状态:UART7发送失败,复位指令未发送");
+                          "状态:复位指令已发送" :
+                          "状态:复位指令发送失败");
     }
 }
 
@@ -3000,7 +3036,7 @@ static void UI_InitResetEvent(lv_event_t *event)
                             UI_COLOR_SURFACE_LIGHT,
                             18);
     UI_CreateText(dialog,
-                  "确认发送主控复位指令?",
+                  "确认发送复位指令?",
                   &ui_font_cn_28,
                   UI_COLOR_TEXT,
                   20,
@@ -3009,7 +3045,7 @@ static void UI_InitResetEvent(lv_event_t *event)
                   40,
                   LV_TEXT_ALIGN_CENTER);
     UI_CreateText(dialog,
-                  "显示板只发送复位请求,其他安全流程由主控完成",
+                  "显示板只发送复位请求,其他安全流程由测量后端完成",
                   &ui_font_cn_20,
                   UI_COLOR_STATUS,
                   28,
@@ -3071,7 +3107,7 @@ static void UI_ShowInitialize(void)
                   40,
                   LV_TEXT_ALIGN_CENTER);
     UI_CreateText(panel,
-                  "显示板只发送 mcu_reset 指令\n偏压降低与安全等待由主控完成",
+                  "显示板只发送 mcu_reset 指令\n偏压降低与安全等待由测量后端完成",
                   &ui_font_cn_20,
                   UI_COLOR_STATUS,
                   36,
@@ -3090,7 +3126,7 @@ static void UI_ShowInitialize(void)
                     UI_InitResetEvent,
                     NULL);
     UI_CreateText(screen,
-                  "二次确认后发送指令  主控复位时显示离线状态",
+                  "二次确认后发送指令  后端复位时显示离线状态",
                   &ui_font_cn_20,
                   UI_COLOR_TEXT_MUTED,
                   60,
@@ -3141,7 +3177,7 @@ static void UI_CreatePathButtons(lv_obj_t *panel,
                             UI_SimpleActionEvent,
                             (void *)&actions[index]);
 
-        if ((actions == g_single_path_actions) && (index < 4u))
+        if ((actions == g_single_path_actions) && (index < 5u))
         {
             g_single_path_buttons[index] = button;
         }
@@ -3372,12 +3408,6 @@ static void UI_BiasKeypadEvent(lv_event_t *event)
             g_ui_analysis_voltage_tenths = bias_tenths;
             UI_UpdateEngineeringPage();
         }
-        else if (g_keypad_target == UI_BIAS_TARGET_MEASURE_ALL)
-        {
-            g_ui_measure_all_bias_tenths = bias_tenths;
-            g_ui_display_path = UI_DISPLAY_PATH_ALL;
-            UI_UpdateMeasureAllBiasLabel();
-        }
         else if (g_keypad_target == UI_BIAS_TARGET_SWEEP)
         {
             g_ui_sweep_end_tenths = bias_tenths;
@@ -3388,6 +3418,8 @@ static void UI_BiasKeypadEvent(lv_event_t *event)
         else
         {
             g_ui_single_bias_tenths = bias_tenths;
+            g_ui_display_path = (g_ui_single_path == UI_DISPLAY_PATH_ALL) ?
+                                UI_DISPLAY_PATH_ALL : g_ui_single_path;
             UI_UpdateSingleBiasLabel();
         }
         UI_RecordAction(242u);
@@ -3416,7 +3448,7 @@ static void UI_BiasKeypadEvent(lv_event_t *event)
                 else
                 {
                     lv_label_set_text(g_status_label,
-                                      "状态:UART7发送失败");
+                                      "状态:指令发送失败");
                 }
             }
             else
@@ -3595,11 +3627,6 @@ static void UI_BiasOpenEvent(lv_event_t *event)
         current_bias_tenths = g_ui_analysis_voltage_tenths;
         dialog_title = "设置参数电压";
     }
-    else if (g_keypad_target == UI_BIAS_TARGET_MEASURE_ALL)
-    {
-        current_bias_tenths = g_ui_measure_all_bias_tenths;
-        dialog_title = "设置统一偏压";
-    }
     else if (g_keypad_target == UI_BIAS_TARGET_SWEEP)
     {
         current_bias_tenths = g_ui_sweep_end_tenths;
@@ -3638,24 +3665,35 @@ static void UI_BiasOpenEvent(lv_event_t *event)
     lv_obj_move_foreground(g_keypad_overlay);
 }
 
-static void UI_ShowSingle(void)
+/*
+ * 测量页 —— 原「单点测量」页与「一键测量」页合并而成。
+ * 单页内通过「测量回路」的第 5 个选项「全部」在两种测量模式间切换:
+ *   选 CISS/COSS/CRSS/RG  → 单回路点测,读回单组结果
+ *   选 全部               → 依次测 CISS/COSS/CRSS,三张卡片并排
+ * 共用同一个偏压设置(g_ui_single_bias_tenths)与同一个「开始测量」按钮,
+ * 由 UI_SimpleActionEvent 的 220u 分支按 g_ui_single_path 派发到不同的协议请求。
+ */
+static void UI_ShowMeasure(void)
 {
     static const char *const path_names[] =
-        {"CISS", "COSS", "CRSS", "RG"};
-    lv_obj_t *screen = g_page_containers[UI_PAGE_SINGLE];
+        {"CISS", "COSS", "CRSS", "RG", "全部"};
+    lv_obj_t *screen = g_page_containers[UI_PAGE_MEASURE];
     lv_obj_t *path_panel;
     lv_obj_t *control_panel;
-    lv_obj_t *result_panel;
     lv_coord_t content_width =
         (lv_coord_t)LCD_PIXEL_WIDTH - (2 * UI_PAGE_MARGIN);
+    lv_coord_t result_x = UI_PAGE_MARGIN + 312;
+    lv_coord_t result_width = content_width - 312;
+    uint32_t index;
 
-    g_ui_current_page = UI_PAGE_SINGLE;
+    g_ui_current_page = UI_PAGE_MEASURE;
     g_ui_display_bias_tenths = g_ui_single_bias_tenths;
-    g_ui_display_path = g_ui_single_path;
+    g_ui_display_path = (g_ui_single_path == UI_DISPLAY_PATH_ALL) ?
+                        UI_DISPLAY_PATH_ALL : g_ui_single_path;
 
-    if (g_page_built[UI_PAGE_SINGLE] != 0u)
+    if (g_page_built[UI_PAGE_MEASURE] != 0u)
     {
-        UI_ActivatePage(UI_PAGE_SINGLE);
+        UI_ActivatePage(UI_PAGE_MEASURE);
         return;
     }
     path_panel = UI_CreatePanel(screen,
@@ -3669,7 +3707,7 @@ static void UI_ShowSingle(void)
                          content_width,
                          path_names,
                          g_single_path_actions,
-                         4u);
+                         5u);
 
     control_panel = UI_CreatePanel(screen,
                                    UI_PAGE_MARGIN,
@@ -3702,7 +3740,7 @@ static void UI_ShowSingle(void)
         UI_UpdateSingleBiasLabel();
     }
     UI_CreateButton(control_panel,
-                    "开始单点测量",
+                    "开始测量",
                     UI_COLOR_GREEN,
                     20,
                     322,
@@ -3711,90 +3749,42 @@ static void UI_ShowSingle(void)
                     UI_SimpleActionEvent,
                     (void *)&g_single_measure_action);
 
-    result_panel = UI_CreatePanel(screen,
-                                  UI_PAGE_MARGIN + 312,
-                                  156,
-                                  content_width - 312,
-                                  420,
-                                  UI_COLOR_SURFACE_LIGHT,
-                                  16);
-    lv_obj_set_style_border_color(result_panel,
+    /* ---- 结果视图 A:单回路 ---- */
+    g_single_result_panel = UI_CreatePanel(screen,
+                                           result_x,
+                                           156,
+                                           result_width,
+                                           420,
+                                           UI_COLOR_SURFACE_LIGHT,
+                                           16);
+    lv_obj_set_style_border_color(g_single_result_panel,
                                   lv_color_hex(UI_COLOR_CYAN),
                                   LV_PART_MAIN);
-    UI_CreateText(result_panel, "实时测量结果", &ui_font_cn_28,
-                  UI_COLOR_TEXT, 26, 22, content_width - 364, 38,
+    UI_CreateText(g_single_result_panel, "实时测量结果", &ui_font_cn_28,
+                  UI_COLOR_TEXT, 26, 22, result_width - 52, 38,
                   LV_TEXT_ALIGN_CENTER);
     g_single_result_label =
-        UI_CreateText(result_panel, "Cs  -- pF\nCp  -- pF\nD   --",
+        UI_CreateText(g_single_result_panel,
+                      "Cs  -- pF\nCp  -- pF\nD   --",
                       &ui_font_cn_28, UI_COLOR_TEXT,
-                      34, 92, content_width - 380, 202,
+                      34, 92, result_width - 68, 202,
                       LV_TEXT_ALIGN_LEFT);
     g_single_result_note_label =
-        UI_CreateText(result_panel, "尚未读取测量结果", &ui_font_cn_20,
+        UI_CreateText(g_single_result_panel, "尚未读取测量结果", &ui_font_cn_20,
                       UI_COLOR_TEXT_MUTED, 34, 344,
-                      content_width - 380, 30, LV_TEXT_ALIGN_CENTER);
+                      result_width - 68, 30, LV_TEXT_ALIGN_CENTER);
 
-    g_page_built[UI_PAGE_SINGLE] = 1u;
-    UI_ActivatePage(UI_PAGE_SINGLE);
-}
-
-static void UI_ShowMeasureAll(void)
-{
-    lv_obj_t *screen = g_page_containers[UI_PAGE_MEASURE_ALL];
-    lv_obj_t *setting_panel;
-    lv_coord_t content_width =
-        (lv_coord_t)LCD_PIXEL_WIDTH - (2 * UI_PAGE_MARGIN);
-    lv_coord_t card_gap = 16;
-    lv_coord_t card_width = (content_width - (2 * card_gap)) / 3;
-    uint32_t index;
-
-    g_ui_current_page = UI_PAGE_MEASURE_ALL;
-    g_ui_display_bias_tenths = g_ui_measure_all_bias_tenths;
-    g_ui_display_path = UI_DISPLAY_PATH_ALL;
-
-    if (g_page_built[UI_PAGE_MEASURE_ALL] != 0u)
-    {
-        UI_ActivatePage(UI_PAGE_MEASURE_ALL);
-        return;
-    }
-    setting_panel = UI_CreatePanel(screen,
-                                   UI_PAGE_MARGIN,
-                                   68,
-                                   content_width,
-                                   84,
-                                   UI_COLOR_SURFACE_LIGHT,
-                                   16);
-    lv_obj_set_style_border_color(setting_panel,
-                                  lv_color_hex(UI_COLOR_BLUE),
+    /* ---- 结果视图 B:「全部」三路 ---- */
+    g_measure_all_result_panel = UI_CreatePanel(screen,
+                                                result_x,
+                                                156,
+                                                result_width,
+                                                420,
+                                                UI_COLOR_SURFACE_LIGHT,
+                                                16);
+    lv_obj_set_style_border_color(g_measure_all_result_panel,
+                                  lv_color_hex(UI_COLOR_CYAN),
                                   LV_PART_MAIN);
-    {
-        lv_obj_t *bias_button =
-            UI_CreateButton(setting_panel,
-                            "统一偏压:0.1 V",
-                            UI_COLOR_BLUE,
-                            22,
-                            12,
-                            290,
-                            58,
-                            UI_BiasOpenEvent,
-                            (void *)(uintptr_t)UI_BIAS_TARGET_MEASURE_ALL);
-
-        g_measure_all_bias_value_label = lv_obj_get_child(bias_button, 0);
-        UI_UpdateMeasureAllBiasLabel();
-    }
-    UI_CreateText(setting_panel, "统一偏压测量 CISS / COSS / CRSS",
-                  &ui_font_cn_20, UI_COLOR_TEXT_MUTED,
-                  330, 26, content_width - 660, 30, LV_TEXT_ALIGN_CENTER);
-    UI_CreateButton(setting_panel,
-                    "开始一键测量",
-                    UI_COLOR_GREEN,
-                    content_width - 312,
-                    12,
-                    290,
-                    58,
-                    UI_SimpleActionEvent,
-                    (void *)&g_measure_all_action);
-
     for (index = 0u; index < 3u; ++index)
     {
         static const char *const empty_text[] =
@@ -3805,26 +3795,28 @@ static void UI_ShowMeasureAll(void)
         };
         static const uint32_t colors[] =
             {UI_COLOR_BLUE, UI_COLOR_GREEN, UI_COLOR_ORANGE};
+        lv_coord_t card_width = (result_width - 24 - 24) / 3;
         lv_obj_t *card = UI_CreatePanel(
-            screen,
-            UI_PAGE_MARGIN + (lv_coord_t)index * (card_width + card_gap),
-            166,
+            g_measure_all_result_panel,
+            12 + (lv_coord_t)index * (card_width + 12),
+            12,
             card_width,
-            410,
-            UI_COLOR_SURFACE_LIGHT,
-            18);
+            396,
+            UI_COLOR_SURFACE,
+            14);
 
         lv_obj_set_style_border_color(card, lv_color_hex(colors[index]),
                                       LV_PART_MAIN);
         lv_obj_set_style_border_width(card, 2, LV_PART_MAIN);
         g_all_result_labels[index] =
             UI_CreateText(card, empty_text[index], &ui_font_cn_28,
-                          UI_COLOR_TEXT, 20, 38, card_width - 40, 278,
+                          UI_COLOR_TEXT, 10, 30, card_width - 20, 300,
                           LV_TEXT_ALIGN_CENTER);
     }
 
-    g_page_built[UI_PAGE_MEASURE_ALL] = 1u;
-    UI_ActivatePage(UI_PAGE_MEASURE_ALL);
+    UI_UpdateMeasureResultMode();
+    g_page_built[UI_PAGE_MEASURE] = 1u;
+    UI_ActivatePage(UI_PAGE_MEASURE);
 }
 
 static lv_obj_t *UI_CreateSweepSubpageContainer(lv_obj_t *parent,
@@ -3957,7 +3949,7 @@ static void UI_UpdateEngineeringQRCode(void)
         lv_label_set_text(g_engineering_qr_model_label,
                           (g_engineering_ai_model_ready != 0u) ?
                           "LIVE / MEASURED / PHYSICAL" :
-                          "DEMO / STM32H7R7");
+                          "DEMO / MODEL UNSET");
     }
     if (g_engineering_qrcode == NULL)
     {
@@ -4176,7 +4168,7 @@ static void UI_CreateSweepEngineeringPage(lv_obj_t *screen)
                       LV_TEXT_ALIGN_CENTER);
     g_engineering_qr_model_label =
         UI_CreateText(right_panel,
-                      "DEMO / STM32H7R7",
+                      "DEMO / MODEL UNSET",
                       &lv_font_montserrat_16, UI_COLOR_TEXT_MUTED,
                       20, 458, 338, 24,
                       LV_TEXT_ALIGN_CENTER);
@@ -4204,6 +4196,890 @@ static void UI_CreateSweepEngineeringPage(lv_obj_t *screen)
 
     UI_UpdateEngineeringPage();
     lv_obj_add_flag(g_sweep_engineering_page, LV_OBJ_FLAG_HIDDEN);
+}
+
+/* ===========================================================================
+ * 结果页(UI_PAGE_RESULTS) —— 顶排 5 个页签,每个页签一个子页
+ *
+ *   [单点结果] 最近一次点测的读数(CISS / COSS / CRSS / RG 四张卡片)
+ *   [单点波形] 单点测量过程中采到的 电压 / 电流 波形(调试用)
+ *   [扫压结果] C-V 曲线(与扫压页同源)+ 扫压摘要
+ *   [扫压波形] 扫压全过程的 电压 / 电流 包络线(调试用)
+ *   [数据导出] ⏸ 先占位 —— 导出通道与格式未定,本页不写实现
+ *
+ * 定位:**投影视图** —— 自己不产生数据,进入页面时把已有数据重画一遍。
+ * 因此「在测量页 / 扫压页测完 → 退回首页 → 点进结果页」看到的
+ * 一定是刚测出的那份;没测过的回路显示 "--",不编造数值。
+ *
+ * ⚠️ 波形两页的缓存是**结果页自己的一份**(源页面上并没有这两张图),
+ *    由测量后端经 UI_Demo_UpdateWaveformPoint() 逐点写回。
+ * =========================================================================== */
+
+#define UI_RESULT_ROUTE_COUNT  4u    /* CISS / COSS / CRSS / RG */
+#define UI_RESULT_TAB_COUNT    5u
+#define UI_WAVE_KIND_COUNT     2u    /* 0 = 单点波形  1 = 扫压包络 */
+#define UI_WAVE_MAX_SAMPLES    480u
+
+/* 🔴 波形图的坐标只能是整数 —— LVGL 8.2 的刻度文字**不能自定义格式**
+   (扫压页那套「0.10 / 1.0 / 10 / 100」是用自绘回调硬画出来的,这里不走那条路),
+   所以每条轴都要挑一个缩放系数,把量程搬成整数,单位写进轴标题。
+
+   ⛔ **系数不是随便挑的:`app/lv_conf.h` 里 `LV_USE_LARGE_COORD = 0`,
+      即 `lv_coord_t` 是 int16,坐标值不能超过 ±32767。**
+      统一乘 1000 会把扫压那两条轴直接撑爆:
+        · 电压 100 V ×1000 = 107992 → 截成 **-23080**
+        · 电流 277.1 mA ×1000 = 299221 → 截成 **-28459**
+      屏上就出现一串"凭空多出来的负刻度",而曲线只剩几段竖线
+      (2026-10-03 实际踩到,Y 轴刻度与上面两个数逐位吻合)。
+      ⇒ 系数必须让每条轴的最大值留在 ±32000 以内。 */
+#define UI_WAVE_SCALE_COUNT    2u
+static const float g_wave_scale[UI_WAVE_KIND_COUNT][UI_WAVE_SCALE_COUNT] = {
+    {1000.0f, 1000.0f},   /* 单点:电压 mV(≤1.1k)、电流 μA(≤0.3k) */
+    { 100.0f,  100.0f}    /* 扫压:电压 10 mV(≤10k)、电流 10 μA(≤28k) */
+};
+
+typedef struct
+{
+    char     cs[24];    /* RG 回路用这一格存电阻文本 */
+    char     cp[24];
+    char     d[24];
+    uint8_t  have;      /* 0 = 从未收到过该回路的数据 */
+    uint8_t  valid;     /* 后端给的有效性标志 */
+} UI_ResultSnapshot;
+
+typedef struct
+{
+    float    voltage[UI_WAVE_MAX_SAMPLES];
+    float    current[UI_WAVE_MAX_SAMPLES];
+    uint32_t total;
+    uint8_t  have;
+    float    v_min;
+    float    v_max;
+    float    i_min;
+    float    i_max;
+} UI_WaveBuffer;
+
+static UI_ResultSnapshot g_result_snapshot[UI_RESULT_ROUTE_COUNT];
+static UI_WaveBuffer     g_result_wave[UI_WAVE_KIND_COUNT];
+
+static lv_obj_t *g_result_cards[UI_RESULT_ROUTE_COUNT];
+static lv_obj_t *g_result_value_labels[UI_RESULT_ROUTE_COUNT][3];
+static lv_obj_t *g_result_state_labels[UI_RESULT_ROUTE_COUNT];
+
+static lv_obj_t *g_result_tab_buttons[UI_RESULT_TAB_COUNT];
+static lv_obj_t *g_result_subpages[UI_RESULT_TAB_COUNT];
+static uint32_t  g_result_tab;
+
+static lv_obj_t *g_results_chart;
+static lv_chart_series_t *g_results_series[3];
+static lv_obj_t *g_results_summary_label;
+
+/* [波形种类][0 = 电压, 1 = 电流] —— 电压与电流量程差几个数量级,各占一张图 */
+static lv_obj_t *g_result_wave_chart[UI_WAVE_KIND_COUNT][2];
+static lv_chart_series_t *g_result_wave_series[UI_WAVE_KIND_COUNT][2];
+static lv_obj_t *g_result_wave_status[UI_WAVE_KIND_COUNT];
+/* 「还没收到」文案:建页时写一次,之后由 UI_ResultWaveRefresh 按数据改写 */
+static const char *const g_wave_waiting_text[UI_WAVE_KIND_COUNT] =
+{
+    "尚未收到单点波形数据",
+    "尚未收到扫压包络数据"
+};
+
+static uint8_t g_results_built;
+
+static void UI_ResultTabApply(void);
+
+/*
+ * 记录一次读数。三条路径都从这里进,保证结果页与源页面永远同源。
+ * route: 0=CISS 1=COSS 2=CRSS 3=RG
+ */
+static void UI_ResultRecord(uint32_t route,
+                            const char *cs_text,
+                            const char *cp_text,
+                            const char *d_text,
+                            uint32_t valid)
+{
+    UI_ResultSnapshot *snap;
+
+    if (route >= UI_RESULT_ROUTE_COUNT)
+    {
+        return;
+    }
+    snap = &g_result_snapshot[route];
+    if (cs_text != NULL)
+    {
+        (void)strncpy(snap->cs, cs_text, sizeof(snap->cs) - 1u);
+        snap->cs[sizeof(snap->cs) - 1u] = '\0';
+    }
+    if (cp_text != NULL)
+    {
+        (void)strncpy(snap->cp, cp_text, sizeof(snap->cp) - 1u);
+        snap->cp[sizeof(snap->cp) - 1u] = '\0';
+    }
+    if (d_text != NULL)
+    {
+        (void)strncpy(snap->d, d_text, sizeof(snap->d) - 1u);
+        snap->d[sizeof(snap->d) - 1u] = '\0';
+    }
+    snap->have = 1u;
+    snap->valid = (uint8_t)((valid != 0u) ? 1u : 0u);
+}
+
+static void UI_ResultSnapshotsClear(void)
+{
+    (void)memset(g_result_snapshot, 0, sizeof(g_result_snapshot));
+    (void)memset(g_result_wave, 0, sizeof(g_result_wave));
+}
+
+/*
+ * 子页容器:一层**透明整屏叠层**,子页之间只切 HIDDEN,不重建控件。
+ * ⚠️ 不能用 UI_CreatePageContainer() —— 那个是给顶层页用的,会带自己的背景与内边距。
+ */
+static lv_obj_t *UI_CreateResultSubpage(lv_obj_t *parent)
+{
+    lv_obj_t *page = lv_obj_create(parent);
+
+    lv_obj_set_pos(page, 0, 0);
+    lv_obj_set_size(page, (lv_coord_t)LCD_PIXEL_WIDTH,
+                    (lv_coord_t)LCD_PIXEL_HEIGHT);
+    lv_obj_clear_flag(page, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_clear_flag(page, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_opa(page, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_border_width(page, 0, LV_PART_MAIN);
+    lv_obj_set_style_radius(page, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(page, 0, LV_PART_MAIN);
+
+    return page;
+}
+
+/* --------------------------------------------------------------------------
+ * 波形缓存(单点波形 / 扫压包络)
+ * ------------------------------------------------------------------------ */
+
+void UI_Demo_BeginWaveform(uint32_t kind, uint32_t total_samples)
+{
+    UI_WaveBuffer *buf;
+
+    if (kind >= UI_WAVE_KIND_COUNT)
+    {
+        return;
+    }
+    if (total_samples > UI_WAVE_MAX_SAMPLES)
+    {
+        total_samples = UI_WAVE_MAX_SAMPLES;
+    }
+
+    buf = &g_result_wave[kind];
+    (void)memset(buf, 0, sizeof(*buf));
+    buf->total = total_samples;
+    buf->have = 0u;
+    buf->v_min = buf->i_min = 0.0f;
+    buf->v_max = buf->i_max = 0.0f;
+}
+
+void UI_Demo_UpdateWaveformPoint(uint32_t kind,
+                                 uint32_t index,
+                                 uint32_t total_samples,
+                                 float voltage_v,
+                                 float current_ma,
+                                 const char *index_text)
+{
+    UI_WaveBuffer *buf;
+    uint32_t slot;
+
+    if ((kind >= UI_WAVE_KIND_COUNT) || (index == 0u) ||
+        (index > UI_WAVE_MAX_SAMPLES))
+    {
+        return;
+    }
+    if (!isfinite(voltage_v) || !isfinite(current_ma))
+    {
+        return;
+    }
+
+    slot = index - 1u;
+    buf = &g_result_wave[kind];
+
+    if (total_samples > UI_WAVE_MAX_SAMPLES)
+    {
+        total_samples = UI_WAVE_MAX_SAMPLES;
+    }
+    if (total_samples > buf->total)
+    {
+        buf->total = total_samples;
+    }
+
+    buf->voltage[slot] = voltage_v;
+    buf->current[slot] = current_ma;
+
+    if ((buf->have == 0u) || (slot == 0u))
+    {
+        buf->v_min = buf->v_max = voltage_v;
+        buf->i_min = buf->i_max = current_ma;
+    }
+    else
+    {
+        if (voltage_v < buf->v_min) { buf->v_min = voltage_v; }
+        if (voltage_v > buf->v_max) { buf->v_max = voltage_v; }
+        if (current_ma < buf->i_min) { buf->i_min = current_ma; }
+        if (current_ma > buf->i_max) { buf->i_max = current_ma; }
+    }
+    buf->have = 1u;
+
+    if (g_result_wave_status[kind] != NULL)
+    {
+        lv_label_set_text_fmt(g_result_wave_status[kind],
+                              "已采集 %lu 点%s%s",
+                              (unsigned long)index,
+                              (index_text != NULL) ? "  " : "",
+                              (index_text != NULL) ? index_text : "");
+        lv_obj_set_style_text_color(g_result_wave_status[kind],
+                                    lv_color_hex(UI_COLOR_GREEN),
+                                    LV_PART_MAIN);
+    }
+}
+
+/* --------------------------------------------------------------------------
+ * 刷新
+ * ------------------------------------------------------------------------ */
+
+/* 把扫压页的曲线数据整段复制到结果页的图上(纯投影,不重算) */
+static void UI_ResultsCopyChart(void)
+{
+    uint32_t index;
+
+    if ((g_results_chart == NULL) || (g_sweep_chart == NULL))
+    {
+        return;
+    }
+
+    for (index = 0u; index < 3u; ++index)
+    {
+        lv_chart_series_t *source = g_sweep_series[index];
+        lv_chart_series_t *target = g_results_series[index];
+        lv_coord_t *source_x;
+        lv_coord_t *source_y;
+        lv_coord_t *target_x;
+        lv_coord_t *target_y;
+
+        if ((source == NULL) || (target == NULL))
+        {
+            continue;
+        }
+
+        source_x = lv_chart_get_x_array(g_sweep_chart, source);
+        source_y = lv_chart_get_y_array(g_sweep_chart, source);
+        target_x = lv_chart_get_x_array(g_results_chart, target);
+        target_y = lv_chart_get_y_array(g_results_chart, target);
+        if ((source_x == NULL) || (source_y == NULL) ||
+            (target_x == NULL) || (target_y == NULL))
+        {
+            continue;
+        }
+
+        (void)memcpy(target_x, source_x,
+                     sizeof(lv_coord_t) * UI_SWEEP_RENDER_POINTS);
+        (void)memcpy(target_y, source_y,
+                     sizeof(lv_coord_t) * UI_SWEEP_RENDER_POINTS);
+    }
+
+    /* 曲线是复制过来的,视口也得跟着扫压页走 —— 否则刻度标签还停在上次建页时的量程 */
+    UI_ApplyChartViewport(g_results_chart);
+
+    if (g_results_summary_label != NULL)
+    {
+        uint32_t path;
+        uint32_t best = 0u;
+        uint32_t drawn = 0u;
+
+        for (path = 0u; path < 3u; ++path)
+        {
+            if (g_sweep_total_points[path] > best)
+            {
+                best = g_sweep_total_points[path];
+            }
+            if (g_sweep_valid[path][0] != 0u)
+            {
+                drawn++;
+            }
+        }
+        lv_label_set_text_fmt(g_results_summary_label,
+                              "每路点数 %lu    有效曲线 %lu/3    最近一次 RG %s",
+                              (unsigned long)best,
+                              (unsigned long)drawn,
+                              (g_latest_rg_valid != 0u) ? "已测" : "--");
+    }
+}
+
+/* 波形两页:把缓存里的浮点数组搬进 lv_chart 的整型数组(×1000 保精度) */
+static void UI_ResultWaveRefresh(void)
+{
+    uint32_t kind;
+    uint32_t axis;
+
+    for (kind = 0u; kind < UI_WAVE_KIND_COUNT; ++kind)
+    {
+        const UI_WaveBuffer *buf = &g_result_wave[kind];
+
+        for (axis = 0u; axis < 2u; ++axis)
+        {
+            lv_obj_t *chart = g_result_wave_chart[kind][axis];
+            lv_chart_series_t *series = g_result_wave_series[kind][axis];
+            lv_coord_t *xs;
+            lv_coord_t *ys;
+            float lo;
+            float hi;
+            uint32_t index;
+
+            if ((chart == NULL) || (series == NULL))
+            {
+                continue;
+            }
+
+            xs = lv_chart_get_x_array(chart, series);
+            ys = lv_chart_get_y_array(chart, series);
+            if ((xs == NULL) || (ys == NULL))
+            {
+                continue;
+            }
+
+            for (index = 0u; index < UI_WAVE_MAX_SAMPLES; ++index)
+            {
+                if ((buf->have != 0u) && (index < buf->total))
+                {
+                    xs[index] = (lv_coord_t)index;
+                    ys[index] = (lv_coord_t)(((axis == 0u) ?
+                                              buf->voltage[index] :
+                                              buf->current[index]) *
+                                             g_wave_scale[kind][axis]);
+                }
+                else
+                {
+                    xs[index] = LV_CHART_POINT_NONE;
+                    ys[index] = LV_CHART_POINT_NONE;
+                }
+            }
+
+            if ((axis == 0u) && (g_result_wave_status[kind] != NULL))
+            {
+                /* 🔴 状态行跟数据走。只在建页时写「尚未收到」的话,
+                   数据到了它也不会改口 —— 屏幕上就出现「画着曲线却说没数据」。 */
+                if (buf->have == 0u)
+                {
+                    lv_label_set_text(g_result_wave_status[kind],
+                                      g_wave_waiting_text[kind]);
+                    lv_obj_set_style_text_color(g_result_wave_status[kind],
+                                                lv_color_hex(UI_COLOR_TEXT_MUTED),
+                                                LV_PART_MAIN);
+                }
+                else
+                {
+                    lv_label_set_text_fmt(g_result_wave_status[kind],
+                                          "已采集 %lu 点",
+                                          (unsigned long)buf->total);
+                    lv_obj_set_style_text_color(g_result_wave_status[kind],
+                                                lv_color_hex(UI_COLOR_GREEN),
+                                                LV_PART_MAIN);
+                }
+            }
+
+            lo = (axis == 0u) ? buf->v_min : buf->i_min;
+            hi = (axis == 0u) ? buf->v_max : buf->i_max;
+            if (buf->have == 0u)
+            {
+                lo = 0.0f;
+                hi = 1.0f;
+            }
+            else if (hi - lo < 1e-6f)
+            {
+                lo -= 0.5f;
+                hi += 0.5f;
+            }
+
+            lv_chart_set_range(chart, LV_CHART_AXIS_PRIMARY_X, 0,
+                               (buf->total > 1u) ?
+                               (lv_coord_t)(buf->total - 1u) : 1);
+            lv_chart_set_range(chart, LV_CHART_AXIS_PRIMARY_Y,
+                               (lv_coord_t)((lo - ((hi - lo) * 0.08f)) *
+                                            g_wave_scale[kind][axis]),
+                               (lv_coord_t)((hi + ((hi - lo) * 0.08f)) *
+                                            g_wave_scale[kind][axis]));
+            /* Y 轴以「实际单位」显示,所以刻度值要除以 1000 */
+            lv_chart_set_axis_tick(chart, LV_CHART_AXIS_PRIMARY_Y,
+                                   5, 2, 5, 1, true, 62);
+            lv_chart_refresh(chart);
+        }
+    }
+}
+
+static void UI_ResultsRefresh(void)
+{
+    static const char *const value_keys[] = {"Cs", "Cp", "D "};
+    uint32_t route;
+    uint32_t line;
+
+    if (g_results_built == 0u)
+    {
+        return;
+    }
+
+    for (route = 0u; route < UI_RESULT_ROUTE_COUNT; ++route)
+    {
+        const UI_ResultSnapshot *snap = &g_result_snapshot[route];
+        uint32_t card_color;
+
+        if (snap->have == 0u)
+        {
+            card_color = UI_COLOR_BORDER;
+        }
+        else
+        {
+            card_color = (snap->valid != 0u) ?
+                         UI_COLOR_GREEN : UI_COLOR_RED;
+        }
+
+        if (g_result_cards[route] != NULL)
+        {
+            lv_obj_set_style_border_color(g_result_cards[route],
+                                          lv_color_hex(card_color),
+                                          LV_PART_MAIN);
+            lv_obj_set_style_border_width(g_result_cards[route],
+                                          (snap->have != 0u) ? 2 : 1,
+                                          LV_PART_MAIN);
+        }
+
+        if (g_result_state_labels[route] != NULL)
+        {
+            lv_label_set_text(g_result_state_labels[route],
+                              (snap->have == 0u) ? "--" :
+                              ((snap->valid != 0u) ? "OK" : "NG"));
+            lv_obj_set_style_text_color(g_result_state_labels[route],
+                                        lv_color_hex(card_color),
+                                        LV_PART_MAIN);
+        }
+
+        for (line = 0u; line < 3u; ++line)
+        {
+            lv_obj_t *label = g_result_value_labels[route][line];
+
+            if (label == NULL)
+            {
+                continue;
+            }
+
+            if (route == 3u)
+            {
+                /* RG 只有一个电阻读数,占第三行(其余两行留空) */
+                if (line == 2u)
+                {
+                    lv_label_set_text_fmt(
+                        label, "RG  %s Ω",
+                        (snap->have != 0u) ? snap->cs : "--");
+                }
+                else
+                {
+                    lv_label_set_text(label, "");
+                }
+            }
+            else
+            {
+                const char *value;
+
+                if (snap->have == 0u)
+                {
+                    value = "--";
+                }
+                else if (line == 0u)
+                {
+                    value = snap->cs;
+                }
+                else if (line == 1u)
+                {
+                    value = snap->cp;
+                }
+                else
+                {
+                    value = snap->d;
+                }
+                lv_label_set_text_fmt(label, "%s  %s%s",
+                                      value_keys[line], value,
+                                      (line < 2u) ? " pF" : "");
+            }
+        }
+    }
+
+    UI_ResultsCopyChart();
+    UI_ResultWaveRefresh();
+    UI_ResultTabApply();
+}
+
+/* --------------------------------------------------------------------------
+ * 页签
+ * ------------------------------------------------------------------------ */
+
+static void UI_ResultTabApply(void)
+{
+    uint32_t index;
+
+    for (index = 0u; index < UI_RESULT_TAB_COUNT; ++index)
+    {
+        lv_obj_t *page = g_result_subpages[index];
+        lv_obj_t *button = g_result_tab_buttons[index];
+
+        if (page != NULL)
+        {
+            if (index == g_result_tab)
+            {
+                lv_obj_clear_flag(page, LV_OBJ_FLAG_HIDDEN);
+            }
+            else
+            {
+                lv_obj_add_flag(page, LV_OBJ_FLAG_HIDDEN);
+            }
+        }
+
+        if (button != NULL)
+        {
+            if (index == g_result_tab)
+            {
+                lv_obj_set_style_bg_color(button,
+                                          lv_color_hex(UI_COLOR_CYAN),
+                                          LV_PART_MAIN | LV_STATE_DEFAULT);
+                lv_obj_set_style_border_color(button,
+                                              lv_color_hex(UI_COLOR_CYAN),
+                                              LV_PART_MAIN);
+                lv_obj_set_style_border_width(button, 2, LV_PART_MAIN);
+            }
+            else
+            {
+                lv_obj_set_style_bg_color(button,
+                                          lv_color_hex(UI_COLOR_SURFACE),
+                                          LV_PART_MAIN | LV_STATE_DEFAULT);
+                lv_obj_set_style_border_color(button,
+                                              lv_color_hex(UI_COLOR_BORDER),
+                                              LV_PART_MAIN);
+                lv_obj_set_style_border_width(button, 1, LV_PART_MAIN);
+            }
+        }
+    }
+}
+
+static void UI_ResultTabEvent(lv_event_t *event)
+{
+    uint32_t tab;
+
+    if ((event == NULL) ||
+        (lv_event_get_code(event) != LV_EVENT_CLICKED))
+    {
+        return;
+    }
+
+    tab = (uint32_t)(uintptr_t)lv_event_get_user_data(event);
+    if (tab >= UI_RESULT_TAB_COUNT)
+    {
+        return;
+    }
+
+    g_result_tab = tab;
+    UI_ResultTabApply();
+    UI_ResultsRefresh();
+}
+
+/* 造一张调试波形图:电压/电流各一张,共用同一段样本序号当 X 轴 */
+static lv_obj_t *UI_CreateWaveChart(lv_obj_t *parent,
+                                    uint32_t kind,
+                                    uint32_t axis,
+                                    const char *title,
+                                    const char *unit,
+                                    lv_coord_t y)
+{
+    static const uint32_t colors[2] = {UI_COLOR_CYAN, UI_COLOR_ORANGE};
+    lv_obj_t *panel = UI_CreatePanel(parent, 0, y, 976, 212,
+                                     UI_COLOR_SURFACE_LIGHT, 14);
+    lv_obj_t *chart;
+
+    lv_obj_set_style_border_color(panel, lv_color_hex(UI_COLOR_BORDER),
+                                  LV_PART_MAIN);
+    lv_obj_set_style_border_width(panel, 1, LV_PART_MAIN);
+    /* 标题压在面板顶行 —— 图表顶端的那个 Y 刻度文字正好落在同一高度,
+       两者会叠在一起(已踩),所以标题只占 2..22,图表从 34 起。 */
+    UI_CreateText(panel, title, &ui_font_cn_20, UI_COLOR_TEXT,
+                  16, 2, 200, 20, LV_TEXT_ALIGN_LEFT);
+    /* ⚠️ 单位串用**中文字库**画,不能用 montserrat ——
+       它没有 μ/Ω,缺字会静默渲染成空白(屏幕上就成了"/ 10 A")。 */
+    UI_CreateText(panel, unit, &ui_font_cn_20, UI_COLOR_TEXT_MUTED,
+                  240, 2, 200, 20, LV_TEXT_ALIGN_LEFT);
+
+    chart = lv_chart_create(panel);
+    /* X 起点 88 = Y 刻度文字宽度(80)+ 间隙。刻度可以是 6 位数(100000 mV),
+       留窄了左边几位会被裁掉(已踩)。 */
+    lv_obj_set_pos(chart, 88, 34);
+    /* 高度 146 = 面板 212 − 上留 34(标题 + 顶刻度) − 下留 32(X 刻度文字) */
+    lv_obj_set_size(chart, 848, 146);
+    lv_chart_set_type(chart, LV_CHART_TYPE_SCATTER);
+    lv_chart_set_point_count(chart, UI_WAVE_MAX_SAMPLES);
+    lv_chart_set_div_line_count(chart, 0u, 0u);
+    /* X 轴刻度只在下面那张图上标:两张图共用同一段样本序号,标一次就够 */
+    lv_chart_set_axis_tick(chart, LV_CHART_AXIS_PRIMARY_X,
+                           5, 2, 6, 1, (axis != 0u), 34);
+    lv_chart_set_axis_tick(chart, LV_CHART_AXIS_PRIMARY_Y,
+                           5, 2, 5, 1, true, 80);
+    lv_obj_set_style_bg_color(chart, lv_color_hex(0x050505u), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(chart, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_border_color(chart, lv_color_hex(0xffffffu),
+                                  LV_PART_MAIN);
+    lv_obj_set_style_border_width(chart, 1, LV_PART_MAIN);
+    lv_obj_set_style_line_color(chart, lv_color_hex(0xffffffu),
+                                LV_PART_MAIN);
+    lv_obj_set_style_line_width(chart, 2, LV_PART_ITEMS);
+    lv_obj_set_style_size(chart, 0, LV_PART_INDICATOR);
+    lv_obj_set_style_text_font(chart, &lv_font_montserrat_16, LV_PART_TICKS);
+    lv_obj_set_style_text_color(chart, lv_color_hex(0xffffffu),
+                                LV_PART_TICKS);
+    lv_obj_set_style_pad_left(chart, 5, LV_PART_TICKS);
+    lv_obj_set_style_pad_right(chart, 14, LV_PART_TICKS);   /* 末位 X 刻度文字不再出界 */
+    lv_obj_set_style_pad_bottom(chart, 4, LV_PART_TICKS);
+    lv_obj_clear_flag(chart, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_clear_flag(chart, LV_OBJ_FLAG_CLICKABLE);
+
+    g_result_wave_chart[kind][axis] = chart;
+    g_result_wave_series[kind][axis] = lv_chart_add_series(
+        chart, lv_color_hex(colors[axis]), LV_CHART_AXIS_PRIMARY_Y);
+    lv_chart_set_all_value(chart, g_result_wave_series[kind][axis],
+                           LV_CHART_POINT_NONE);
+
+    return panel;
+}
+
+static void UI_ShowResults(void)
+{
+    static const char *const tab_names[UI_RESULT_TAB_COUNT] =
+    {
+        "单点结果", "单点波形", "扫压结果", "扫压波形", "数据导出"
+    };
+    static const char *const route_names[] =
+        {"CISS", "COSS", "CRSS", "RG"};
+    lv_obj_t *screen = g_page_containers[UI_PAGE_RESULTS];
+    lv_obj_t *tab_panel;
+    lv_obj_t *point_value_page;
+    lv_obj_t *sweep_value_page;
+    lv_obj_t *export_page;
+    lv_coord_t content_width =
+        (lv_coord_t)LCD_PIXEL_WIDTH - (2 * UI_PAGE_MARGIN);
+    lv_coord_t card_gap = 14;
+    lv_coord_t card_width =
+        (content_width - (3 * card_gap)) / (lv_coord_t)UI_RESULT_ROUTE_COUNT;
+    uint32_t index;
+    uint32_t line;
+
+    if (screen == NULL)
+    {
+        return;
+    }
+
+    if (g_results_built != 0u)
+    {
+        UI_ActivatePage(UI_PAGE_RESULTS);
+        return;
+    }
+
+    /* ---- 顶部页签 ---- */
+    tab_panel = UI_CreatePanel(screen, UI_PAGE_MARGIN, 64, content_width, 50,
+                               UI_COLOR_SURFACE_LIGHT, 12);
+    for (index = 0u; index < UI_RESULT_TAB_COUNT; ++index)
+    {
+        lv_coord_t tab_width = (content_width - 24 - 4 * 8) / 5;
+        lv_obj_t *button = UI_CreateButton(
+            tab_panel, tab_names[index], UI_COLOR_SURFACE,
+            12 + (lv_coord_t)index * (tab_width + 8), 8,
+            tab_width, 34, UI_ResultTabEvent,
+            (void *)(uintptr_t)index);
+
+        g_result_tab_buttons[index] = button;
+    }
+
+    /* ================= 子页 0:单点结果 ================= */
+    point_value_page = UI_CreateResultSubpage(screen);
+    g_result_subpages[0] = point_value_page;
+
+    for (index = 0u; index < UI_RESULT_ROUTE_COUNT; ++index)
+    {
+        lv_obj_t *card = UI_CreatePanel(
+            point_value_page,
+            UI_PAGE_MARGIN + (lv_coord_t)index * (card_width + card_gap),
+            124, card_width, 168, UI_COLOR_SURFACE_LIGHT, 14);
+
+        g_result_cards[index] = card;
+        lv_obj_set_style_border_width(card, 1, LV_PART_MAIN);
+
+        UI_CreateText(card, route_names[index], &ui_font_cn_28,
+                      UI_COLOR_TEXT, 14, 10, card_width - 80, 34,
+                      LV_TEXT_ALIGN_CENTER);
+        g_result_state_labels[index] =
+            UI_CreateText(card, "--", &ui_font_cn_20, UI_COLOR_TEXT_MUTED,
+                          card_width - 62, 14, 48, 26, LV_TEXT_ALIGN_RIGHT);
+
+        for (line = 0u; line < 3u; ++line)
+        {
+            g_result_value_labels[index][line] =
+                UI_CreateText(card, "--", &ui_font_cn_20, UI_COLOR_TEXT,
+                              14, 56 + (lv_coord_t)line * 32,
+                              card_width - 28, 28, LV_TEXT_ALIGN_LEFT);
+        }
+    }
+    UI_CreateText(point_value_page,
+                  "数据来源:测量页最近一次写回的读数;未测过的回路显示 --",
+                  &ui_font_cn_20, UI_COLOR_TEXT_MUTED,
+                  UI_PAGE_MARGIN, 306, content_width, 28,
+                  LV_TEXT_ALIGN_LEFT);
+
+    /* ================= 子页 1:单点波形 ================= */
+    g_result_subpages[1] = UI_CreateResultSubpage(screen);
+    UI_CreateWaveChart(g_result_subpages[1], 0u, 0u, "激励与偏置电压",
+                       "/ mV", 118);
+    UI_CreateWaveChart(g_result_subpages[1], 0u, 1u, "回路电流",
+                       "/ μA", 336);
+    g_result_wave_status[0] =
+        UI_CreateText(g_result_subpages[1], g_wave_waiting_text[0],
+                      &ui_font_cn_20, UI_COLOR_TEXT_MUTED,
+                      8, 552, 960, 24, LV_TEXT_ALIGN_LEFT);
+
+    /* ================= 子页 2:扫压结果 ================= */
+    sweep_value_page = UI_CreateResultSubpage(screen);
+    g_result_subpages[2] = sweep_value_page;
+    {
+        lv_obj_t *chart_panel = UI_CreatePanel(sweep_value_page,
+                                               UI_PAGE_MARGIN, 124,
+                                               content_width, 380,
+                                               UI_COLOR_SURFACE_LIGHT, 14);
+
+        UI_CreateText(chart_panel, "C-V 曲线(与扫压页同源)", &ui_font_cn_20,
+                      UI_COLOR_TEXT_MUTED, 16, 4, 340, 24,
+                      LV_TEXT_ALIGN_LEFT);
+
+        for (index = 0u; index < 3u; ++index)
+        {
+            static const char *const legend_names[] =
+                {"CISS", "COSS", "CRSS"};
+            lv_coord_t item_x = 380 + (lv_coord_t)index * 130;
+            lv_obj_t *line = lv_obj_create(chart_panel);
+
+            lv_obj_set_pos(line, item_x, 14);
+            lv_obj_set_size(line, 26, 4);
+            lv_obj_clear_flag(line, LV_OBJ_FLAG_SCROLLABLE);
+            lv_obj_set_style_bg_color(
+                line, lv_color_hex(g_sweep_series_colors[index]), LV_PART_MAIN);
+            lv_obj_set_style_bg_opa(line, LV_OPA_COVER, LV_PART_MAIN);
+            lv_obj_set_style_border_width(line, 0, LV_PART_MAIN);
+            lv_obj_set_style_radius(line, 0, LV_PART_MAIN);
+            lv_obj_set_style_pad_all(line, 0, LV_PART_MAIN);
+            UI_CreateText(chart_panel, legend_names[index],
+                          &lv_font_montserrat_16, UI_COLOR_TEXT_MUTED,
+                          item_x + 32, 4, 90, 24, LV_TEXT_ALIGN_LEFT);
+        }
+
+        g_results_chart = lv_chart_create(chart_panel);
+        lv_obj_set_pos(g_results_chart, 64, 34);
+        /* 高度留出底部 34 px 给 X 轴刻度文字 —— 少留就会被面板裁掉(已踩) */
+        lv_obj_set_size(g_results_chart, content_width - 80, 316);
+        lv_chart_set_type(g_results_chart, LV_CHART_TYPE_SCATTER);
+        lv_chart_set_point_count(g_results_chart, UI_SWEEP_RENDER_POINTS);
+        lv_chart_set_range(g_results_chart, LV_CHART_AXIS_PRIMARY_X,
+                           g_sweep_x_min_log_milli,
+                           g_sweep_x_max_log_milli);
+        lv_chart_set_range(g_results_chart, LV_CHART_AXIS_PRIMARY_Y,
+                           g_sweep_y_min_log_milli,
+                           g_sweep_y_max_log_milli);
+        lv_chart_set_div_line_count(g_results_chart, 0u, 0u);
+        lv_chart_set_axis_tick(g_results_chart, LV_CHART_AXIS_PRIMARY_X,
+                               6, 3, 4, 1, true, 38);
+        lv_chart_set_axis_tick(g_results_chart, LV_CHART_AXIS_PRIMARY_Y,
+                               6, 3, 5, 1, true, 58);
+        lv_obj_set_style_bg_color(g_results_chart,
+                                  lv_color_hex(0x050505u), LV_PART_MAIN);
+        lv_obj_set_style_bg_opa(g_results_chart, LV_OPA_COVER, LV_PART_MAIN);
+        lv_obj_set_style_border_color(g_results_chart,
+                                      lv_color_hex(0xffffffu), LV_PART_MAIN);
+        lv_obj_set_style_border_width(g_results_chart, 1, LV_PART_MAIN);
+        lv_obj_set_style_line_color(g_results_chart,
+                                    lv_color_hex(0xffffffu), LV_PART_MAIN);
+        lv_obj_set_style_line_width(g_results_chart, 2, LV_PART_ITEMS);
+        lv_obj_set_style_size(g_results_chart, 0, LV_PART_INDICATOR);
+        lv_obj_set_style_text_font(g_results_chart, &lv_font_montserrat_16,
+                                   LV_PART_TICKS);
+        lv_obj_set_style_text_color(g_results_chart, lv_color_hex(0xffffffu),
+                                    LV_PART_TICKS);
+        lv_obj_set_style_pad_left(g_results_chart, 5, LV_PART_TICKS);
+        lv_obj_set_style_pad_bottom(g_results_chart, 4, LV_PART_TICKS);
+        lv_obj_clear_flag(g_results_chart, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_clear_flag(g_results_chart, LV_OBJ_FLAG_CLICKABLE);
+        /* 🔴 必须挂上和扫压页**同一个**绘制回调:
+           对数轴的刻度文字(0.10 / 1.0 / 10 / 100)是自绘的,
+           LVGL 自带的整数刻度只会把 log-milli 原值(1000/2000/3000)印出来。 */
+        lv_obj_add_event_cb(g_results_chart, UI_SweepChartDrawEvent,
+                            LV_EVENT_DRAW_PART_BEGIN, NULL);
+
+        for (index = 0u; index < 3u; ++index)
+        {
+            g_results_series[index] = lv_chart_add_series(
+                g_results_chart,
+                lv_color_hex(g_sweep_series_colors[index]),
+                LV_CHART_AXIS_PRIMARY_Y);
+            lv_chart_set_all_value(g_results_chart, g_results_series[index],
+                                   LV_CHART_POINT_NONE);
+        }
+    }
+    g_results_summary_label =
+        UI_CreateText(sweep_value_page, "尚无扫压数据", &ui_font_cn_20,
+                      UI_COLOR_TEXT_MUTED, UI_PAGE_MARGIN, 512,
+                      content_width, 28, LV_TEXT_ALIGN_LEFT);
+
+    /* ================= 子页 3:扫压波形(电压/电流包络) ================= */
+    g_result_subpages[3] = UI_CreateResultSubpage(screen);
+    UI_CreateWaveChart(g_result_subpages[3], 1u, 0u, "扫压偏置包络",
+                       "/ 10 mV", 118);
+    UI_CreateWaveChart(g_result_subpages[3], 1u, 1u, "回路电流包络",
+                       "/ 10 μA", 336);
+    g_result_wave_status[1] =
+        UI_CreateText(g_result_subpages[3], g_wave_waiting_text[1],
+                      &ui_font_cn_20, UI_COLOR_TEXT_MUTED,
+                      8, 552, 960, 24, LV_TEXT_ALIGN_LEFT);
+
+    /* ================= 子页 4:数据导出(占位,不实现) ================= */
+    export_page = UI_CreateResultSubpage(screen);
+    g_result_subpages[4] = export_page;
+    {
+        lv_obj_t *panel = UI_CreatePanel(export_page,
+                                         UI_PAGE_MARGIN, 124,
+                                         content_width, 380,
+                                         UI_COLOR_SURFACE_LIGHT, 16);
+
+        lv_obj_set_style_border_color(panel, lv_color_hex(UI_COLOR_BORDER),
+                                      LV_PART_MAIN);
+        UI_CreateText(panel, "数据导出", &ui_font_cn_28, UI_COLOR_TEXT,
+                      0, 90, content_width - 48, 44, LV_TEXT_ALIGN_CENTER);
+        UI_CreateText(panel, "导出通道与文件格式尚未确定,本页先只占位",
+                      &ui_font_cn_20, UI_COLOR_TEXT_MUTED,
+                      0, 152, content_width - 48, 30, LV_TEXT_ALIGN_CENTER);
+        UI_CreateText(panel,
+                      "定下来之后再补:导出内容(单点读数 / C-V 原始点 / 波形)、"
+                      "存放位置、文件名规则",
+                      &ui_font_cn_20, UI_COLOR_TEXT_MUTED,
+                      40, 196, content_width - 128, 60, LV_TEXT_ALIGN_CENTER);
+    }
+
+    g_result_tab = 0u;
+    {   /* ⚠️ 仅供**演示 / 自动化截图**:CV_UI_RESULT_TAB 指定进页时停在哪个页签,
+           与 UI_Demo_GotoPage() 同一性质。正常业务流程里页签由触摸事件切换。 */
+        const char *env = getenv("CV_UI_RESULT_TAB");
+        if (env != NULL)
+        {
+            unsigned long v = strtoul(env, NULL, 0);
+            if (v < UI_RESULT_TAB_COUNT) { g_result_tab = (uint32_t)v; }
+        }
+    }
+    g_results_built = 1u;
+    UI_ActivatePage(UI_PAGE_RESULTS);
 }
 
 static void UI_ShowSweep(void)
@@ -4387,7 +5263,7 @@ static void UI_ShowSweep(void)
     UI_SetSweepProgress(0u);
     g_sweep_progress_label =
         UI_CreateText(g_sweep_curve_page,
-                      "等待主控发送扫压数据",
+                      "等待测量后端发送扫压数据",
                       &ui_font_cn_20, 0xffffffu,
                       16, (lv_coord_t)LCD_PIXEL_HEIGHT -
                       UI_COMMON_HEADER_HEIGHT - 27,
@@ -4528,7 +5404,6 @@ uint32_t UI_Demo_Init(void)
     g_ui_single_path = UI_SINGLE_PATH_CISS;
     g_ui_sweep_path = 0u;
     g_ui_single_bias_tenths = UI_BIAS_MIN_TENTHS;
-    g_ui_measure_all_bias_tenths = UI_BIAS_MIN_TENTHS;
     g_ui_sweep_end_tenths = UI_BIAS_MIN_TENTHS;
     g_ui_analysis_voltage_tenths = UI_BIAS_MIN_TENTHS;
     g_ui_analysis_voltage_max_tenths = UI_BIAS_MIN_TENTHS;
@@ -4548,8 +5423,11 @@ uint32_t UI_Demo_Init(void)
     g_keypad_overlay = NULL;
     g_keypad_title_label = NULL;
     g_single_bias_value_label = NULL;
-    g_measure_all_bias_value_label = NULL;
     g_sweep_bias_value_label = NULL;
+    g_single_result_label = NULL;
+    g_single_result_note_label = NULL;
+    g_single_result_panel = NULL;
+    g_measure_all_result_panel = NULL;
     g_sweep_chart = NULL;
     g_sweep_progress_label = NULL;
     g_sweep_progress_bar = NULL;
@@ -4569,6 +5447,13 @@ uint32_t UI_Demo_Init(void)
     g_engineering_qr_model_label = NULL;
     g_keypad_value_label = NULL;
     g_keypad_note_label = NULL;
+    g_results_chart = NULL;
+    (void)memset(g_result_cards, 0, sizeof(g_result_cards));
+    (void)memset(g_result_value_labels, 0, sizeof(g_result_value_labels));
+    (void)memset(g_result_state_labels, 0, sizeof(g_result_state_labels));
+    (void)memset(g_results_series, 0, sizeof(g_results_series));
+    UI_ResultSnapshotsClear();
+    g_results_built = 0u;
     (void)memset(g_page_containers, 0, sizeof(g_page_containers));
     (void)memset(g_page_built, 0, sizeof(g_page_built));
     (void)memset(g_single_path_buttons, 0, sizeof(g_single_path_buttons));
@@ -4639,8 +5524,7 @@ uint32_t UI_Demo_Init(void)
     UI_CreateBiasKeypad();
 
     UI_ShowInitialize();
-    UI_ShowSingle();
-    UI_ShowMeasureAll();
+    UI_ShowMeasure();
     UI_ShowSweep();
     UI_ShowHome();
     g_sweep_chart_refresh_timer =
@@ -4860,7 +5744,7 @@ void UI_Demo_SetConnection(uint32_t online)
         return;
     }
     lv_label_set_text(g_header_connection_label,
-                      (online != 0u) ? "主控:在线" : "主控:未连接");
+                      (online != 0u) ? "后端:在线" : "后端:未连接");
     lv_obj_set_style_text_color(g_header_connection_label,
                                 lv_color_hex((online != 0u) ?
                                              UI_COLOR_GREEN :
@@ -4906,9 +5790,15 @@ void UI_Demo_UpdateSingleCapacitance(uint32_t path,
                                      const char *d_text,
                                      uint32_t valid)
 {
-    if ((g_single_result_label == NULL) ||
-        (path != g_ui_single_path) ||
-        (cs_text == NULL) || (cp_text == NULL) || (d_text == NULL))
+    if ((cs_text == NULL) || (cp_text == NULL) || (d_text == NULL))
+    {
+        return;
+    }
+
+    /* 先记进结果页快照 —— 结果页与测量页共用同一份来源,不重复解析 */
+    UI_ResultRecord(path, cs_text, cp_text, d_text, valid);
+
+    if ((g_single_result_label == NULL) || (path != g_ui_single_path))
     {
         return;
     }
@@ -4943,6 +5833,9 @@ void UI_Demo_UpdateAllCapacitance(uint32_t path,
     {
         return;
     }
+
+    UI_ResultRecord(path, cs_text, cp_text, d_text, valid);
+
     label = g_all_result_labels[path];
     if (label == NULL)
     {
@@ -4974,6 +5867,7 @@ void UI_Demo_UpdateResistance(const char *resistance_text, uint32_t valid)
         {
             g_latest_rg_ohm = resistance;
             g_latest_rg_valid = 1u;
+            UI_ResultRecord(3u, resistance_text, NULL, NULL, valid);
             if (g_sweep_engineering_page_active != 0u)
             {
                 UI_UpdateEngineeringPage();
@@ -5019,6 +5913,16 @@ void UI_Demo_ClearAllResults(void)
                                         LV_PART_MAIN);
         }
     }
+
+    /* 结果页是投影视图:「清空」必须同时清掉它的数据来源快照,
+       否则结果页会留着上一轮的读数,与源页面不一致。 */
+    UI_ResultSnapshotsClear();
+    if (g_single_result_label != NULL)
+    {
+        lv_label_set_text(g_single_result_label,
+                          "Cs  -- pF\nCp  -- pF\nD   --");
+    }
+    UI_ResultsRefresh();
 }
 
 void UI_Demo_ClearSweep(uint32_t path_or_all)
@@ -5072,7 +5976,7 @@ void UI_Demo_ClearSweep(uint32_t path_or_all)
     if (g_sweep_progress_label != NULL)
     {
         lv_label_set_text(g_sweep_progress_label,
-                          "等待主控发送扫压数据");
+                          "等待测量后端发送扫压数据");
     }
     if (g_sweep_progress_bar != NULL)
     {
@@ -5321,6 +6225,33 @@ uint32_t UI_Demo_GetLatestResistance(float *resistance_ohm)
     return 1u;
 }
 
+void UI_Demo_GotoPage(uint32_t page)
+{
+    switch (page)
+    {
+        case (uint32_t)UI_PAGE_INITIALIZE:
+            UI_ShowInitialize();
+            break;
+
+        case (uint32_t)UI_PAGE_MEASURE:
+            UI_ShowMeasure();
+            break;
+
+        case (uint32_t)UI_PAGE_SWEEP:
+            UI_ShowSweep();
+            break;
+
+        case (uint32_t)UI_PAGE_RESULTS:
+            UI_ShowResults();
+            break;
+
+        case (uint32_t)UI_PAGE_HOME:
+        default:
+            UI_ShowHome();
+            break;
+    }
+}
+
 uint32_t UI_Demo_GetClickCount(void)
 {
     return g_ui_click_count;
@@ -5349,11 +6280,6 @@ uint32_t UI_Demo_GetSinglePath(void)
 uint32_t UI_Demo_GetSingleBiasTenths(void)
 {
     return g_ui_single_bias_tenths;
-}
-
-uint32_t UI_Demo_GetMeasureAllBiasTenths(void)
-{
-    return g_ui_measure_all_bias_tenths;
 }
 
 uint32_t UI_Demo_GetSweepPath(void)

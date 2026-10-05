@@ -29,13 +29,18 @@ uint32_t UI_Demo_GetClickCount(void);
 uint32_t UI_Demo_GetLastButton(void);
 uint32_t UI_Demo_GetCurrentPage(void);
 uint32_t UI_Demo_GetResetRequestCount(void);
+/* ⚠️ 仅供**演示 / 自动化截图**使用:按 UI_Page 编号切页,等价于用户点首页卡片。
+   正常业务流程里页面切换由 LVGL 事件驱动,不要从别的模块调它。 */
+void UI_Demo_GotoPage(uint32_t page);
+
 uint32_t UI_Demo_GetSinglePath(void);
 uint32_t UI_Demo_GetSingleBiasTenths(void);
-uint32_t UI_Demo_GetMeasureAllBiasTenths(void);
+/* 原 UI_Demo_GetMeasureAllBiasTenths() 已随「一键测量页」合并进「测量页」而撤除:
+   合并后单回路与「全部」共用 UI_Demo_GetSingleBiasTenths()。 */
 uint32_t UI_Demo_GetSweepPath(void);
 uint32_t UI_Demo_GetSweepEndTenths(void);
 
-/* UART7协议层在LVGL主循环上下文中调用以下接口更新界面。 */
+/* 协议层在LVGL主循环上下文中调用以下接口更新界面。 */
 void UI_Demo_SetConnection(uint32_t online);
 void UI_Demo_SetStatusText(const char *text);
 void UI_Demo_SetActualBias(const char *bias_text);
@@ -51,6 +56,20 @@ void UI_Demo_UpdateAllCapacitance(uint32_t path,
                                   const char *d_text,
                                   uint32_t valid);
 void UI_Demo_UpdateResistance(const char *resistance_text, uint32_t valid);
+/* 调试波形(结果页的「单点波形」/「扫压波形」两页)。
+   kind: 0 = 单点测量过程   1 = 扫压过程(电压/电流包络)
+   采样序号从 1 开始;电压单位 V,电流单位 mA。 */
+#define UI_DEMO_WAVE_POINT   0u
+#define UI_DEMO_WAVE_SWEEP   1u
+
+void UI_Demo_BeginWaveform(uint32_t kind, uint32_t total_samples);
+void UI_Demo_UpdateWaveformPoint(uint32_t kind,
+                                 uint32_t index,
+                                 uint32_t total_samples,
+                                 float voltage_v,
+                                 float current_ma,
+                                 const char *index_text);
+
 void UI_Demo_ClearAllResults(void);
 void UI_Demo_ClearSweep(uint32_t path_or_all);
 void UI_Demo_BeginSweep(uint32_t path, uint32_t total_points,

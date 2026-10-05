@@ -74,6 +74,11 @@ static uint32_t g_touch_errors;
 int      pynq_touch_debug_line(char *buf, unsigned len);
 uint32_t LV_PortIndev_GetOutOfRangeCount(void);
 uint32_t DisplayProtocol_GetRefusedCount(void);
+/* 协议层生命周期 —— 定义在 pynq_protocol_stub.c。
+   两者都必须在 UI_Demo_Init() **之后**调用:Init 会动 LVGL 对象(在线标志/状态栏),
+   Process 会按需把回读的数据写进界面。 */
+void     DisplayProtocol_Init(void);
+void     DisplayProtocol_Process(void);
 
 /* ------------------------------------------------------------------ */
 static void on_signal(int sig)
@@ -356,6 +361,7 @@ int main(int argc, char **argv)
         cv_regs_close();
         return 1;
     }
+    DisplayProtocol_Init();
 
     /* ---- 7. 接上 DDR 源 ----
      * 🔴 **必须在第一帧画完之后才切**,不能一开始就切:
@@ -377,6 +383,9 @@ int main(int argc, char **argv)
         if (use_touch) {
             poll_touch(poll_ms);
         }
+
+        /* --- 协议层(收测量后端回读的帧并更新界面;空实现时是空转) --- */
+        DisplayProtocol_Process();
 
         /* --- 界面重绘(内部:LVGL 需要重画时才画,画完调 flush 回调换址) --- */
         uint32_t till_next = lv_timer_handler();

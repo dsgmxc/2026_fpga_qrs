@@ -3,7 +3,7 @@
 > 本文是**操作手册**,不是设计文档。每一步都是可以照着敲的。
 > 凡是**实测过**的写法,标 🟢;凡是从手册/指南抄的,标出处;**未验证的标 ⚠️**。
 >
-> 相关:上板实测存档见 `report/measurements/`,寄存器表见 `report/source_design_checklist.md §3`。
+> 相关:上板实测存档见 `board/measurements/`,寄存器表见 `report/source_design_checklist.md §3`。
 
 ---
 
@@ -193,7 +193,7 @@ sudo -E /usr/local/share/pynq-venv/bin/python3 main.py
 ③ Vivado:导出硬件(system.hwh;若 BD 没变则与上次相同)
 ④ scp 到板子                  ← 见 §3.2
 ⑤ 串口上跑,肉眼/打印确认      ← 见 §3.3
-⑥ 结果存档 → report/measurements/
+⑥ 结果存档 → board/measurements/
 ```
 
 ### 判断"要不要重跑综合"
