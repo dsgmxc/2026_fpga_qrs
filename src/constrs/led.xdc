@@ -55,3 +55,33 @@ set_property -dict {PACKAGE_PIN R19 IOSTANDARD LVCMOS33} [get_ports touch_scl]
 set_property -dict {PACKAGE_PIN P20 IOSTANDARD LVCMOS33} [get_ports touch_sda]
 set_property -dict {PACKAGE_PIN U19 IOSTANDARD LVCMOS33} [get_ports touch_int]
 set_property -dict {PACKAGE_PIN M19 IOSTANDARD LVCMOS33} [get_ports touch_rst_n]
+
+# ---- 模拟前端:DAC1220 偏压(3 根)+ AD9833 激励(3 根)------------------------
+# 2026-10-05 加。球号【由用户在板上实际接线后报出】,不是照表挑的 ——
+#   这是本项目里唯一一处"接线先于约束"的信号组。
+#
+#   DAC1220 :  SCLK = W15 (J4-36)    CS    = W13 (J4-32)    SDIO = Y14 (J4-34)
+#   AD9833  :  SCLK = T5  (J4-4)     FSYNC = U7  (J4-6)     SDATA = T11 (J4-2)
+#
+# 电平全 LVCMOS33。两个 bank 都已是 3.3 V,依据不同:
+#   · BANK34 —— 本文件上面已跑通的 LCD 那 30 根线就是 3.3 V;
+#   · BANK13 —— 厂商例程 `30_digital_voltmeter/prj/digital_voltmeter.srcs/
+#               constrs_1/new/pin.xdc` 把 Y12/Y13/V10/V11/W9/W10/Y8/Y9/Y11
+#               全用 LVCMOS33 且能综合通过。
+#
+# ⚠️ DDS 三根线【跨 bank】:T11 属 BANK34,T5/U7 属 BANK13
+#    (J4 第 2 脚夹在一排 BANK13 脚中间)。功能无影响 —— 两 bank 同为 3.3 V ——
+#    但将来做时序/引脚分组时不要把这三根当成一组。
+#
+# ⚠️ 本工程里 DAC 这三行【曾经】也写在同目录的 io.xdc 里(内容一模一样),
+#    但那个文件 IS_ENABLED = 0、综合时根本不 Parsing —— 2026-10-02 触摸
+#    就因此报过 DRC NSTD-1/UCIO-1。**io.xdc 已于 2026-10-05 删除**,
+#    引脚约束现在【只有本文件一处】,不再有重复副本。
+#    ⛔ 教训:本文件名(led.xdc)与它的实际职责不符,极易误导 —— 新增引脚
+#       一律加到这里,不要新建第二个 xdc。
+set_property -dict {PACKAGE_PIN W15 IOSTANDARD LVCMOS33} [get_ports dac_sclk]
+set_property -dict {PACKAGE_PIN W13 IOSTANDARD LVCMOS33} [get_ports dac_cs]
+set_property -dict {PACKAGE_PIN Y14 IOSTANDARD LVCMOS33} [get_ports dac_mosi]
+set_property -dict {PACKAGE_PIN T5  IOSTANDARD LVCMOS33} [get_ports dds_sclk]
+set_property -dict {PACKAGE_PIN U7  IOSTANDARD LVCMOS33} [get_ports dds_sync]
+set_property -dict {PACKAGE_PIN T11 IOSTANDARD LVCMOS33} [get_ports dds_data]
