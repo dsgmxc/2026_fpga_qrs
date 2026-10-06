@@ -85,3 +85,79 @@ set_property -dict {PACKAGE_PIN Y14 IOSTANDARD LVCMOS33} [get_ports dac_mosi]
 set_property -dict {PACKAGE_PIN T5  IOSTANDARD LVCMOS33} [get_ports dds_sclk]
 set_property -dict {PACKAGE_PIN U7  IOSTANDARD LVCMOS33} [get_ports dds_sync]
 set_property -dict {PACKAGE_PIN T11 IOSTANDARD LVCMOS33} [get_ports dds_data]
+
+# ---- AD9238 高速 ADC(16 根,2026-10-06 加)------------------------------------
+# 球号【由用户在板上实际接线后报出】。第一版报的名单有重复
+#   (y11 同时给了 d1/d3,w6 同时给了 d11/otr),与"模块排针共 16 个信号"矛盾;
+#   下面这版是用户核对后的无重复名单,并与 J4 脚号单调对应(J4-27/28 = clk/oeb)。
+#
+#   OEB_N = U13 (J4-28)   CLK  = V13 (J4-27)
+#   D0..D11 = W11 Y11 Y12 Y13 V10 V11 W9 W10 Y8 Y9 Y6 Y7   (J4-26 .. J4-15)
+#   PDN   = V6  (J4-21)   OTR  = W6  (J4-18)
+#
+# 电平 LVCMOS33。15 根在 BANK13、只有 CLK(V13)在 BANK34 —— 跨 bank,
+#   功能无影响(两 bank 同为 3.3 V)。BANK13 用 3.3 V 的依据与 DDS 那三根相同:
+#   厂商例程 30_digital_voltmeter 把 Y12/Y13/V10/V11/W9/W10/Y8/Y9/Y11
+#   全用 LVCMOS33 且综合通过。
+#
+# 🔴 【D0/D11 的顺序没有第二条证据】—— 上面的 D0..D11 完全照用户报的名单排。
+#    D0 是 LSB、D11 是 MSB(AD9238 手册 + 模块原理图 D0_A(LSB)/D11_A(MSB))。
+#    若实际接反,症状是**采样值位序整体倒置**(正弦会变成锯齿状的怪波形),
+#    一眼能看出来 —— 上板第一件事就是看这个。
+#
+# ⚠️ 【时序约束不在这里,见文件末尾的说明】—— 130 MHz 域的时钟由 MMCM 自动
+#    派生,手工再 create_clock 会重复定义报错。
+set_property -dict {PACKAGE_PIN V13 IOSTANDARD LVCMOS33} [get_ports adc_clk]
+set_property -dict {PACKAGE_PIN U13 IOSTANDARD LVCMOS33} [get_ports adc_oe_n]
+set_property -dict {PACKAGE_PIN V6  IOSTANDARD LVCMOS33} [get_ports adc_pdn]
+set_property -dict {PACKAGE_PIN W6  IOSTANDARD LVCMOS33} [get_ports adc_otr]
+set_property -dict {PACKAGE_PIN W11 IOSTANDARD LVCMOS33} [get_ports {adc_d[0]}]
+set_property -dict {PACKAGE_PIN Y11 IOSTANDARD LVCMOS33} [get_ports {adc_d[1]}]
+set_property -dict {PACKAGE_PIN Y12 IOSTANDARD LVCMOS33} [get_ports {adc_d[2]}]
+set_property -dict {PACKAGE_PIN Y13 IOSTANDARD LVCMOS33} [get_ports {adc_d[3]}]
+set_property -dict {PACKAGE_PIN V10 IOSTANDARD LVCMOS33} [get_ports {adc_d[4]}]
+set_property -dict {PACKAGE_PIN V11 IOSTANDARD LVCMOS33} [get_ports {adc_d[5]}]
+set_property -dict {PACKAGE_PIN W9  IOSTANDARD LVCMOS33} [get_ports {adc_d[6]}]
+set_property -dict {PACKAGE_PIN W10 IOSTANDARD LVCMOS33} [get_ports {adc_d[7]}]
+set_property -dict {PACKAGE_PIN Y8  IOSTANDARD LVCMOS33} [get_ports {adc_d[8]}]
+set_property -dict {PACKAGE_PIN Y9  IOSTANDARD LVCMOS33} [get_ports {adc_d[9]}]
+set_property -dict {PACKAGE_PIN Y6  IOSTANDARD LVCMOS33} [get_ports {adc_d[10]}]
+set_property -dict {PACKAGE_PIN Y7  IOSTANDARD LVCMOS33} [get_ports {adc_d[11]}]
+
+# ---- 跨时钟域约束(2026-10-06 加)---------------------------------------------
+# 时钟名出处:**不是猜的**,是读 `report_clocks` 得到的
+#   (vivado -mode batch → open_run synth_1 → get_clocks *)。当时的输出:
+#     clk_fpga_0    period = 20.000 ns   ← PS FCLK0,= 50 MHz
+#     clk_fb_raw    period = 20.000 ns   ← MMCM CLKFBOUT,= fVCO/M = 1300/26
+#     clk_adc_raw   period =  7.692 ns   ← MMCM CLKOUT0 = 1300/10 = **130 MHz** ✅
+#   ⛔ 不要用通配符(get_clocks -filter {NAME =~ ...})去"兜" —— 通配符一条都
+#      匹配不上时是**静默失效**,不报错,等于没约束。名字照抄实测值。
+#
+# 为什么可以声明为异步(这是要紧处,不是图省事):
+#   两个域同源(FCLK0 → MMCM),ZHOLD 补偿下相位对齐,物理上是同步的。
+#   但本设计里两域之间的**每一条**通路都落在下面两类里:
+#     · 同步器 —— clk_axi → clk_base:cfg_div / cfg_ph_off / cfg_cont / cfg_go
+#                 clk_base → clk_axi:done / busy / otr_sticky / mmcm_locked
+#     · 双口 BRAM —— 写口 clk_base / 读口 clk_axi(存储器内部路径不做用户时序)
+#   同步器的**第一级按设计就是要踩亚稳态**,拿普通建立/保持去卡它必然报违规,
+#   而且不是"可能报"、是"一定报"。声明异步 = 明确告诉工具这两组之间的路径
+#   不按周期对齐来卡;MTBF 交给 adc_capture.v 里的 ASYNC_REG + 布局保证。
+#   ⇒ 这和 adc_capture.v 文件头的【时钟域清单】是同一条契约的两半,改一边要动另一边。
+#
+# ⚠️ clk_fb_raw 与 clk_fpga_0 放**同一组**:它是 PLL 反馈时钟,锁定时与参考
+#    同频同相,归到一组才符合物理。
+# ⚠️ FCLK0 若停在 27.78 MHz(板上 BOOT.BIN 的默认),MMCM 锁不住 ⇒ clk_adc_raw
+#    这个时钟对象**根本不会生成** ⇒ 下面这条会报 "clock not found"。
+#    那是**预期行为**,说明 0x84[0] 还没放行,不是约束写错了。
+set_clock_groups -asynchronous \
+    -group {clk_fpga_0 clk_fb_raw} \
+    -group {clk_adc_raw}
+
+# ⚠️ ADC 并行数据 adc_d[*] / adc_otr 的【输入时序本版有意不约束】。
+#    原因如实记录,不糊过去:
+#      · 采样时钟 adc_clk 的周期由运行时寄存器 P 决定(P=13 → 100 ns,
+#        P=2 → 15.4 ns),**一个静态 XDC 写不下所有档位**;
+#      · 当前数据线是杜邦线,tPD 离散度 ~4 ns 本身就盖过 65 MHz 的眼宽,
+#        此时给一个精确的 set_input_delay 只是伪造精度。
+#    代价:实现报告里这几个端口会以 no_input_delay 出现在未约束清单中 ——
+#    这是**已知且有意**的,不是漏了。要严格签核得先换排线 + 上 IDELAYE2。

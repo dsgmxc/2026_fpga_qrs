@@ -143,6 +143,21 @@ REG = {
                           #     写 1 放行 —— 否则三段复位图案会超出手册双向窗口上界,
                           #     复位不触发、DIR 写入无效、输出停在 −10 V。见 DAC_RST_*。
                           #     ⚠️ 不是 0x18:0x18 是 RANGE_SEL 的规格位置(测量主链)。
+
+    # ---- AD9238 采集通路(2026-10-06 落地)------------------------------
+    # 📌 与 C 侧的镜像:`src/c_ui/app/pynq_regs.h` 的 CV_REG_ADC_*。
+    #    **改这里要同时改那里**,两处不一致的后果是"写进去了、没反应、不报错"。
+    "ADC_CFG":      0x88, # RW  [7:0]DIV [15:8]PH_OFF(有符号) [16]CONT [17]OEB_N [18]PDN
+                          #     复位值 = 0x0000_000D ⇒ DIV=13 → 130/13 = **10 MSPS**,
+                          #     PH_OFF=0,单次模式,输出使能,不掉电。
+                          #     ⇒ 采样率 = 130 MHz / DIV,档位见 ADC_DIV_*。
+    "ADC_CTRL":     0x8C, # W   [0]GO —— **命令**(1 拍脉冲),读回恒 0。
+                          #     ⚠️ 与其它寄存器"整字存"的语义不同,写 1 触发一次采集。
+    "ADC_STS":      0x90, # RO  [0]mmcm_locked [1]done [2]busy [3]otr_sticky
+                          #     busy=1 期间读 ADC_BUF_DATA 拿到的是**上一次**的残留
+                          #     —— 必须等 done 才读(2026-10-06 踩过这个坑)。
+    "ADC_BUF_IDX":  0x94, # RW  [11:0] 采样缓冲读指针(4096 深)
+    "ADC_BUF_DATA": 0x98, # RO  [11:0]sample [12]OTR
 }
 
 # 0x74 的位布局(2026-10-03 二次修订)。出处:RTL `lcd_fb_reader.v` §6。
@@ -289,10 +304,15 @@ def bias_code_to_volts(code):
 
 # 激励频率:AD9833 板载晶振 **25 MHz,焊死,不可由 FPGA 供 MCLK**(决策 D10)
 #     f_out = code * 25 MHz / 2^28
-# ⚠️ 决策 D08 定激励**固定 1 MHz** —— 0x80 是留给将来扫频的接口,当前不要扫。
+# ⚠️ 决策 D08 定激励**默认 1 MHz**。
+#    🔄 2026-10-06 修订:原先写"固定 1 MHz、界面没有频率控件"。用户明确要求把频率
+#       接口引出来,现在 **c_ui 的「系统复位」页有五档按钮**(100k/500k/1M/2M/5M)。
+#       C 侧实现在 `src/c_ui/app/measure_config.c`,换算常量在 `pynq_regs.h`。
+#       **1 MHz 仍是默认值与复位值**,D08 的"默认"含义不变,只是不再"固定"。
 DDS_MCLK_HZ    = 25_000_000
 DDS_PHASE_BITS = 28
 DDS_FREQ_1MHZ  = 0x0A3D70A       # 10737418 ← round(1e6 * 2^28 / 25e6)
+DDS_HZ_CHOICES = (100_000, 500_000, 1_000_000, 2_000_000, 5_000_000)
 
 
 def dds_hz_to_code(hz):
@@ -300,6 +320,44 @@ def dds_hz_to_code(hz):
     raw = int(round(float(hz) * (1 << DDS_PHASE_BITS) / DDS_MCLK_HZ))
     return max(0, min((1 << DDS_PHASE_BITS) - 1, raw))
 
+
+# ---------------------------------------------------------------------------
+# AD9238 采样率与相位(0x88)—— 2026-10-06
+# ---------------------------------------------------------------------------
+ADC_CLK_BASE_HZ = 130_000_000     # MMCM:VCO = 50×26/1 = 1300 MHz,CLKOUT0 = 130 MHz
+ADC_DIV_DEFAULT = 13              # → 10.0 MSPS,与 RTL 0x88 复位值一致
+ADC_BUF_N       = 4096            # 单次采集点数(采集时长 = DIV × 4096 / 130 MHz)
+
+# 界面/脚本可用档位。⛔ 不给 DIV=5(26 MSPS)及以上 —— 决策 D13 定 f_s ≤ 20 MSPS。
+# ⚠️ **20 MSPS 取不到**:130/20 = 6.5,不是整数。所以这套硬件最高只能到 13 MSPS。
+ADC_DIV_CHOICES = (
+    (130, 1.0), (65, 2.0), (26, 5.0), (13, 10.0), (10, 13.0),
+)   # (DIV, MSPS)
+
+
+def adc_sample_hz(div):
+    """分频比 → 采样率(Hz)。`P = max(div, 2)` 与 adc_capture.v 一致。"""
+    p = max(int(div), 2)
+    return ADC_CLK_BASE_HZ / p
+
+
+def adc_phase_center(div):
+    """分频比 → 端口 A 采样窗中心(PH_OFF,tick)。
+
+    = 1.5 − P/4,四舍五入到整数 tick。**三点实测吻合**(2026-10-06):
+        DIV=13 → −2      DIV=26 → −5      DIV=130 → −31
+
+    🔴 **换采样率必须同时换 PH_OFF。** 窗口位置随 P 走,只改 DIV 会让采样点
+       滑出被驱动的窗口 —— 现象是"换了速率就没波形",而不是报错。
+       窗 = tick ∈ [2 − P/2, +1],宽 P/2(P=13 时就是 −4…+1 这 6 拍)。
+    """
+    p = max(int(div), 2)
+    # ⚠️ 用整数运算,**与 pynq_regs.h 的 cv_adc_phase_center() 逐位等价**。
+    #    别图省事写成 int(round((6-p)/4)):Python 的 round() 是"四舍六入五取偶",
+    #    而 C 侧是"五away from zero",在 (6-P) ≡ 2 (mod 4)(即 P=4, 8, 12 …)上
+    #    两边会差 1 —— 这种分歧在"查了半天波形对不上"的时候极难定位。
+    n = 6 - p
+    return (n + 2) // 4 if n >= 0 else -((-n + 2) // 4)
 
 def dds_code_to_hz(code):
     """28 位频率码 → 激励频率(Hz)。"""
@@ -380,9 +438,13 @@ PCLK_WINDOW_MHZ    = (40.8, 67.2)  # 屏手册允许窗口 —— FCLK0 落在�
 #    🆕 2026-10-05 追加 **CV_CTRL(0x84)** —— dac_1220 初始化的软件放行位。
 #       原因:FCLK0 开机默认 27.78 MHz,三段复位图案全部超出手册双向窗口上界
 #       ⇒ 复位不触发 ⇒ 偏压恒 −10 V。故把 DAC 的 rst_n 交给软件在改频之后放行。
+#    🆕 2026-10-06 追加 **ADC_CFG(0x88)/ADC_CTRL(0x8C)/ADC_STS(0x90)/
+#       ADC_BUF_IDX(0x94)/ADC_BUF_DATA(0x98)** —— AD9238 采集通路。
+#       该版已实测:采出周期正好 10 点的 1 MHz 正弦(10 MSPS),D0/D11 位序正确。
 PL_IMPLEMENTED_REGS = (
     "VERSION", "SCRATCH",
     "BIAS_CODE", "DDS_FREQ", "CV_CTRL",
+    "ADC_CFG", "ADC_CTRL", "ADC_STS", "ADC_BUF_IDX", "ADC_BUF_DATA",
     "LCD_CTRL", "LCD_FILL", "FB_BASE0", "FB_BASE1", "LCD_SWAP", "FB_STATUS",
     "TOUCH_STATUS", "TOUCH_PT0", "TOUCH_PT1",
     "DBG_BEATS", "DBG_ARADDR", "DBG_STATE",
@@ -391,6 +453,7 @@ PL_HAS_LCD   = True      # lcd_timing / lcd_fb_reader / lcd_vblank_ctrl 已进�
 PL_HAS_TOUCH = True      # i2c_master / gt911_ctrl 已进位流
 PL_HAS_DAC   = True      # dac_1220(偏压)已进位流 —— 2026-10-05
 PL_HAS_DDS   = True      # adc_9833(激励)已进位流 —— 2026-10-05
+PL_HAS_ADC   = True      # AD9238 采集(adc_capture)已进位流 —— 2026-10-06
 # ⚠️ 但**测量主链仍不在**:DLIA / CORDIC / 继电器 / 扫压编排都还没有,
 #    所以"设置偏压"能改硬件输出,"开始扫压"目前只能改变偏压(测不到 C 值)。
 

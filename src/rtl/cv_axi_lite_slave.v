@@ -73,9 +73,31 @@
 //                           0x7C 6'h1F DBG2            <-- 2026-10-03 新增
 //                           0x80 6'h20 DDS_FREQ        <-- 2026-10-05 新增
 //                           0x84 6'h21 CV_CTRL         <-- 2026-10-05 新增
-//                                     ★ [0] dac_rst_n:软件放行 dac_1220 的初始化。
-//                                       复位值 0=按在复位 —— 见端口区 CV_CTRL 的长注释。
+//                                     ★ [0] clk_release:软件放行【所有按 50 MHz
+//                                       折常数工作的外设】—— 目前是 dac_1220 的
+//                                       初始化和 ADC 的 MMCM 两个消费者。
+//                                       复位值 0 = 都按在复位。
+//                                       ⚠️ 2026-10-06 由「dac_rst_n」改名/扩义,
+//                                          见端口区 cfg_clk_release 的长注释。
 //                                       为什么不放 0x18:那是 RANGE_SEL 的规格位置。
+//                           0x88 6'h22 ADC_CFG         <-- 2026-10-06 新增
+//                                     [ 7: 0] DIV     分频比 P(≥2),复位 13 → 10 MHz
+//                                     [15: 8] PH_OFF  采样相位偏移(有符号,单位=clk_base 周期)
+//                                     [16]    CONT    1=自由运行 / 0=单次 GO 触发
+//                                     [17]    OEB_N   0=ADC 输出使能
+//                                     [18]    PDN     1=ADC 掉电
+//                           0x8C 6'h23 ADC_CTRL        <-- 2026-10-06 新增
+//                                     [0] GO —— 写 1 启动一次单次采集(1 拍脉冲,
+//                                         **读恒为 0**,与 0x60/0x64 同一种命令语义)
+//                           0x90 6'h24 ADC_STS         RO  <-- 2026-10-06 新增
+//                                     [0] mmcm_locked  [1] done  [2] busy  [3] otr_sticky
+//                           0x94 6'h25 ADC_BUF_IDX     RW  <-- 2026-10-06 新增
+//                                     [11:0] 缓冲读索引(0..4095)
+//                           0x98 6'h26 ADC_BUF_DATA    RO  <-- 2026-10-06 新增
+//                                     [11:0] 采样值 [12] OTR
+//
+//  ⚠️ PS 侧 `cv_regs.py` 在交付仓库里(本工作区没有副本),新地址**
+//     需要用户手工同步过去** —— 见本次交付说明。
 //
 //  ⚠️ 0x00~0x7C 这 32 个槽位【已于 2026-10-03 全满】—— DBG0/1/2 占掉了原计划
 //     留给 P4 安全链(WATCHDOG_KICK / FAULT_LATCH / SAFETY_STATE)的
@@ -204,7 +226,33 @@ module cv_axi_lite_slave #(
     //      取 0 时读回 0 与硬件真实状态一致。下游 bias_set 上电脉冲
     //      本来就等 dac_init_done 才发,而 init_done 在未放行时恒 0 —— 自洽。
     //-------------------------------------------------------------------------
-    output wire                                 cfg_dac_rst_n,  // 0x84[0] → dac_1220.rst_n
+    // 🔴 2026-10-06 由 `cfg_dac_rst_n` 改名为 `cfg_clk_release`,**语义同时扩大**:
+    //    它不再只管 dac_1220,而是"FCLK0 已确认为 50.000 MHz,放行所有
+    //    按 50 MHz 折时序常数的外设"。目前两个消费者:
+    //      · dac_1220.rst_n        —— 复位图案是双向窗口,超上界不复位(2026-10-05)
+    //      · adc_capture 的 MMCM   —— CLKIN1_PERIOD 硬编码 20 ns,
+    //                                 FCLK0=27.78 MHz 时 VCO 落到 361 MHz,
+    //                                 低于 MMCM 下限 600 MHz ⇒ 不锁定
+    //    ⇒ **复用同一位**(而不是新开 0x84[1])是刻意的:两者前置条件完全相同,
+    //      拆成两位就多一个"置了 bit1 忘了 bit0"的故障模式,而症状是
+    //      "DAC 静默停在复位态",极难查。
+    //    ✅ 对 PS 侧**无破坏**:旧代码写 0x84=1 仍然有效,且现在会顺带把 ADC 时钟也放行。
+    //    ⚠️ 交付仓库 cv_regs.py 里该位仍注释为 dac_rst_n —— 需要在那边补一句。
+    output wire                                 cfg_clk_release, // 0x84[0] → dac_1220.rst_n / MMCM RST
+
+    //-------------------------------------------------------------------------
+    // ADC 采集(2026-10-06 加)—— 130 MHz 分频 + 4096 深缓冲
+    //   同样【不是 AXI 端口,不要加 X_INTERFACE_INFO】—— 普通线网,在 cv_sys 内消化。
+    //   位域 mask 交给消费侧做(本层出寄存器原值;但见下面 0x88 的例外说明)。
+    //-------------------------------------------------------------------------
+    output wire [C_S_AXI_DATA_WIDTH-1:0]        cfg_adc_cfg,      // 0x88
+    output wire                                 cfg_adc_go,       // 0x8C[0] 写 → 1 拍脉冲
+    output wire [C_S_AXI_DATA_WIDTH-1:0]        cfg_adc_buf_idx,  // 0x94 [11:0] 读索引
+    input  wire [C_S_AXI_DATA_WIDTH-1:0]        sts_adc_sts,      // 0x90
+    input  wire [C_S_AXI_DATA_WIDTH-1:0]        sts_adc_buf_data, // 0x98
+    // adc_capture 的 done/busy 之类【不单独开口】—— 已经打包进 sts_adc_sts,
+    // 再多开几个端口只会让 cv_sys 的引线变噪音。将来若要单独用 done 去触发
+    // 别的逻辑,再加端口。
 
     // ⚠️ 输入(不是输出):dac_1220 的 init_done,给上面的上电脉冲【开门】用。
     //    没有它那个脉冲就是空放 —— 逐状态核对见下面 §set 脉冲 的说明。
@@ -289,6 +337,14 @@ module cv_axi_lite_slave #(
     //      不能为了图方便挪用。⇒ 落到扩展区,紧邻同属模拟前端的 DDS_FREQ(0x80)。
     localparam [5:0] IDX_CV_CTRL   = 6'h21;  // 0x84
 
+    // ADC 采集(2026-10-06 加)—— 紧接模拟前端往后排,仍属"模拟通道"这一族。
+    //   ⚠️ 0x88~0x98 共 5 个槽位,地址空间还剩 0x9C~0xFC 共 25 个 ⇒ 不需要再扩宽度。
+    localparam [5:0] IDX_ADC_CFG      = 6'h22;  // 0x88
+    localparam [5:0] IDX_ADC_CTRL     = 6'h23;  // 0x8C
+    localparam [5:0] IDX_ADC_STS      = 6'h24;  // 0x90
+    localparam [5:0] IDX_ADC_BUF_IDX  = 6'h25;  // 0x94
+    localparam [5:0] IDX_ADC_BUF_DATA = 6'h26;  // 0x98
+
     //=========================================================================
     //  写通道
     //=========================================================================
@@ -357,6 +413,8 @@ module cv_axi_lite_slave #(
     reg [C_S_AXI_DATA_WIDTH-1:0] bias_code;   // 0x14  2026-10-05 加
     reg [C_S_AXI_DATA_WIDTH-1:0] cv_ctrl;     // 0x84  2026-10-05 加(bit0 = dac_rst_n)
     reg [C_S_AXI_DATA_WIDTH-1:0] dds_freq;    // 0x80  2026-10-05 加
+    reg [C_S_AXI_DATA_WIDTH-1:0] adc_cfg;     // 0x88  2026-10-06 加
+    reg [C_S_AXI_DATA_WIDTH-1:0] adc_buf_idx; // 0x94  2026-10-06 加
 
     // ⚠️ 2026-10-01 由 if-else 链改为 case —— 与读通道写法一致,便于继续扩表。
     always @(posedge s_axi_aclk) begin
@@ -393,7 +451,24 @@ module cv_axi_lite_slave #(
             //    理由见端口区 CV_CTRL 那段。**这不是笔误,改之前先读完那段。**
             //    ⚠️ 连带:上面 bias_code 的上电脉冲要等 dac_init_done,
             //       未放行时它恒 0 ⇒ 脉冲不发,寄存器 0 V 与 DAC 状态不会互相说谎。
-            cv_ctrl   <= 32'h0000_0000;     // bit0 dac_rst_n = 0 = 保持复位
+            cv_ctrl   <= 32'h0000_0000;     // bit0 clk_release = 0 = 保持复位
+            //-----------------------------------------------------------------
+            // ADC_CFG(0x88)复位值 = 分频比 13 → 130 MHz / 13 = **10 MHz**
+            //   其余位全 0:
+            //     PH_OFF = 0 → 采在 adc_clk 下降沿(tick 0,见 adc_capture.v)
+            //       ⚠️ 这里**不是**数据眼中心。实测(P=13,2026-10-06)眼中心在 PH_OFF = −2,
+            //          与复位值 0 差 **2 个 tick**。0 仍落在数据稳定窗 [−4, +1] 内,
+            //          所以上电即可用、不必等软件改;但软件换分频比时**必须**把 PH_OFF
+            //          一起按窗中心写(c_ui 侧 `measure_config.c::adc_window`)——
+            //          窗位置随 P 走,只改 DIV 会让采样点滑出去,且**不报错**。
+            //     CONT   = 0 → 单次模式,等 PS 写 GO 才采
+            //     OEB_N  = 0 → ADC 输出**使能**(与已删除的 adc_9833/ad9238 老代码一致)
+            //     PDN    = 0 → 不掉电
+            // ⚠️ 为什么默认给 10 MHz 而不是最高频:杜邦线接不出 65 MHz,
+            //    默认值应当是"上电就一定能用的那档"。改分频比由 PS 界面控制。
+            //-----------------------------------------------------------------
+            adc_cfg     <= 32'h0000_000D;   // [7:0]=13,其余 0
+            adc_buf_idx <= 32'h0000_0000;
         end else if (do_write) begin        //    PS 必须先写基址再切源,顺序错就是黑屏。
             case (awaddr_r[7:2])
                 IDX_SCRATCH  : scratch  <= wdata_r;   // 未实现 WSTRB:整字写
@@ -403,6 +478,14 @@ module cv_axi_lite_slave #(
                 //    会读回 0xFFFFFFFF —— [31:1] 是谎报。读回必须是已生效值。
                 IDX_CV_CTRL  : cv_ctrl   <= {31'b0, wdata_r[0]};   // 0x84,只取 bit0
                 IDX_DDS_FREQ : dds_freq  <= wdata_r;
+                // ⚠️ 下面两个【掩码到有效位】,理由同 0x84:读回必须是已生效值。
+                //    ADC_CFG 有效到 [18](DIV/PH_OFF/CONT/OEB_N/PDN),掩到 19 位;
+                //    ADC_BUF_IDX 有效到 [11](4096 深),掩到 12 位。
+                //    上面那些整字存的寄存器是"留给将来的位还能读回"的历史约定,
+                //    控制寄存器不适用。
+                IDX_ADC_CFG     : adc_cfg     <= wdata_r & 32'h0007_FFFF;
+                IDX_ADC_BUF_IDX : adc_buf_idx <= wdata_r & 32'h0000_0FFF;
+                // ⚠️ 这里同样【没有】IDX_ADC_CTRL —— 0x8C 是命令,见下面的脉冲块。
                 IDX_LCD_CTRL : lcd_ctrl <= wdata_r;
                 IDX_LCD_FILL : lcd_fill <= wdata_r;
                 IDX_FB_BASE0 : fb_base0 <= wdata_r;
@@ -451,6 +534,29 @@ module cv_axi_lite_slave #(
             clr_sticky_r <= 1'b0;                    // 默认清 ⇒ 只在写当拍为高
             if (do_write && (awaddr_r[7:2] == IDX_FB_STATUS)) begin
                 clr_sticky_r <= 1'b1;                // 写入值无关:写什么都清
+            end
+        end
+    end
+
+    //=========================================================================
+    //  ADC_CTRL(0x8C)写 —— 命令语义,1 拍脉冲(2026-10-06 加)
+    //    ⚠️ 与 0x60 / 0x64 同构:第三个"命令寄存器",照同一个套路写。
+    //    ⚠️ 本寄存器的【读回是 0】,而且是【有意为之】:
+    //       GO 是一次性事件,做成电平就会出现"PS 连写两次 1、第二次采不到沿";
+    //       而锁存"上次写过"又会让读回值在事件早已过去后仍显示 1 —— 那是说谎。
+    //       命令寄存器的正确读回语义是"没有待处理的命令",即恒 0。
+    //       (与 0x60 的处理不同:0x60 读回的是**消费者持有的已生效状态**,
+    //        因为 vblank_ctrl 那边确实有"换址还没发生"这个待处理态。)
+    //=========================================================================
+    reg adc_go_r;
+
+    always @(posedge s_axi_aclk) begin
+        if (!s_axi_aresetn) begin
+            adc_go_r <= 1'b0;
+        end else begin
+            adc_go_r <= 1'b0;                        // 默认清 ⇒ 只在写当拍为高
+            if (do_write && (awaddr_r[7:2] == IDX_ADC_CTRL)) begin
+                adc_go_r <= wdata_r[0];              // 只有 bit0 是 GO,写 0 不发脉冲
             end
         end
     end
@@ -521,7 +627,13 @@ module cv_axi_lite_slave #(
 
     // 0x84 CV_CTRL —— 只引出 bit0。⚠️ 它是**电平**不是脉冲:
     //   与上面两个 set 不同,它表示"保持放行",不是"触发一次"。
-    assign cfg_dac_rst_n = cv_ctrl[0];
+    //   2026-10-06 改名/扩义为 cfg_clk_release,消费者见端口区。
+    assign cfg_clk_release = cv_ctrl[0];
+
+    // ADC 采集(2026-10-06)
+    assign cfg_adc_cfg     = adc_cfg;
+    assign cfg_adc_go      = adc_go_r;
+    assign cfg_adc_buf_idx = adc_buf_idx;
 
     //=========================================================================
     //  读通道
@@ -585,6 +697,12 @@ module cv_axi_lite_slave #(
                 IDX_BIAS_CODE: rdata_r <= bias_code;   // 0x14 2026-10-05
                 IDX_CV_CTRL  : rdata_r <= cv_ctrl;     // 0x84 2026-10-05 (bit0 = dac_rst_n)
                 IDX_DDS_FREQ : rdata_r <= dds_freq;    // 0x80 2026-10-05
+                // ADC 采集(2026-10-06)
+                IDX_ADC_CFG     : rdata_r <= adc_cfg;
+                IDX_ADC_STS     : rdata_r <= sts_adc_sts;
+                IDX_ADC_BUF_IDX : rdata_r <= adc_buf_idx;
+                IDX_ADC_BUF_DATA: rdata_r <= sts_adc_buf_data;
+                // 0x8C 落 default ⇒ 读 0。**这是有意为之**,理由见上面的脉冲块。
                 IDX_LCD_CTRL : rdata_r <= lcd_ctrl;
                 IDX_LCD_FILL : rdata_r <= lcd_fill;
                 IDX_FB_BASE0 : rdata_r <= fb_base0;

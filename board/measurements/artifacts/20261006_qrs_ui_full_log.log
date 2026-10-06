@@ -1,0 +1,1802 @@
+==========================================================================
+  MOSFET C-V 在线监测平台 · PS 侧启动
+==========================================================================
+  VERSION      0x00010000
+  link_check   True
+  fclk0_real   27.7778 MHz
+  fclk0_pynq   41.6667 MHz (PYNQ 算的,不是真值)
+  fclk0_expect 50.0
+  pclk_window  (40.8, 67.2)
+[cv_monitor] VERSION  = 0x00010000  (expect 0x00010000)
+[cv_monitor] SCRATCH  = 0xDEADBEEF / 0xA5A55A5A  (expect 0xDEADBEEF / 0xA5A55A5A)
+[cv_monitor] link_check: PASS
+
+--- FCLK0(就是像素时钟)---
+  改前 27.7778 MHz(DIV0=6 DIV1=6)  ← BOOT.BIN 留下的默认值
+[fclk0] 50.0000 MHz (IO_PLL 1000 / DIV0 20 / DIV1 1)  ✓ 在窗口内 [40.8~67.2]
+  改后 50.0000 MHz(设计值 50.0 MHz)
+  📌 口径:写文档一律写「设计值 50 MHz / 真值 50.0000 MHz」
+
+--- 显示通路 ---
+  帧缓存 fb0=0x38100000  fb1=0x38230000(1228800 B / 块,64 KB 对齐)
+
+--- 触摸通路 ---
+  <TouchEvent NEW  seq=  0 count=0 pen=0 err=0 (   0,   0)>   (没碰屏时 seq 不动、pen_down=0 属正常)
+
+--- 界面 ---
+[ui] 启动:/home/xilinx/c_ui_src/c_ui --axi-base 0x43C00000 --poll-ms 10 --fb0 0x38100000 --fb1 0x38230000
+[ui] ⚠️ 需要读 /dev/mem —— 本进程必须是 root(main.py 已经是)
+  👀 屏上应当出现前序那套 LVGL 界面(首页)。点一下按钮看页面切不切。
+  ⚠️ 触摸的坐标轴是否要翻转,以 tools/touch_probe.py 的实测为准。
+──── c_ui 启动 ────
+  axi_base = 0x43C00000   fb0 = 0x38100000   fb1 = 0x38230000   poll = 10 ms   touch = 开
+[regs] /dev/mem 已映射 AXI 0x43C00000(4096 B)
+[disp] direct_mode 双缓冲就绪:fb0=0x38100000 fb1=0x38230000 前台=0(非缓存映射;无 DMA2D,矩形同步走 CPU memcpy)
+[touch] 链路检查:0x68 = 0x00000300(seq=3 count=0 pen=0 err=0)
+[indev] 指针设备已注册(坐标来自 PL 的 0x68/0x6C/0x70)
+[main] 等第一帧画完再切到 DDR 源(期间屏上应显示厂商彩条)…
+[main] 首帧已提交(flush=1),已切到 DDR 源(0x50 = 2)
+[touch] PL 报过总线错(err 粘滞位置起,0x68=0x00000310)。
+        这是**历史累计**标志,只有重新配置 PL 才清 ——
+        本次只报告一次,之后正常读。若触摸一直无反应,
+        那才需要查 I2C 上拉 / GT911 底板。
+
+[main] 收到退出信号,收尾…
+
+──── c_ui 统计 ────
+  disp  flush=1  换址=1  矩形同步=1  flush错=0  换址超时=0  最近错误=0
+  前台物理地址 = 0x38230000
+  touch 轮询=3425  新帧=1  错误=1  越界点=0  LVGL读取=1879
+  touch 末态 seq=3 count=0 pen=0 err=1 raw68=0x00000310
+  UI    点击=0  页面=0  被拒的测量指令=0
+  0x64 = 0x00080C61  underrun=1  axierr=0  vblank_cnt=280  swap_cnt=1
+  ⚠️  underrun 已置起(粘滞,写 0x60 清):PL 取数时帧缓存还没备好。
+      上板判据是「跑 60 s 后必须为 0」,见 display_probe.py。
+───────────────────
+[main] 屏已切回厂商彩条(0x50 = 0)
+==========================================================================
+  MOSFET C-V 在线监测平台 · PS 侧启动
+==========================================================================
+  VERSION      0x00010000
+  link_check   True
+  fclk0_real   27.7778 MHz
+  fclk0_pynq   41.6667 MHz (PYNQ 算的,不是真值)
+  fclk0_expect 50.0
+  pclk_window  (40.8, 67.2)
+[cv_monitor] VERSION  = 0x00010000  (expect 0x00010000)
+[cv_monitor] SCRATCH  = 0xDEADBEEF / 0xA5A55A5A  (expect 0xDEADBEEF / 0xA5A55A5A)
+[cv_monitor] link_check: PASS
+
+--- FCLK0(就是像素时钟)---
+  改前 27.7778 MHz(DIV0=6 DIV1=6)  ← BOOT.BIN 留下的默认值
+[fclk0] 50.0000 MHz (IO_PLL 1000 / DIV0 20 / DIV1 1)  ✓ 在窗口内 [40.8~67.2]
+  改后 50.0000 MHz(设计值 50.0 MHz)
+  📌 口径:写文档一律写「设计值 50 MHz / 真值 50.0000 MHz」
+
+--- 显示通路 ---
+  帧缓存 fb0=0x38100000  fb1=0x38230000(1228800 B / 块,64 KB 对齐)
+
+--- 触摸通路 ---
+  <TouchEvent NEW  seq=  0 count=0 pen=0 err=0 (   0,   0)>   (没碰屏时 seq 不动、pen_down=0 属正常)
+
+--- 界面 ---
+[ui] 启动:/home/xilinx/c_ui_src/c_ui --axi-base 0x43C00000 --poll-ms 10 --fb0 0x38100000 --fb1 0x38230000
+[ui] ⚠️ 需要读 /dev/mem —— 本进程必须是 root(main.py 已经是)
+  👀 屏上应当出现前序那套 LVGL 界面(首页)。点一下按钮看页面切不切。
+  ⚠️ 触摸的坐标轴是否要翻转,以 tools/touch_probe.py 的实测为准。
+──── c_ui 启动 ────
+  axi_base = 0x43C00000   fb0 = 0x38100000   fb1 = 0x38230000   poll = 10 ms   touch = 开
+[regs] /dev/mem 已映射 AXI 0x43C00000(4096 B)
+[disp] direct_mode 双缓冲就绪:fb0=0x38100000 fb1=0x38230000 前台=0(非缓存映射;无 DMA2D,矩形同步走 CPU memcpy)
+[touch] 链路检查:0x68 = 0x00000410(seq=4 count=0 pen=0 err=1)
+[indev] 指针设备已注册(坐标来自 PL 的 0x68/0x6C/0x70)
+[main] 等第一帧画完再切到 DDR 源(期间屏上应显示厂商彩条)…
+[touch] PL 报过总线错(err 粘滞位置起,0x68=0x00000410)。
+        这是**历史累计**标志,只有重新配置 PL 才清 ——
+        本次只报告一次,之后正常读。若触摸一直无反应,
+        那才需要查 I2C 上拉 / GT911 底板。
+[main] 首帧已提交(flush=1),已切到 DDR 源(0x50 = 2)
+[touch] 按下 (890,163) 点数 1
+[touch] 抬起
+[touch] 按下 (65,21) 点数 1
+[touch] 抬起
+[touch] 按下 (454,449) 点数 1
+[touch] 抬起
+[touch] 按下 (46,48) 点数 1
+[touch] 抬起
+[touch] 按下 (46,39) 点数 1
+[touch] 抬起
+[touch] 按下 (642,393) 点数 1
+[touch] 抬起
+[touch] 按下 (40,13) 点数 1
+[touch] 抬起
+
+[main] 收到退出信号,收尾…
+
+──── c_ui 统计 ────
+  disp  flush=14  换址=14  矩形同步=15  flush错=0  换址超时=0  最近错误=0
+  前台物理地址 = 0x38100000
+  touch 轮询=21636  新帧=50  错误=1  越界点=0  LVGL读取=11819
+  touch 末态 seq=78 count=0 pen=0 err=1 raw68=0x00004E10
+  UI    点击=6  页面=0  被拒的测量指令=0
+  0x64 = 0x00087658  underrun=1  axierr=0  vblank_cnt=406  swap_cnt=14
+  ⚠️  underrun 已置起(粘滞,写 0x60 清):PL 取数时帧缓存还没备好。
+      上板判据是「跑 60 s 后必须为 0」,见 display_probe.py。
+───────────────────
+[main] 屏已切回厂商彩条(0x50 = 0)
+==========================================================================
+  MOSFET C-V 在线监测平台 · PS 侧启动
+==========================================================================
+  VERSION      0x00010000
+  link_check   True
+  fclk0_real   27.7778 MHz
+  fclk0_pynq   41.6667 MHz (PYNQ 算的,不是真值)
+  fclk0_expect 50.0
+  pclk_window  (40.8, 67.2)
+[cv_monitor] VERSION  = 0x00010000  (expect 0x00010000)
+[cv_monitor] SCRATCH  = 0xDEADBEEF / 0xA5A55A5A  (expect 0xDEADBEEF / 0xA5A55A5A)
+[cv_monitor] link_check: PASS
+
+--- FCLK0(就是像素时钟)---
+  改前 27.7778 MHz(DIV0=6 DIV1=6)  ← BOOT.BIN 留下的默认值
+[fclk0] 50.0000 MHz (IO_PLL 1000 / DIV0 20 / DIV1 1)  ✓ 在窗口内 [40.8~67.2]
+  改后 50.0000 MHz(设计值 50.0 MHz)
+  📌 口径:写文档一律写「设计值 50 MHz / 真值 50.0000 MHz」
+
+--- 显示通路 ---
+  帧缓存 fb0=0x38100000  fb1=0x38230000(1228800 B / 块,64 KB 对齐)
+
+--- 触摸通路 ---
+  <TouchEvent NEW  seq=  3 count=0 pen=0 err=0 (   0,   0)>   (没碰屏时 seq 不动、pen_down=0 属正常)
+
+--- 界面 ---
+[ui] 启动:/home/xilinx/c_ui_src/c_ui --axi-base 0x43C00000 --poll-ms 10 --fb0 0x38100000 --fb1 0x38230000
+[ui] ⚠️ 需要读 /dev/mem —— 本进程必须是 root(main.py 已经是)
+  👀 屏上应当出现前序那套 LVGL 界面(首页)。点一下按钮看页面切不切。
+  ⚠️ 触摸的坐标轴是否要翻转,以 tools/touch_probe.py 的实测为准。
+──── c_ui 启动 ────
+  axi_base = 0x43C00000   fb0 = 0x38100000   fb1 = 0x38230000   poll = 10 ms   touch = 开
+[regs] /dev/mem 已映射 AXI 0x43C00000(4096 B)
+[disp] direct_mode 双缓冲就绪:fb0=0x38100000 fb1=0x38230000 前台=0(非缓存映射;无 DMA2D,矩形同步走 CPU memcpy)
+[touch] 链路检查:0x68 = 0x00000300(seq=3 count=0 pen=0 err=0)
+[indev] 指针设备已注册(坐标来自 PL 的 0x68/0x6C/0x70)
+[main] 等第一帧画完再切到 DDR 源(期间屏上应显示厂商彩条)…
+[main] 首帧已提交(flush=1),已切到 DDR 源(0x50 = 2)
+[touch] PL 报过总线错(err 粘滞位置起,0x68=0x00000310)。
+        这是**历史累计**标志,只有重新配置 PL 才清 ——
+        本次只报告一次,之后正常读。若触摸一直无反应,
+        那才需要查 I2C 上拉 / GT911 底板。
+[touch] 按下 (290,399) 点数 1
+[touch] 抬起
+[touch] 按下 (61,15) 点数 1
+[touch] 抬起
+[touch] 按下 (713,362) 点数 1
+[touch] 抬起
+[touch] 按下 (68,26) 点数 1
+[touch] 抬起
+[touch] 按下 (393,356) 点数 1
+[touch] 抬起
+[touch] 按下 (622,133) 点数 1
+[touch] 抬起
+[touch] 按下 (758,135) 点数 1
+[touch] 抬起
+[proto] 第 1 次测量指令(RequestPointAll)被拒:本轮未接测量链。
+        ⇒ UI 会显示「UART7发送失败」,这是**预期的**,
+          不代表触屏或界面有问题。
+          要接的话:把 `ui_process.py` 那侧做成协议对端,
+          再把本文件换掉(不要往这里塞测量逻辑)。
+[touch] 按下 (193,104) 点数 1
+[touch] 抬起
+[touch] 按下 (737,394) 点数 1
+[touch] 抬起
+[touch] 按下 (44,41) 点数 1
+[touch] 抬起
+[touch] 按下 (717,223) 点数 1
+[touch] 抬起
+[touch] 按下 (505,114) 点数 1
+[touch] 抬起
+[touch] 按下 (689,94) 点数 1
+[touch] 抬起
+[touch] 按下 (892,124) 点数 1
+[touch] 抬起
+[touch] 按下 (505,106) 点数 1
+[touch] 抬起
+[touch] 按下 (344,97) 点数 1
+[touch] 抬起
+[touch] 按下 (495,116) 点数 1
+[touch] 抬起
+[touch] 按下 (670,115) 点数 1
+[touch] 抬起
+[touch] 按下 (922,132) 点数 1
+[touch] 抬起
+[touch] 按下 (708,106) 点数 1
+[touch] 抬起
+[touch] 按下 (513,123) 点数 1
+[touch] 抬起
+[touch] 按下 (352,108) 点数 1
+[touch] 抬起
+[touch] 按下 (53,25) 点数 1
+[touch] 抬起
+[touch] 按下 (891,409) 点数 1
+[touch] 抬起
+[touch] 按下 (1008,126) 点数 1
+[touch] 抬起
+[touch] 按下 (997,88) 点数 1
+[touch] 抬起
+[touch] 按下 (942,256) 点数 1
+[touch] 抬起
+[touch] 按下 (966,185) 点数 1
+[touch] 抬起
+[touch] 按下 (958,215) 点数 1
+[touch] 抬起
+[touch] 按下 (966,152) 点数 1
+[touch] 抬起
+[touch] 按下 (978,91) 点数 1
+[touch] 抬起
+[touch] 按下 (51,15) 点数 1
+[touch] 抬起
+[touch] 按下 (891,417) 点数 1
+[touch] 抬起
+[touch] 按下 (51,35) 点数 1
+[touch] 抬起
+[touch] 按下 (689,236) 点数 1
+[touch] 抬起
+[touch] 按下 (249,326) 点数 1
+[touch] 抬起
+[touch] 按下 (265,314) 点数 1
+[touch] 抬起
+[touch] 按下 (753,380) 点数 1
+[touch] 抬起
+[touch] 按下 (534,110) 点数 1
+[touch] 抬起
+[touch] 按下 (728,121) 点数 1
+[touch] 抬起
+[touch] 按下 (876,97) 点数 1
+[touch] 抬起
+[touch] 按下 (63,29) 点数 1
+[touch] 抬起
+[touch] 按下 (374,355) 点数 1
+[touch] 抬起
+[touch] 按下 (78,10) 点数 1
+[touch] 抬起
+[touch] 按下 (64,26) 点数 1
+[touch] 抬起
+
+[main] 收到退出信号,收尾…
+
+──── c_ui 统计 ────
+  disp  flush=86  换址=86  矩形同步=162  flush错=0  换址超时=0  最近错误=0
+  前台物理地址 = 0x38100000
+  touch 轮询=15677  新帧=328  错误=1  越界点=0  LVGL读取=8605
+  touch 末态 seq=229 count=0 pen=0 err=1 raw68=0x0000E510
+  UI    点击=39  页面=0  被拒的测量指令=15
+  0x64 = 0x000AB648  underrun=1  axierr=0  vblank_cnt=402  swap_cnt=86
+  ⚠️  underrun 已置起(粘滞,写 0x60 清):PL 取数时帧缓存还没备好。
+      上板判据是「跑 60 s 后必须为 0」,见 display_probe.py。
+───────────────────
+[main] 屏已切回厂商彩条(0x50 = 0)
+==========================================================================
+  MOSFET C-V 在线监测平台 · PS 侧启动
+==========================================================================
+  VERSION      0x00010000
+  link_check   True
+  fclk0_real   27.7778 MHz
+  fclk0_pynq   41.6667 MHz (PYNQ 算的,不是真值)
+  fclk0_expect 50.0
+  pclk_window  (40.8, 67.2)
+[cv_monitor] VERSION  = 0x00010000  (expect 0x00010000)
+[cv_monitor] SCRATCH  = 0xDEADBEEF / 0xA5A55A5A  (expect 0xDEADBEEF / 0xA5A55A5A)
+[cv_monitor] link_check: PASS
+
+--- FCLK0(就是像素时钟)---
+  改前 27.7778 MHz(DIV0=6 DIV1=6)  ← BOOT.BIN 留下的默认值
+[fclk0] 50.0000 MHz (IO_PLL 1000 / DIV0 20 / DIV1 1)  ✓ 在窗口内 [40.8~67.2]
+  改后 50.0000 MHz(设计值 50.0 MHz)
+  📌 口径:写文档一律写「设计值 50 MHz / 真值 50.0000 MHz」
+
+--- 显示通路 ---
+  帧缓存 fb0=0x38100000  fb1=0x38230000(1228800 B / 块,64 KB 对齐)
+
+--- 触摸通路 ---
+  <TouchEvent NEW  seq=  0 count=0 pen=0 err=0 (   0,   0)>   (没碰屏时 seq 不动、pen_down=0 属正常)
+
+--- 界面 ---
+[ui] 启动:/home/xilinx/c_ui_src/c_ui --axi-base 0x43C00000 --poll-ms 10 --fb0 0x38100000 --fb1 0x38230000
+[ui] ⚠️ 需要读 /dev/mem —— 本进程必须是 root(main.py 已经是)
+  👀 屏上应当出现前序那套 LVGL 界面(首页)。点一下按钮看页面切不切。
+  ⚠️ 触摸的坐标轴是否要翻转,以 tools/touch_probe.py 的实测为准。
+──── c_ui 启动 ────
+  axi_base = 0x43C00000   fb0 = 0x38100000   fb1 = 0x38230000   poll = 10 ms   touch = 开
+[regs] /dev/mem 已映射 AXI 0x43C00000(4096 B)
+[disp] direct_mode 双缓冲就绪:fb0=0x38100000 fb1=0x38230000 前台=0(非缓存映射;无 DMA2D,矩形同步走 CPU memcpy)
+[touch] 链路检查:0x68 = 0x00000300(seq=3 count=0 pen=0 err=0)
+[indev] 指针设备已注册(坐标来自 PL 的 0x68/0x6C/0x70)
+[main] 等第一帧画完再切到 DDR 源(期间屏上应显示厂商彩条)…
+[main] 首帧已提交(flush=1),已切到 DDR 源(0x50 = 2)
+[touch] 按下 (371,225) 点数 1
+[touch] 抬起
+[touch] PL 报过总线错(err 粘滞位置起,0x68=0x00000D10)。
+        这是**历史累计**标志,只有重新配置 PL 才清 ——
+        本次只报告一次,之后正常读。若触摸一直无反应,
+        那才需要查 I2C 上拉 / GT911 底板。
+[touch] 按下 (39,24) 点数 1
+[touch] 抬起
+
+[main] 收到退出信号,收尾…
+
+──── c_ui 统计 ────
+  disp  flush=5  换址=5  矩形同步=5  flush错=0  换址超时=0  最近错误=0
+  前台物理地址 = 0x38230000
+  touch 轮询=8350  新帧=12  错误=1  越界点=0  LVGL读取=4570
+  touch 末态 seq=23 count=0 pen=0 err=1 raw68=0x00001710
+  UI    点击=2  页面=0  被拒的测量指令=0
+  0x64 = 0x00082EA9  underrun=1  axierr=0  vblank_cnt=426  swap_cnt=5
+  ⚠️  underrun 已置起(粘滞,写 0x60 清):PL 取数时帧缓存还没备好。
+      上板判据是「跑 60 s 后必须为 0」,见 display_probe.py。
+───────────────────
+[main] 屏已切回厂商彩条(0x50 = 0)
+[ui] 进程退出,退出码 0
+[main] 界面已退出,屏切到纯色(避免残留画面看着像卡死)
+==========================================================================
+  MOSFET C-V 在线监测平台 · PS 侧启动
+==========================================================================
+  VERSION      0x00010000
+  link_check   True
+  fclk0_real   27.7778 MHz
+  fclk0_pynq   41.6667 MHz (PYNQ 算的,不是真值)
+  fclk0_expect 50.0
+  pclk_window  (40.8, 67.2)
+[cv_monitor] VERSION  = 0x00010000  (expect 0x00010000)
+[cv_monitor] SCRATCH  = 0xDEADBEEF / 0xA5A55A5A  (expect 0xDEADBEEF / 0xA5A55A5A)
+[cv_monitor] link_check: PASS
+
+--- FCLK0(就是像素时钟)---
+  改前 27.7778 MHz(DIV0=6 DIV1=6)  ← BOOT.BIN 留下的默认值
+[fclk0] 50.0000 MHz (IO_PLL 1000 / DIV0 20 / DIV1 1)  ✓ 在窗口内 [40.8~67.2]
+  改后 50.0000 MHz(设计值 50.0 MHz)
+  📌 口径:写文档一律写「设计值 50 MHz / 真值 50.0000 MHz」
+
+--- 显示通路 ---
+  帧缓存 fb0=0x38100000  fb1=0x38230000(1228800 B / 块,64 KB 对齐)
+
+--- 触摸通路 ---
+  <TouchEvent NEW  seq=  0 count=0 pen=0 err=0 (   0,   0)>   (没碰屏时 seq 不动、pen_down=0 属正常)
+
+--- 界面 ---
+[ui] 启动:/home/xilinx/c_ui_src/c_ui --axi-base 0x43C00000 --poll-ms 10 --fb0 0x38100000 --fb1 0x38230000
+[ui] ⚠️ 需要读 /dev/mem —— 本进程必须是 root(main.py 已经是)
+  👀 屏上应当出现前序那套 LVGL 界面(首页)。点一下按钮看页面切不切。
+  ⚠️ 触摸的坐标轴是否要翻转,以 tools/touch_probe.py 的实测为准。
+──── c_ui 启动 ────
+  axi_base = 0x43C00000   fb0 = 0x38100000   fb1 = 0x38230000   poll = 10 ms   touch = 开
+[regs] /dev/mem 已映射 AXI 0x43C00000(4096 B)
+[disp] direct_mode 双缓冲就绪:fb0=0x38100000 fb1=0x38230000 前台=0(非缓存映射;无 DMA2D,矩形同步走 CPU memcpy)
+[touch] 链路检查:0x68 = 0x00000300(seq=3 count=0 pen=0 err=0)
+[indev] 指针设备已注册(坐标来自 PL 的 0x68/0x6C/0x70)
+[proto] 空实现已装载:测量指令不会真的发出(本轮范围)
+[main] 等第一帧画完再切到 DDR 源(期间屏上应显示厂商彩条)…
+[main] 首帧已提交(flush=1),已切到 DDR 源(0x50 = 2)
+[touch] PL 报过总线错(err 粘滞位置起,0x68=0x00000310)。
+        这是**历史累计**标志,只有重新配置 PL 才清 ——
+        本次只报告一次,之后正常读。若触摸一直无反应,
+        那才需要查 I2C 上拉 / GT911 底板。
+==========================================================================
+  MOSFET C-V 在线监测平台 · PS 侧启动
+==========================================================================
+  VERSION      0x00010000
+  link_check   True
+  fclk0_real   27.7778 MHz
+  fclk0_pynq   41.6667 MHz (PYNQ 算的,不是真值)
+  fclk0_expect 50.0
+  pclk_window  (40.8, 67.2)
+[cv_monitor] VERSION  = 0x00010000  (expect 0x00010000)
+[cv_monitor] SCRATCH  = 0xDEADBEEF / 0xA5A55A5A  (expect 0xDEADBEEF / 0xA5A55A5A)
+[cv_monitor] link_check: PASS
+
+--- FCLK0(就是像素时钟)---
+  改前 27.7778 MHz(DIV0=6 DIV1=6)  ← BOOT.BIN 留下的默认值
+[fclk0] 50.0000 MHz (IO_PLL 1000 / DIV0 20 / DIV1 1)  ✓ 在窗口内 [40.8~67.2]
+  改后 50.0000 MHz(设计值 50.0 MHz)
+  📌 口径:写文档一律写「设计值 50 MHz / 真值 50.0000 MHz」
+
+--- 显示通路 ---
+  帧缓存 fb0=0x38100000  fb1=0x38230000(1228800 B / 块,64 KB 对齐)
+
+--- 触摸通路 ---
+  <TouchEvent NEW  seq=  0 count=0 pen=0 err=0 (   0,   0)>   (没碰屏时 seq 不动、pen_down=0 属正常)
+
+--- 界面 ---
+[ui] 启动:/home/xilinx/c_ui_src/c_ui --axi-base 0x43C00000 --poll-ms 10 --fb0 0x38100000 --fb1 0x38230000
+[ui] ⚠️ 需要读 /dev/mem —— 本进程必须是 root(main.py 已经是)
+  👀 屏上应当出现前序那套 LVGL 界面(首页)。点一下按钮看页面切不切。
+  ⚠️ 触摸的坐标轴是否要翻转,以 tools/touch_probe.py 的实测为准。
+──── c_ui 启动 ────
+  axi_base = 0x43C00000   fb0 = 0x38100000   fb1 = 0x38230000   poll = 10 ms   touch = 开
+[regs] /dev/mem 已映射 AXI 0x43C00000(4096 B)
+[disp] direct_mode 双缓冲就绪:fb0=0x38100000 fb1=0x38230000 前台=0(非缓存映射;无 DMA2D,矩形同步走 CPU memcpy)
+[touch] 链路检查:0x68 = 0x00000510(seq=5 count=0 pen=0 err=1)
+[indev] 指针设备已注册(坐标来自 PL 的 0x68/0x6C/0x70)
+[proto] 已接管测量指令(C 侧直写寄存器,方案 A)
+        激励 = 1000000 Hz(0x80 = 0xA3D70A)
+        偏压 = 0.0 V(0x14 = 0x80000)
+        扫压驻留 = 300 ms(可用 CV_SWEEP_DWELL_MS 覆盖)
+        ⚠️ 回路切换 / Cs 读数尚无硬件,只回显到界面
+[main] 等第一帧画完再切到 DDR 源(期间屏上应显示厂商彩条)…
+[touch] PL 报过总线错(err 粘滞位置起,0x68=0x00000510)。
+        这是**历史累计**标志,只有重新配置 PL 才清 ——
+        本次只报告一次,之后正常读。若触摸一直无反应,
+        那才需要查 I2C 上拉 / GT911 底板。
+[main] 首帧已提交(flush=1),已切到 DDR 源(0x50 = 2)
+
+[main] 收到退出信号,收尾…
+
+──── c_ui 统计 ────
+  disp  flush=1  换址=1  矩形同步=1  flush错=0  换址超时=0  最近错误=0
+  前台物理地址 = 0x38230000
+  touch 轮询=2213  新帧=1  错误=1  越界点=0  LVGL读取=1211
+  touch 末态 seq=5 count=0 pen=0 err=1 raw68=0x00000510
+  UI    点击=0  页面=0  等读数的测量指令=0
+  模拟前端  偏压写=1  回读核对失败=0
+  0x64 = 0x000809ED  underrun=1  axierr=0  vblank_cnt=123  swap_cnt=1
+  ⚠️  underrun 已置起(粘滞,写 0x60 清):PL 取数时帧缓存还没备好。
+      上板判据是「跑 60 s 后必须为 0」,见 display_probe.py。
+───────────────────
+[main] 屏已切回厂商彩条(0x50 = 0)
+==========================================================================
+  MOSFET C-V 在线监测平台 · PS 侧启动
+==========================================================================
+  VERSION      0x00010000
+  link_check   True
+  fclk0_real   27.7778 MHz
+  fclk0_pynq   41.6667 MHz (PYNQ 算的,不是真值)
+  fclk0_expect 50.0
+  pclk_window  (40.8, 67.2)
+[cv_monitor] VERSION  = 0x00010000  (expect 0x00010000)
+[cv_monitor] SCRATCH  = 0xDEADBEEF / 0xA5A55A5A  (expect 0xDEADBEEF / 0xA5A55A5A)
+[cv_monitor] link_check: PASS
+
+--- FCLK0(就是像素时钟)---
+  改前 27.7778 MHz(DIV0=6 DIV1=6)  ← BOOT.BIN 留下的默认值
+[fclk0] 50.0000 MHz (IO_PLL 1000 / DIV0 20 / DIV1 1)  ✓ 在窗口内 [40.8~67.2]
+  改后 50.0000 MHz(设计值 50.0 MHz)
+  📌 口径:写文档一律写「设计值 50 MHz / 真值 50.0000 MHz」
+
+--- DAC 初始化放行(0x84 CV_CTRL)---
+[dac] 已放行初始化 @ FCLK0 50.0000 MHz —— 约 0.8 s 后偏压生效
+
+--- 显示通路 ---
+  帧缓存 fb0=0x38100000  fb1=0x38230000(1228800 B / 块,64 KB 对齐)
+
+--- 触摸通路 ---
+  <TouchEvent NEW  seq=  0 count=0 pen=0 err=0 (   0,   0)>   (没碰屏时 seq 不动、pen_down=0 属正常)
+
+--- 界面 ---
+[ui] 启动:/home/xilinx/c_ui_src/c_ui --axi-base 0x43C00000 --poll-ms 10 --fb0 0x38100000 --fb1 0x38230000
+[ui] ⚠️ 需要读 /dev/mem —— 本进程必须是 root(main.py 已经是)
+  👀 屏上应当出现前序那套 LVGL 界面(首页)。点一下按钮看页面切不切。
+  ⚠️ 触摸的坐标轴是否要翻转,以 tools/touch_probe.py 的实测为准。
+──── c_ui 启动 ────
+  axi_base = 0x43C00000   fb0 = 0x38100000   fb1 = 0x38230000   poll = 10 ms   touch = 开
+[regs] /dev/mem 已映射 AXI 0x43C00000(4096 B)
+[disp] direct_mode 双缓冲就绪:fb0=0x38100000 fb1=0x38230000 前台=0(非缓存映射;无 DMA2D,矩形同步走 CPU memcpy)
+[touch] 链路检查:0x68 = 0x00000000(seq=0 count=0 pen=0 err=0)
+[indev] 指针设备已注册(坐标来自 PL 的 0x68/0x6C/0x70)
+[proto] 已接管测量指令(C 侧直写寄存器,方案 A)
+        激励 = 1000000 Hz(0x80 = 0xA3D70A)
+        偏压 = 0.0 V(0x14 = 0x80000)
+        扫压驻留 = 300 ms(可用 CV_SWEEP_DWELL_MS 覆盖)
+        ⚠️ 回路切换 / Cs 读数尚无硬件,只回显到界面
+[main] 等第一帧画完再切到 DDR 源(期间屏上应显示厂商彩条)…
+[main] 首帧已提交(flush=1),已切到 DDR 源(0x50 = 2)
+[touch] PL 报过总线错(err 粘滞位置起,0x68=0x00000210)。
+        这是**历史累计**标志,只有重新配置 PL 才清 ——
+        本次只报告一次,之后正常读。若触摸一直无反应,
+        那才需要查 I2C 上拉 / GT911 底板。
+[touch] 按下 (377,392) 点数 1
+[touch] 抬起
+[touch] 按下 (990,88) 点数 1
+[touch] 抬起
+[touch] 按下 (939,325) 点数 1
+[touch] 抬起
+[touch] 按下 (456,339) 点数 1
+[touch] 抬起
+[touch] 按下 (695,456) 点数 1
+[touch] 抬起
+[touch] 按下 (971,352) 点数 1
+[touch] 抬起
+[touch] 按下 (464,331) 点数 1
+[touch] 抬起
+[touch] 按下 (698,343) 点数 1
+[touch] 抬起
+[touch] 按下 (462,339) 点数 1
+[touch] 抬起
+[touch] 按下 (750,455) 点数 1
+[touch] 抬起
+[touch] 按下 (968,414) 点数 1
+[touch] 抬起
+[proto] 扫压开始:CISS,0.10 V → 5.00 V,60 点,每点 300 ms
+        ⚠️ 只有偏压真的在走;Cs 曲线为空(待 DLIA)
+[proto] 扫压结束:60 点已下发到 DAC
+[touch] 按下 (45,31) 点数 1
+[touch] 抬起
+[touch] 按下 (358,408) 点数 1
+[touch] 抬起
+[touch] 按下 (58,21) 点数 1
+[touch] 抬起
+[touch] 按下 (608,275) 点数 1
+[touch] 抬起
+[touch] 按下 (236,308) 点数 1
+[touch] 抬起
+[touch] 按下 (308,394) 点数 1
+[touch] 抬起
+[touch] 按下 (324,450) 点数 1
+[touch] 抬起
+[touch] 按下 (686,348) 点数 1
+[touch] 抬起
+[touch] 按下 (325,385) 点数 1
+[touch] 抬起
+[touch] 按下 (291,428) 点数 1
+[touch] 抬起
+[touch] 按下 (701,467) 点数 1
+[touch] 抬起
+[proto] 偏压 → 10.00 V  (0x14 = 0x8CCCC,模块级 1.000 V ×10)
+[touch] 按下 (250,507) 点数 1
+[touch] 抬起
+[proto] 点测 CISS @ 10.00 V:偏压已下发,**未取读数**(DLIA 未实现)
+[touch] 按下 (232,324) 点数 1
+[touch] 抬起
+[touch] 按下 (232,293) 点数 1
+[touch] 抬起
+[touch] 按下 (316,397) 点数 1
+[touch] 抬起
+[touch] 按下 (320,435) 点数 1
+[touch] 抬起
+[touch] 按下 (326,444) 点数 1
+[touch] 抬起
+[touch] 按下 (699,449) 点数 1
+[touch] 抬起
+[proto] 偏压 → 10.00 V  (0x14 = 0x8CCCC,模块级 1.000 V ×10)
+[touch] 按下 (263,312) 点数 1
+[touch] 抬起
+[touch] 按下 (721,327) 点数 1
+[touch] 抬起
+[touch] 按下 (298,399) 点数 1
+[touch] 抬起
+[touch] 按下 (318,450) 点数 1
+[touch] 抬起
+[touch] 按下 (314,449) 点数 1
+[touch] 抬起
+[touch] 按下 (700,458) 点数 1
+[touch] 抬起
+[proto] 偏压 → 100.00 V  (0x14 = 0xFFFFF,模块级 10.000 V ×10)
+[touch] 按下 (39,24) 点数 1
+[touch] 抬起
+[touch] 按下 (427,397) 点数 1
+[touch] 抬起
+[touch] 按下 (885,86) 点数 1
+[touch] 抬起
+[touch] 按下 (327,159) 点数 1
+[touch] 抬起
+[touch] 按下 (722,326) 点数 1
+[touch] 抬起
+[touch] 按下 (309,383) 点数 1
+[touch] 抬起
+[touch] 按下 (309,469) 点数 1
+[touch] 抬起
+[touch] 按下 (714,459) 点数 1
+[touch] 抬起
+[touch] 按下 (693,347) 点数 1
+[touch] 抬起
+[touch] 按下 (900,259) 点数 1
+[touch] 抬起
+[touch] 按下 (783,393) 点数 1
+[touch] 抬起
+[touch] 按下 (48,11) 点数 1
+[touch] 抬起
+[touch] 按下 (1005,89) 点数 1
+[touch] 抬起
+[touch] 按下 (977,343) 点数 1
+[touch] 抬起
+[touch] 按下 (709,343) 点数 1
+[touch] 抬起
+[touch] 按下 (310,383) 点数 1
+[touch] 抬起
+[touch] 按下 (320,436) 点数 1
+[touch] 抬起
+[touch] 按下 (326,440) 点数 1
+[touch] 抬起
+[touch] 按下 (780,439) 点数 1
+[touch] 抬起
+[touch] 按下 (973,419) 点数 1
+[touch] 抬起
+[proto] 扫压开始:CISS,0.10 V → 100.00 V,60 点,每点 300 ms
+        ⚠️ 只有偏压真的在走;Cs 曲线为空(待 DLIA)
+[proto] 扫压结束:60 点已下发到 DAC
+[touch] 按下 (997,91) 点数 1
+[touch] 抬起
+[touch] 按下 (967,399) 点数 1
+[touch] 抬起
+[proto] 扫压开始:CISS,0.10 V → 100.00 V,60 点,每点 300 ms
+        ⚠️ 只有偏压真的在走;Cs 曲线为空(待 DLIA)
+[proto] 扫压结束:60 点已下发到 DAC
+[touch] 按下 (49,19) 点数 1
+[touch] 抬起
+[touch] 按下 (673,217) 点数 1
+[touch] 抬起
+[touch] 按下 (241,291) 点数 1
+[touch] 抬起
+[touch] 按下 (465,318) 点数 1
+[touch] 抬起
+[touch] 按下 (310,450) 点数 1
+[touch] 抬起
+[touch] 按下 (772,449) 点数 1
+[touch] 抬起
+[proto] 偏压 → 100.00 V  (0x14 = 0xFFFFF,模块级 10.000 V ×10)
+[touch] 按下 (217,528) 点数 1
+[touch] 抬起
+[proto] 点测 CISS @ 100.00 V:偏压已下发,**未取读数**(DLIA 未实现)
+[touch] 按下 (231,347) 点数 1
+[touch] 抬起
+[touch] 按下 (265,303) 点数 1
+[touch] 抬起
+[touch] 按下 (769,327) 点数 1
+[touch] 抬起
+[touch] 按下 (434,328) 点数 1
+[touch] 抬起
+[touch] 按下 (318,459) 点数 1
+[touch] 抬起
+[touch] 按下 (773,447) 点数 1
+[touch] 抬起
+[proto] 偏压 → 50.00 V  (0x14 = 0xBFFFF,模块级 5.000 V ×10)
+
+[main] 收到退出信号,收尾…
+
+──── c_ui 统计 ────
+  disp  flush=498  换址=498  矩形同步=788  flush错=0  换址超时=0  最近错误=0
+  前台物理地址 = 0x38100000
+  touch 轮询=41294  新帧=545  错误=1  越界点=0  LVGL读取=22719
+  touch 末态 seq=3 count=0 pen=0 err=1 raw68=0x00000310
+  UI    点击=34  页面=2  等读数的测量指令=5
+  模拟前端  偏压写=188  回读核对失败=0
+  0x64 = 0x000F9018  underrun=1  axierr=0  vblank_cnt=6  swap_cnt=242
+  ⚠️  underrun 已置起(粘滞,写 0x60 清):PL 取数时帧缓存还没备好。
+      上板判据是「跑 60 s 后必须为 0」,见 display_probe.py。
+───────────────────
+[main] 屏已切回厂商彩条(0x50 = 0)
+==========================================================================
+  MOSFET C-V 在线监测平台 · PS 侧启动
+==========================================================================
+  VERSION      0x00010000
+  link_check   True
+  fclk0_real   27.7778 MHz
+  fclk0_pynq   41.6667 MHz (PYNQ 算的,不是真值)
+  fclk0_expect 50.0
+  pclk_window  (40.8, 67.2)
+[cv_monitor] VERSION  = 0x00010000  (expect 0x00010000)
+[cv_monitor] SCRATCH  = 0xDEADBEEF / 0xA5A55A5A  (expect 0xDEADBEEF / 0xA5A55A5A)
+[cv_monitor] link_check: PASS
+
+--- FCLK0(就是像素时钟)---
+  改前 27.7778 MHz(DIV0=6 DIV1=6)  ← BOOT.BIN 留下的默认值
+[fclk0] 50.0000 MHz (IO_PLL 1000 / DIV0 20 / DIV1 1)  ✓ 在窗口内 [40.8~67.2]
+  改后 50.0000 MHz(设计值 50.0 MHz)
+  📌 口径:写文档一律写「设计值 50 MHz / 真值 50.0000 MHz」
+
+--- DAC 初始化放行(0x84 CV_CTRL)---
+[dac] 已放行初始化 @ FCLK0 50.0000 MHz —— 约 0.8 s 后偏压生效
+
+--- 显示通路 ---
+  帧缓存 fb0=0x38100000  fb1=0x38230000(1228800 B / 块,64 KB 对齐)
+
+--- 触摸通路 ---
+  <TouchEvent NEW  seq=  0 count=0 pen=0 err=0 (   0,   0)>   (没碰屏时 seq 不动、pen_down=0 属正常)
+
+--- 界面 ---
+[ui] 启动:/home/xilinx/c_ui_src/c_ui --axi-base 0x43C00000 --poll-ms 10 --fb0 0x38100000 --fb1 0x38230000
+[ui] ⚠️ 需要读 /dev/mem —— 本进程必须是 root(main.py 已经是)
+  👀 屏上应当出现前序那套 LVGL 界面(首页)。点一下按钮看页面切不切。
+  ⚠️ 触摸的坐标轴是否要翻转,以 tools/touch_probe.py 的实测为准。
+──── c_ui 启动 ────
+  axi_base = 0x43C00000   fb0 = 0x38100000   fb1 = 0x38230000   poll = 10 ms   touch = 开
+[regs] /dev/mem 已映射 AXI 0x43C00000(4096 B)
+[disp] direct_mode 双缓冲就绪:fb0=0x38100000 fb1=0x38230000 前台=0(非缓存映射;无 DMA2D,矩形同步走 CPU memcpy)
+[touch] 链路检查:0x68 = 0x00000000(seq=0 count=0 pen=0 err=0)
+[indev] 指针设备已注册(坐标来自 PL 的 0x68/0x6C/0x70)
+[proto] 已接管测量指令(C 侧直写寄存器,方案 A)
+        激励 = 1000000 Hz(0x80 = 0xA3D70A)
+        偏压 = 0.0 V(0x14 = 0x80000)
+        扫压驻留 = 300 ms(可用 CV_SWEEP_DWELL_MS 覆盖)
+        ⚠️ 回路切换 / Cs 读数尚无硬件,只回显到界面
+[main] 等第一帧画完再切到 DDR 源(期间屏上应显示厂商彩条)…
+[main] 首帧已提交(flush=1),已切到 DDR 源(0x50 = 2)
+[touch] PL 报过总线错(err 粘滞位置起,0x68=0x00000210)。
+        这是**历史累计**标志,只有重新配置 PL 才清 ——
+        本次只报告一次,之后正常读。若触摸一直无反应,
+        那才需要查 I2C 上拉 / GT911 底板。
+[touch] 按下 (409,217) 点数 1
+[touch] 抬起
+[touch] 按下 (46,12) 点数 1
+[touch] 抬起
+[touch] 按下 (613,240) 点数 1
+[touch] 抬起
+
+[main] 收到退出信号,收尾…
+
+──── c_ui 统计 ────
+  disp  flush=7  换址=7  矩形同步=7  flush错=0  换址超时=0  最近错误=0
+  前台物理地址 = 0x38230000
+  touch 轮询=7614  新帧=22  错误=1  越界点=0  LVGL读取=4170
+  touch 末态 seq=32 count=0 pen=0 err=1 raw68=0x00002010
+  UI    点击=3  页面=2  等读数的测量指令=0
+  模拟前端  偏压写=1  回读核对失败=0
+  0x64 = 0x00083B29  underrun=1  axierr=0  vblank_cnt=202  swap_cnt=7
+  ⚠️  underrun 已置起(粘滞,写 0x60 清):PL 取数时帧缓存还没备好。
+      上板判据是「跑 60 s 后必须为 0」,见 display_probe.py。
+───────────────────
+[main] 屏已切回厂商彩条(0x50 = 0)
+==========================================================================
+  MOSFET C-V 在线监测平台 · PS 侧启动
+==========================================================================
+  VERSION      0x00010000
+  link_check   True
+  fclk0_real   27.7778 MHz
+  fclk0_pynq   41.6667 MHz (PYNQ 算的,不是真值)
+  fclk0_expect 50.0
+  pclk_window  (40.8, 67.2)
+[cv_monitor] VERSION  = 0x00010000  (expect 0x00010000)
+[cv_monitor] SCRATCH  = 0xDEADBEEF / 0xA5A55A5A  (expect 0xDEADBEEF / 0xA5A55A5A)
+[cv_monitor] link_check: PASS
+
+--- FCLK0(就是像素时钟)---
+  改前 27.7778 MHz(DIV0=6 DIV1=6)  ← BOOT.BIN 留下的默认值
+[fclk0] 50.0000 MHz (IO_PLL 1000 / DIV0 20 / DIV1 1)  ✓ 在窗口内 [40.8~67.2]
+  改后 50.0000 MHz(设计值 50.0 MHz)
+  📌 口径:写文档一律写「设计值 50 MHz / 真值 50.0000 MHz」
+
+--- DAC 初始化放行(0x84 CV_CTRL)---
+[dac] 已放行初始化 @ FCLK0 50.0000 MHz —— 约 0.8 s 后偏压生效
+
+--- 显示通路 ---
+  帧缓存 fb0=0x38100000  fb1=0x38230000(1228800 B / 块,64 KB 对齐)
+
+--- 触摸通路 ---
+  <TouchEvent NEW  seq=  0 count=0 pen=0 err=0 (   0,   0)>   (没碰屏时 seq 不动、pen_down=0 属正常)
+
+--- 界面 ---
+[ui] 启动:/home/xilinx/c_ui_src/c_ui --axi-base 0x43C00000 --poll-ms 10 --fb0 0x38100000 --fb1 0x38230000
+[ui] ⚠️ 需要读 /dev/mem —— 本进程必须是 root(main.py 已经是)
+  👀 屏上应当出现前序那套 LVGL 界面(首页)。点一下按钮看页面切不切。
+  ⚠️ 触摸的坐标轴是否要翻转,以 tools/touch_probe.py 的实测为准。
+──── c_ui 启动 ────
+  axi_base = 0x43C00000   fb0 = 0x38100000   fb1 = 0x38230000   poll = 10 ms   touch = 开
+[regs] /dev/mem 已映射 AXI 0x43C00000(4096 B)
+[disp] direct_mode 双缓冲就绪:fb0=0x38100000 fb1=0x38230000 前台=0(非缓存映射;无 DMA2D,矩形同步走 CPU memcpy)
+[touch] 链路检查:0x68 = 0x00000000(seq=0 count=0 pen=0 err=0)
+[indev] 指针设备已注册(坐标来自 PL 的 0x68/0x6C/0x70)
+[mc] 测量参数已下发:
+       激励   1.000 MHz   → 0x80 = 0xA3D70A
+       采样   10.00 MSPS  → 0x88 = 0x0FE0D  (DIV=13,PH_OFF=-2,窗 [-4,+1])
+       (回读一致)
+[proto] 已接管测量指令(C 侧直写寄存器,方案 A)
+        激励 = 1000000 Hz(0x80 = 0xA3D70A);采样率/相位明细见上面 [mc] 那几行
+        偏压 = 0.0 V(0x14 = 0x80000)
+        扫压驻留 = 300 ms(可用 CV_SWEEP_DWELL_MS 覆盖)
+        ⚠️ 回路切换 / Cs 读数尚无硬件,只回显到界面
+[main] 等第一帧画完再切到 DDR 源(期间屏上应显示厂商彩条)…
+[main] 首帧已提交(flush=1),已切到 DDR 源(0x50 = 2)
+[touch] PL 报过总线错(err 粘滞位置起,0x68=0x00000110)。
+        这是**历史累计**标志,只有重新配置 PL 才清 ——
+        本次只报告一次,之后正常读。若触摸一直无反应,
+        那才需要查 I2C 上拉 / GT911 底板。
+[touch] 按下 (419,217) 点数 1
+[touch] 抬起
+[touch] 按下 (472,324) 点数 1
+[touch] 抬起
+[mc] 激励 → 0.500 MHz(0x80 = 0x51EB85)
+[touch] 按下 (608,318) 点数 1
+[touch] 抬起
+[mc] 激励 → 1.000 MHz(0x80 = 0xA3D70A)
+[touch] 按下 (716,338) 点数 1
+[touch] 抬起
+[mc] 激励 → 2.000 MHz(0x80 = 0x147AE14)
+[touch] 按下 (340,340) 点数 1
+[touch] 抬起
+[mc] 激励 → 0.100 MHz(0x80 = 0x10624E)
+[touch] 按下 (414,243) 点数 1
+[touch] 抬起
+[touch] 按下 (369,352) 点数 1
+[touch] 抬起
+[touch] 按下 (387,219) 点数 1
+[touch] 抬起
+[touch] 按下 (606,368) 点数 1
+[touch] 抬起
+[mc] 参数复位:激励 1.000 MHz(0x80 = 0xA3D70A),采样 10.00 MSPS(0x88 = 0x0FE0D,DIV=13,PH_OFF=-2,窗 [-4,+1])  (回读一致)
+[mc] ⚠️ 0x84(CV_CTRL)未被动过 —— DAC 放行权归 Python 侧,复位不含它
+[proto] 复位:0x14 ← 0x80000(0.0 V);激励/采样率/相位回默认见上面 [mc] 那行
+        ⚠️ 0x84(CV_CTRL)未动 —— DAC 放行权归 Python 侧
+[touch] 按下 (47,7) 点数 1
+[touch] 抬起
+[touch] 按下 (47,21) 点数 1
+[touch] 抬起
+[touch] 按下 (615,250) 点数 1
+[touch] 抬起
+[touch] 按下 (48,14) 点数 1
+[touch] 抬起
+[touch] 按下 (433,340) 点数 1
+[touch] 抬起
+[touch] 按下 (990,85) 点数 1
+[touch] 抬起
+[touch] 按下 (962,337) 点数 1
+[touch] 抬起
+[touch] 按下 (319,385) 点数 1
+[touch] 抬起
+[touch] 按下 (312,438) 点数 1
+[touch] 抬起
+[touch] 按下 (310,454) 点数 1
+[touch] 抬起
+[touch] 按下 (741,338) 点数 1
+[touch] 抬起
+[touch] 按下 (313,389) 点数 1
+[touch] 抬起
+[touch] 按下 (306,438) 点数 1
+[touch] 抬起
+[touch] 按下 (299,432) 点数 1
+[touch] 抬起
+[touch] 按下 (715,450) 点数 1
+[touch] 抬起
+[touch] 按下 (996,410) 点数 1
+[touch] 抬起
+[proto] 扫压开始:CISS,0.10 V → 100.00 V,60 点,每点 300 ms
+        ⚠️ 只有偏压真的在走;Cs 曲线为空(待 DLIA)
+[proto] 扫压结束:60 点已下发到 DAC
+[touch] 按下 (50,13) 点数 1
+[touch] 抬起
+[touch] 按下 (645,240) 点数 1
+[touch] 抬起
+[touch] 按下 (68,11) 点数 1
+[touch] 抬起
+[touch] 按下 (619,417) 点数 1
+[touch] 抬起
+[touch] 按下 (366,83) 点数 1
+[touch] 抬起
+[touch] 按下 (507,100) 点数 1
+[touch] 抬起
+[touch] 按下 (697,80) 点数 1
+[touch] 抬起
+[touch] 按下 (977,65) 点数 1
+[touch] 抬起
+[touch] 按下 (926,91) 点数 1
+[touch] 抬起
+[touch] 按下 (58,20) 点数 1
+[touch] 抬起
+
+[main] 收到退出信号,收尾…
+
+──── c_ui 统计 ────
+  disp  flush=184  换址=184  矩形同步=329  flush错=0  换址超时=0  最近错误=0
+  前台物理地址 = 0x38100000
+  touch 轮询=45856  新帧=247  错误=1  越界点=0  LVGL读取=25125
+  touch 末态 seq=103 count=0 pen=0 err=1 raw68=0x00006710
+  UI    点击=21  页面=0  等读数的测量指令=1
+  模拟前端  偏压写=62  回读核对失败=0
+  0x64 = 0x000DC680  underrun=1  axierr=0  vblank_cnt=416  swap_cnt=184
+  ⚠️  underrun 已置起(粘滞,写 0x60 清):PL 取数时帧缓存还没备好。
+      上板判据是「跑 60 s 后必须为 0」,见 display_probe.py。
+───────────────────
+[main] 屏已切回厂商彩条(0x50 = 0)
+──── 换新界面 ────
+──── c_ui 启动 ────
+  axi_base = 0x43C00000   fb0 = 0x38100000   fb1 = 0x38230000   poll = 10 ms   touch = 开
+[regs] /dev/mem 已映射 AXI 0x43C00000(4096 B)
+[disp] direct_mode 双缓冲就绪:fb0=0x38100000 fb1=0x38230000 前台=0(非缓存映射;无 DMA2D,矩形同步走 CPU memcpy)
+[touch] 链路检查:0x68 = 0x00006710(seq=103 count=0 pen=0 err=1)
+[indev] 指针设备已注册(坐标来自 PL 的 0x68/0x6C/0x70)
+[mc] 测量参数已下发:
+       激励   1.000 MHz   → 0x80 = 0xA3D70A
+       采样   10.00 MSPS  → 0x88 = 0x0FE0D  (DIV=13,PH_OFF=-2,窗 [-4,+1])
+       (回读一致)
+[proto] 已接管测量指令(C 侧直写寄存器,方案 A)
+        激励 = 1000000 Hz(0x80 = 0xA3D70A);采样率/相位明细见上面 [mc] 那几行
+        偏压 = 0.0 V(0x14 = 0x80000)
+        扫压驻留 = 300 ms(可用 CV_SWEEP_DWELL_MS 覆盖)
+        ⚠️ 回路切换 / Cs 读数尚无硬件,只回显到界面
+[main] 等第一帧画完再切到 DDR 源(期间屏上应显示厂商彩条)…
+[touch] PL 报过总线错(err 粘滞位置起,0x68=0x00006710)。
+        这是**历史累计**标志,只有重新配置 PL 才清 ——
+        本次只报告一次,之后正常读。若触摸一直无反应,
+        那才需要查 I2C 上拉 / GT911 底板。
+[main] 首帧已提交(flush=1),已切到 DDR 源(0x50 = 2)
+[touch] 按下 (367,215) 点数 1
+[touch] 抬起
+[touch] 按下 (346,328) 点数 1
+[touch] 抬起
+[mc] 激励 → 0.100 MHz(0x80 = 0x10624E)
+[touch] 按下 (759,426) 点数 1
+[touch] 抬起
+[mc] 相位 → -1(窗 [-4,+1])
+[touch] 按下 (755,440) 点数 1
+[touch] 抬起
+[mc] 相位 → +0(窗 [-4,+1])
+[touch] 按下 (751,443) 点数 1
+[touch] 抬起
+[mc] 相位 → +1(窗 [-4,+1])
+[touch] 按下 (744,440) 点数 1
+[touch] 抬起
+[mc] 相位 +2 越出采样窗 [-4,+1],未改(当前 +1)
+[touch] 按下 (750,441) 点数 1
+[touch] 抬起
+[mc] 相位 +2 越出采样窗 [-4,+1],未改(当前 +1)
+[touch] 按下 (748,441) 点数 1
+[touch] 抬起
+[mc] 相位 +2 越出采样窗 [-4,+1],未改(当前 +1)
+[touch] 按下 (751,442) 点数 1
+[touch] 抬起
+[mc] 相位 +2 越出采样窗 [-4,+1],未改(当前 +1)
+[touch] 按下 (782,437) 点数 1
+[touch] 抬起
+[mc] 相位 +2 越出采样窗 [-4,+1],未改(当前 +1)
+[touch] 按下 (606,454) 点数 1
+[touch] 抬起
+[mc] 相位 → -2(回到 DIV=13 的窗口中心)
+[touch] 按下 (770,448) 点数 1
+[touch] 抬起
+[mc] 相位 → -1(窗 [-4,+1])
+[touch] 按下 (766,451) 点数 1
+[touch] 抬起
+[mc] 相位 → +0(窗 [-4,+1])
+[touch] 按下 (785,436) 点数 1
+[touch] 抬起
+[mc] 相位 → +1(窗 [-4,+1])
+[touch] 按下 (808,447) 点数 1
+[touch] 抬起
+[mc] 相位 +2 越出采样窗 [-4,+1],未改(当前 +1)
+[touch] 按下 (610,400) 点数 1
+[touch] 抬起
+[mc] 采样 → 5.00 MSPS(DIV=26,PH_OFF +1 → -5,窗 [-11,+1])
+[touch] 按下 (566,231) 点数 1
+[touch] 抬起
+[touch] 按下 (650,358) 点数 1
+[touch] 抬起
+[mc] 参数复位:激励 1.000 MHz(0x80 = 0xA3D70A),采样 10.00 MSPS(0x88 = 0x0FE0D,DIV=13,PH_OFF=-2,窗 [-4,+1])  (回读一致)
+[mc] ⚠️ 0x84(CV_CTRL)未被动过 —— DAC 放行权归 Python 侧,复位不含它
+[proto] 复位:0x14 ← 0x80000(0.0 V);激励/采样率/相位回默认见上面 [mc] 那行
+        ⚠️ 0x84(CV_CTRL)未动 —— DAC 放行权归 Python 侧
+
+[main] 收到退出信号,收尾…
+
+──── c_ui 统计 ────
+  disp  flush=37  换址=37  矩形同步=241  flush错=0  换址超时=0  最近错误=0
+  前台物理地址 = 0x38230000
+  touch 轮询=21549  新帧=119  错误=1  越界点=0  LVGL读取=11814
+  touch 末态 seq=20 count=0 pen=0 err=1 raw68=0x00001410
+  UI    点击=18  页面=1  等读数的测量指令=0
+  模拟前端  偏压写=2  回读核对失败=0
+  0x64 = 0x000EE83D  underrun=1  axierr=0  vblank_cnt=15  swap_cnt=221
+  ⚠️  underrun 已置起(粘滞,写 0x60 清):PL 取数时帧缓存还没备好。
+      上板判据是「跑 60 s 后必须为 0」,见 display_probe.py。
+───────────────────
+[main] 屏已切回厂商彩条(0x50 = 0)
+──── 换 c_ui_new2(复位后同步按钮高亮)────
+──── c_ui 启动 ────
+  axi_base = 0x43C00000   fb0 = 0x38100000   fb1 = 0x38230000   poll = 10 ms   touch = 开
+[regs] /dev/mem 已映射 AXI 0x43C00000(4096 B)
+[disp] direct_mode 双缓冲就绪:fb0=0x38100000 fb1=0x38230000 前台=0(非缓存映射;无 DMA2D,矩形同步走 CPU memcpy)
+[touch] 链路检查:0x68 = 0x00001410(seq=20 count=0 pen=0 err=1)
+[indev] 指针设备已注册(坐标来自 PL 的 0x68/0x6C/0x70)
+[mc] 测量参数已下发:
+       激励   1.000 MHz   → 0x80 = 0xA3D70A
+       采样   10.00 MSPS  → 0x88 = 0x0FE0D  (DIV=13,PH_OFF=-2,窗 [-4,+1])
+       (回读一致)
+[proto] 已接管测量指令(C 侧直写寄存器,方案 A)
+        激励 = 1000000 Hz(0x80 = 0xA3D70A);采样率/相位明细见上面 [mc] 那几行
+        偏压 = 0.0 V(0x14 = 0x80000)
+        扫压驻留 = 300 ms(可用 CV_SWEEP_DWELL_MS 覆盖)
+        ⚠️ 回路切换 / Cs 读数尚无硬件,只回显到界面
+[main] 等第一帧画完再切到 DDR 源(期间屏上应显示厂商彩条)…
+[touch] PL 报过总线错(err 粘滞位置起,0x68=0x00001410)。
+        这是**历史累计**标志,只有重新配置 PL 才清 ——
+        本次只报告一次,之后正常读。若触摸一直无反应,
+        那才需要查 I2C 上拉 / GT911 底板。
+[main] 首帧已提交(flush=1),已切到 DDR 源(0x50 = 2)
+[touch] 按下 (363,204) 点数 1
+[touch] 抬起
+[touch] 按下 (332,340) 点数 1
+[touch] 抬起
+[mc] 激励 → 0.100 MHz(0x80 = 0x10624E)
+[touch] 按下 (572,397) 点数 1
+[touch] 抬起
+[mc] 采样 → 5.00 MSPS(DIV=26,PH_OFF -2 → -5,窗 [-11,+1])
+[touch] 按下 (527,246) 点数 1
+[touch] 抬起
+[touch] 按下 (636,365) 点数 1
+[touch] 抬起
+[mc] 参数复位:激励 1.000 MHz(0x80 = 0xA3D70A),采样 10.00 MSPS(0x88 = 0x0FE0D,DIV=13,PH_OFF=-2,窗 [-4,+1])  (回读一致)
+[mc] ⚠️ 0x84(CV_CTRL)未被动过 —— DAC 放行权归 Python 侧,复位不含它
+[proto] 复位:0x14 ← 0x80000(0.0 V);激励/采样率/相位回默认见上面 [mc] 那行
+        ⚠️ 0x84(CV_CTRL)未动 —— DAC 放行权归 Python 侧
+
+[main] 收到退出信号,收尾…
+
+──── c_ui 统计 ────
+  disp  flush=11  换址=11  矩形同步=39  flush错=0  换址超时=0  最近错误=0
+  前台物理地址 = 0x38230000
+  touch 轮询=69488  新帧=38  错误=1  越界点=0  LVGL读取=38029
+  touch 末态 seq=70 count=0 pen=0 err=1 raw68=0x00004610
+  UI    点击=5  页面=1  等读数的测量指令=0
+  模拟前端  偏压写=2  回读核对失败=0
+  0x64 = 0x000F3AA9  underrun=1  axierr=0  vblank_cnt=170  swap_cnt=231
+  ⚠️  underrun 已置起(粘滞,写 0x60 清):PL 取数时帧缓存还没备好。
+      上板判据是「跑 60 s 后必须为 0」,见 display_probe.py。
+───────────────────
+[main] 屏已切回厂商彩条(0x50 = 0)
+==========================================================================
+  MOSFET C-V 在线监测平台 · PS 侧启动
+==========================================================================
+  VERSION      0x00010000
+  link_check   True
+  fclk0_real   27.7778 MHz
+  fclk0_pynq   41.6667 MHz (PYNQ 算的,不是真值)
+  fclk0_expect 50.0
+  pclk_window  (40.8, 67.2)
+[cv_monitor] VERSION  = 0x00010000  (expect 0x00010000)
+[cv_monitor] SCRATCH  = 0xDEADBEEF / 0xA5A55A5A  (expect 0xDEADBEEF / 0xA5A55A5A)
+[cv_monitor] link_check: PASS
+
+--- FCLK0(就是像素时钟)---
+  改前 27.7778 MHz(DIV0=6 DIV1=6)  ← BOOT.BIN 留下的默认值
+[fclk0] 50.0000 MHz (IO_PLL 1000 / DIV0 20 / DIV1 1)  ✓ 在窗口内 [40.8~67.2]
+  改后 50.0000 MHz(设计值 50.0 MHz)
+  📌 口径:写文档一律写「设计值 50 MHz / 真值 50.0000 MHz」
+
+--- DAC 初始化放行(0x84 CV_CTRL)---
+[dac] 已放行初始化 @ FCLK0 50.0000 MHz —— 约 0.8 s 后偏压生效
+
+--- 显示通路 ---
+  帧缓存 fb0=0x38100000  fb1=0x38230000(1228800 B / 块,64 KB 对齐)
+
+--- 触摸通路 ---
+  <TouchEvent NEW  seq=  0 count=0 pen=0 err=0 (   0,   0)>   (没碰屏时 seq 不动、pen_down=0 属正常)
+
+--- 界面 ---
+[ui] 启动:/home/xilinx/c_ui_src/c_ui --axi-base 0x43C00000 --poll-ms 10 --fb0 0x38100000 --fb1 0x38230000
+[ui] ⚠️ 需要读 /dev/mem —— 本进程必须是 root(main.py 已经是)
+  👀 屏上应当出现前序那套 LVGL 界面(首页)。点一下按钮看页面切不切。
+  ⚠️ 触摸的坐标轴是否要翻转,以 tools/touch_probe.py 的实测为准。
+──── c_ui 启动 ────
+  axi_base = 0x43C00000   fb0 = 0x38100000   fb1 = 0x38230000   poll = 10 ms   touch = 开
+[regs] /dev/mem 已映射 AXI 0x43C00000(4096 B)
+[disp] direct_mode 双缓冲就绪:fb0=0x38100000 fb1=0x38230000 前台=0(非缓存映射;无 DMA2D,矩形同步走 CPU memcpy)
+[touch] 链路检查:0x68 = 0x00000000(seq=0 count=0 pen=0 err=0)
+[indev] 指针设备已注册(坐标来自 PL 的 0x68/0x6C/0x70)
+[mc] 测量参数已下发:
+       激励   1.000 MHz   → 0x80 = 0xA3D70A
+       采样   10.00 MSPS  → 0x88 = 0x0FE0D  (DIV=13,PH_OFF=-2,窗 [-4,+1])
+       (回读一致)
+[proto] 已接管测量指令(C 侧直写寄存器,方案 A)
+        激励 = 1000000 Hz(0x80 = 0xA3D70A);采样率/相位明细见上面 [mc] 那几行
+        偏压 = 0.0 V(0x14 = 0x80000)
+        扫压驻留 = 300 ms(可用 CV_SWEEP_DWELL_MS 覆盖)
+        ⚠️ 回路切换仍无硬件(本位流里没有 relay_ctrl),只回显到界面;
+           Cs 走真实 ADC 采样(adc_sample.c),未标定,Cp/D 因无相位不填
+[main] 等第一帧画完再切到 DDR 源(期间屏上应显示厂商彩条)…
+[main] 首帧已提交(flush=1),已切到 DDR 源(0x50 = 2)
+[touch] PL 报过总线错(err 粘滞位置起,0x68=0x00000310)。
+        这是**历史累计**标志,只有重新配置 PL 才清 ——
+        本次只报告一次,之后正常读。若触摸一直无反应,
+        那才需要查 I2C 上拉 / GT911 底板。
+[touch] 按下 (650,230) 点数 1
+[touch] 抬起
+[touch] 按下 (180,286) 点数 1
+[touch] 抬起
+[touch] 按下 (457,329) 点数 1
+[touch] 抬起
+[touch] 按下 (714,329) 点数 1
+[touch] 抬起
+[touch] 按下 (440,327) 点数 1
+[touch] 抬起
+[touch] 按下 (713,447) 点数 1
+[touch] 抬起
+[proto] 偏压 → 5.00 V  (0x14 = 0x86666,模块级 0.500 V ×10)
+[touch] 按下 (240,522) 点数 1
+[touch] 抬起
+[proto] 点测 CISS @ 5.00 V:偏压已下发,300 ms 后采一次(波形进结果页)
+[adc] 单点   偏压   5.000 V | A/INA tick-2 幅值  0.0000 V,峰峰     4 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs    64.057 pF(未标定) | OTR 0
+[proto] Cp / D 卡片显示 `--` 是**故意的**:两者都要 V 与 I 的相位差,
+        而 INA/INB 两个时间槽是**两次独立采集**、相位不相关 ⇒ 只能用幅值比
+        出 Cs。要填上 Cp/D 得让 PL 同时采两路(给 adc_capture 加第二组
+        缓冲 + 重下位流),本轮不做。见 adc_sample.h 文件头。
+[touch] 按下 (57,23) 点数 1
+[touch] 抬起
+[touch] 按下 (672,224) 点数 1
+[touch] 抬起
+[touch] 按下 (33,28) 点数 1
+[touch] 抬起
+[touch] 按下 (657,360) 点数 1
+[touch] 抬起
+[touch] 按下 (363,89) 点数 1
+[touch] 抬起
+[touch] 按下 (152,46) 点数 1
+[touch] 抬起
+[touch] 按下 (158,78) 点数 1
+[touch] 抬起
+[touch] 按下 (344,92) 点数 1
+[touch] 抬起
+[touch] 按下 (48,11) 点数 1
+[touch] 抬起
+[touch] 按下 (350,382) 点数 1
+[touch] 抬起
+[touch] 按下 (55,29) 点数 1
+[touch] 抬起
+[touch] 按下 (622,248) 点数 1
+[touch] 抬起
+[touch] 按下 (237,513) 点数 1
+[touch] 抬起
+[proto] 点测 CISS @ 5.00 V:偏压已下发,300 ms 后采一次(波形进结果页)
+[adc] 单点   偏压   5.000 V | A/INA tick-2 幅值  0.0000 V,峰峰     5 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs   155.685 pF(未标定) | OTR 0
+[touch] 按下 (54,18) 点数 1
+[touch] 抬起
+[touch] 按下 (638,385) 点数 1
+[touch] 抬起
+[touch] 按下 (147,82) 点数 1
+[touch] 抬起
+[touch] 按下 (319,88) 点数 1
+[touch] 抬起
+[touch] 按下 (40,16) 点数 1
+[touch] 抬起
+[touch] 按下 (383,394) 点数 1
+[touch] 抬起
+[touch] 按下 (988,93) 点数 1
+[touch] 抬起
+[touch] 按下 (957,340) 点数 1
+[touch] 抬起
+[touch] 按下 (723,338) 点数 1
+[touch] 抬起
+[touch] 按下 (321,387) 点数 1
+[touch] 抬起
+[touch] 按下 (327,456) 点数 1
+[touch] 抬起
+[touch] 按下 (328,448) 点数 1
+[touch] 抬起
+[touch] 按下 (689,457) 点数 1
+[touch] 抬起
+[touch] 按下 (962,422) 点数 1
+[touch] 抬起
+[proto] 扫压开始:CISS,0.10 V → 100.00 V,60 点,每点 300 ms
+        Cs 取**真实 ADC 数据**的幅值比(未标定);Cp/D 无相位,不填
+[adc] 扫压   偏压   0.100 V | A/INA tick-2 幅值  0.0001 V,峰峰     5 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs    62.227 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.112 V | A/INA tick-2 幅值  0.0000 V,峰峰     4 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs    98.609 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.126 V | A/INA tick-2 幅值  0.0000 V,峰峰     5 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs   205.871 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.142 V | A/INA tick-2 幅值  0.0000 V,峰峰     5 码 | B/INB tick+5 幅值  0.0001 V,峰峰     3 码 | Cs   262.038 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.160 V | A/INA tick-2 幅值  0.0000 V,峰峰     5 码 | B/INB tick+5 幅值  0.0000 V,峰峰     5 码 | Cs    41.527 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.180 V | A/INA tick-2 幅值  0.0001 V,峰峰     4 码 | B/INB tick+5 幅值  0.0001 V,峰峰     4 码 | Cs   244.803 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.202 V | A/INA tick-2 幅值  0.0000 V,峰峰     4 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs    13.725 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.227 V | A/INA tick-2 幅值  0.0001 V,峰峰     3 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs    50.908 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.255 V | A/INA tick-2 幅值  0.0001 V,峰峰     4 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs    29.590 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.287 V | A/INA tick-2 幅值  0.0000 V,峰峰     5 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs   127.635 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.322 V | A/INA tick-2 幅值  0.0001 V,峰峰     5 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs    96.551 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.363 V | A/INA tick-2 幅值  0.0001 V,峰峰     4 码 | B/INB tick+5 幅值  0.0001 V,峰峰     3 码 | Cs   133.854 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.408 V | A/INA tick-2 幅值  0.0000 V,峰峰     4 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs   180.294 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.458 V | A/INA tick-2 幅值  0.0000 V,峰峰     6 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs   975.450 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.515 V | A/INA tick-2 幅值  0.0000 V,峰峰     3 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs   118.658 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.579 V | A/INA tick-2 幅值  0.0000 V,峰峰     4 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs   100.131 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.651 V | A/INA tick-2 幅值  0.0000 V,峰峰     5 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs   143.512 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.732 V | A/INA tick-2 幅值  0.0000 V,峰峰     7 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs   437.087 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.823 V | A/INA tick-2 幅值  0.0000 V,峰峰     5 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs   259.704 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.925 V | A/INA tick-2 幅值  0.0000 V,峰峰     6 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs    95.402 pF(未标定) | OTR 0
+[adc] 扫压   偏压   1.040 V | A/INA tick-2 幅值  0.0001 V,峰峰     5 码 | B/INB tick+5 幅值  0.0001 V,峰峰     4 码 | Cs   155.999 pF(未标定) | OTR 0
+[adc] 扫压   偏压   1.169 V | A/INA tick-2 幅值  0.0001 V,峰峰     5 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs    37.870 pF(未标定) | OTR 0
+[adc] 扫压   偏压   1.314 V | A/INA tick-2 幅值  0.0000 V,峰峰     5 码 | B/INB tick+5 幅值  0.0001 V,峰峰     3 码 | Cs   279.866 pF(未标定) | OTR 0
+[adc] 扫压   偏压   1.477 V | A/INA tick-2 幅值  0.0000 V,峰峰     3 码 | B/INB tick+5 幅值  0.0001 V,峰峰     4 码 | Cs   342.435 pF(未标定) | OTR 0
+[adc] 扫压   偏压   1.661 V | A/INA tick-2 幅值  0.0001 V,峰峰     6 码 | B/INB tick+5 幅值  0.0001 V,峰峰     4 码 | Cs   231.504 pF(未标定) | OTR 0
+[adc] 扫压   偏压   1.867 V | A/INA tick-2 幅值  0.0000 V,峰峰     4 码 | B/INB tick+5 幅值  0.0001 V,峰峰     4 码 | Cs   792.876 pF(未标定) | OTR 0
+[adc] 扫压   偏压   2.099 V | A/INA tick-2 幅值  0.0000 V,峰峰     6 码 | B/INB tick+5 幅值  0.0001 V,峰峰     4 码 | Cs   300.178 pF(未标定) | OTR 0
+[adc] 扫压   偏压   2.360 V | A/INA tick-2 幅值  0.0000 V,峰峰     4 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs   120.313 pF(未标定) | OTR 0
+[adc] 扫压   偏压   2.653 V | A/INA tick-2 幅值  0.0000 V,峰峰     6 码 | B/INB tick+5 幅值  0.0000 V,峰峰     5 码 | Cs    89.323 pF(未标定) | OTR 0
+[adc] 扫压   偏压   2.982 V | A/INA tick-2 幅值  0.0000 V,峰峰     4 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs   105.231 pF(未标定) | OTR 0
+[adc] 扫压   偏压   3.353 V | A/INA tick-2 幅值  0.0000 V,峰峰     4 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs    78.487 pF(未标定) | OTR 0
+[adc] 扫压   偏压   3.769 V | A/INA tick-2 幅值  0.0000 V,峰峰     4 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs    97.077 pF(未标定) | OTR 0
+[adc] 扫压   偏压   4.238 V | A/INA tick-2 幅值  0.0001 V,峰峰     4 码 | B/INB tick+5 幅值  0.0001 V,峰峰     3 码 | Cs   149.142 pF(未标定) | OTR 0
+[adc] 扫压   偏压   4.764 V | A/INA tick-2 幅值  0.0000 V,峰峰     4 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs    99.191 pF(未标定) | OTR 0
+[adc] 扫压   偏压   5.356 V | A/INA tick-2 幅值  0.0000 V,峰峰     5 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs   103.146 pF(未标定) | OTR 0
+[adc] 扫压   偏压   6.021 V | A/INA tick-2 幅值  0.0000 V,峰峰     5 码 | B/INB tick+5 幅值  0.0001 V,峰峰     4 码 | Cs   338.145 pF(未标定) | OTR 0
+[adc] 扫压   偏压   6.769 V | A/INA tick-2 幅值  0.0000 V,峰峰     6 码 | B/INB tick+5 幅值  0.0000 V,峰峰     5 码 | Cs   170.644 pF(未标定) | OTR 0
+[adc] 扫压   偏压   7.609 V | A/INA tick-2 幅值  0.0000 V,峰峰     7 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs   162.157 pF(未标定) | OTR 0
+[adc] 扫压   偏压   8.555 V | A/INA tick-2 幅值  0.0000 V,峰峰     6 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs   653.055 pF(未标定) | OTR 0
+[adc] 扫压   偏压   9.617 V | A/INA tick-2 幅值  0.0000 V,峰峰     6 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs    54.027 pF(未标定) | OTR 0
+[adc] 扫压   偏压  10.812 V | A/INA tick-2 幅值  0.0001 V,峰峰     4 码 | B/INB tick+5 幅值  0.0000 V,峰峰     5 码 | Cs    38.135 pF(未标定) | OTR 0
+[adc] 扫压   偏压  12.155 V | A/INA tick-2 幅值  0.0000 V,峰峰     3 码 | B/INB tick+5 幅值  0.0001 V,峰峰     4 码 | Cs   172.847 pF(未标定) | OTR 0
+[adc] 扫压   偏压  13.664 V | A/INA tick-2 幅值  0.0006 V,峰峰     7 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs     9.112 pF(未标定) | OTR 0
+[adc] 扫压   偏压  15.362 V | A/INA tick-2 幅值  0.0000 V,峰峰     4 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs   254.553 pF(未标定) | OTR 0
+[adc] 扫压   偏压  17.270 V | A/INA tick-2 幅值  0.0000 V,峰峰     6 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs   253.935 pF(未标定) | OTR 0
+[adc] 扫压   偏压  19.415 V | A/INA tick-2 幅值  0.0001 V,峰峰     6 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs    62.084 pF(未标定) | OTR 0
+[adc] 扫压   偏压  21.826 V | A/INA tick-2 幅值  0.0000 V,峰峰     5 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs   320.082 pF(未标定) | OTR 0
+[adc] 扫压   偏压  24.538 V | A/INA tick-2 幅值  0.0000 V,峰峰     6 码 | B/INB tick+5 幅值  0.0001 V,峰峰     4 码 | Cs   780.405 pF(未标定) | OTR 0
+[adc] 扫压   偏压  27.585 V | A/INA tick-2 幅值  0.0000 V,峰峰     4 码 | B/INB tick+5 幅值  0.0000 V,峰峰     5 码 | Cs   279.940 pF(未标定) | OTR 0
+[adc] 扫压   偏压  31.012 V | A/INA tick-2 幅值  0.0001 V,峰峰     7 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs    72.945 pF(未标定) | OTR 0
+[adc] 扫压   偏压  34.864 V | A/INA tick-2 幅值  0.0001 V,峰峰     6 码 | B/INB tick+5 幅值  0.0000 V,峰峰     5 码 | Cs    45.333 pF(未标定) | OTR 0
+[adc] 扫压   偏压  39.194 V | A/INA tick-2 幅值  0.0001 V,峰峰     5 码 | B/INB tick+5 幅值  0.0001 V,峰峰     3 码 | Cs   216.644 pF(未标定) | OTR 0
+[adc] 扫压   偏压  44.062 V | A/INA tick-2 幅值  0.0001 V,峰峰     6 码 | B/INB tick+5 幅值  0.0001 V,峰峰     3 码 | Cs   167.416 pF(未标定) | OTR 0
+[adc] 扫压   偏压  49.535 V | A/INA tick-2 幅值  0.0000 V,峰峰     4 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs   187.448 pF(未标定) | OTR 0
+[adc] 扫压   偏压  55.688 V | A/INA tick-2 幅值  0.0000 V,峰峰     5 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs   147.139 pF(未标定) | OTR 0
+[adc] 扫压   偏压  62.605 V | A/INA tick-2 幅值  0.0000 V,峰峰     4 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs   138.874 pF(未标定) | OTR 0
+[adc] 扫压   偏压  70.381 V | A/INA tick-2 幅值  0.0001 V,峰峰     7 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs   111.223 pF(未标定) | OTR 0
+[adc] 扫压   偏压  79.123 V | A/INA tick-2 幅值  0.0000 V,峰峰     4 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs    60.074 pF(未标定) | OTR 0
+[adc] 扫压   偏压  88.951 V | A/INA tick-2 幅值  0.0000 V,峰峰     5 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs   113.813 pF(未标定) | OTR 0
+[adc] 扫压   偏压 100.000 V | A/INA tick-2 幅值  0.0000 V,峰峰     4 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs   167.817 pF(未标定) | OTR 0
+[proto] 扫压结束:60 点已下发到 DAC
+[touch] 按下 (70,15) 点数 1
+[touch] 抬起
+[touch] 按下 (641,373) 点数 1
+[touch] 抬起
+[touch] 按下 (551,112) 点数 1
+[touch] 抬起
+[touch] 按下 (553,99) 点数 1
+[touch] 抬起
+[touch] 按下 (686,67) 点数 1
+[touch] 抬起
+[touch] 按下 (686,88) 点数 1
+[touch] 抬起
+[touch] 按下 (57,14) 点数 1
+[touch] 抬起
+[touch] 按下 (335,364) 点数 1
+[touch] 抬起
+[touch] 按下 (85,30) 点数 1
+[touch] 抬起
+[touch] 按下 (42,20) 点数 1
+[touch] 抬起
+[touch] 按下 (680,213) 点数 1
+[touch] 抬起
+[touch] 按下 (922,105) 点数 1
+[touch] 抬起
+[proto] 回路 → ?(仅界面状态;继电器模块不在本位流)
+[touch] 按下 (250,513) 点数 1
+[touch] 抬起
+[proto] 点测 CISS+COSS+CRSS @ 5.00 V:偏压已下发,300 ms 后采一次(三条卡片共用同一份真实读数)
+[adc] 单点   偏压   5.000 V | A/INA tick-2 幅值  0.0000 V,峰峰     5 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs    18.913 pF(未标定) | OTR 0
+[touch] 按下 (47,19) 点数 1
+[touch] 抬起
+[touch] 按下 (700,387) 点数 1
+[touch] 抬起
+[touch] 按下 (184,88) 点数 1
+[touch] 抬起
+[touch] 按下 (360,102) 点数 1
+[touch] 抬起
+[touch] 按下 (517,95) 点数 1
+[touch] 抬起
+[touch] 按下 (688,91) 点数 1
+[touch] 抬起
+[touch] 按下 (554,104) 点数 1
+[touch] 抬起
+[touch] 按下 (67,25) 点数 1
+[touch] 抬起
+[touch] 按下 (679,400) 点数 1
+[touch] 抬起
+[touch] 按下 (65,12) 点数 1
+[touch] 抬起
+[touch] 按下 (680,217) 点数 1
+[touch] 抬起
+[touch] 按下 (25,11) 点数 1
+[touch] 抬起
+[touch] 按下 (250,387) 点数 1
+[touch] 抬起
+[touch] 按下 (893,69) 点数 1
+[touch] 抬起
+[touch] 按下 (42,16) 点数 1
+[touch] 抬起
+[touch] 按下 (1000,100) 点数 1
+[touch] 抬起
+[touch] 按下 (988,274) 点数 1
+[touch] 抬起
+[touch] 按下 (931,422) 点数 1
+[touch] 抬起
+[proto] 先测 RG:继电器未实现,跳过;**只跑三路扫压**
+[proto] 扫压开始:CISS+COSS+CRSS,0.10 V → 100.00 V,60 点,每点 300 ms
+        Cs 取**真实 ADC 数据**的幅值比(未标定);Cp/D 无相位,不填
+[adc] 扫压   偏压   0.100 V | A/INA tick-2 幅值  0.0001 V,峰峰     4 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs    86.239 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.112 V | A/INA tick-2 幅值  0.0001 V,峰峰     5 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs    67.242 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.126 V | A/INA tick-2 幅值  0.0001 V,峰峰     6 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs    38.425 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.142 V | A/INA tick-2 幅值  0.0001 V,峰峰     6 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs   126.108 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.160 V | A/INA tick-2 幅值  0.0001 V,峰峰     6 码 | B/INB tick+5 幅值  0.0001 V,峰峰     3 码 | Cs   135.789 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.180 V | A/INA tick-2 幅值  0.0000 V,峰峰     6 码 | B/INB tick+5 幅值  0.0001 V,峰峰     4 码 | Cs   212.427 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.202 V | A/INA tick-2 幅值  0.0001 V,峰峰     6 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs    56.237 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.227 V | A/INA tick-2 幅值  0.0001 V,峰峰     4 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs   128.642 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.255 V | A/INA tick-2 幅值  0.0000 V,峰峰     5 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs   203.639 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.287 V | A/INA tick-2 幅值  0.0000 V,峰峰     4 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs   181.431 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.322 V | A/INA tick-2 幅值  0.0000 V,峰峰     4 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs   130.574 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.363 V | A/INA tick-2 幅值  0.0000 V,峰峰     6 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs    83.964 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.408 V | A/INA tick-2 幅值  0.0001 V,峰峰     4 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs    98.444 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.458 V | A/INA tick-2 幅值  0.0000 V,峰峰     5 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs   125.743 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.515 V | A/INA tick-2 幅值  0.0001 V,峰峰     7 码 | B/INB tick+5 幅值  0.0001 V,峰峰     4 码 | Cs   141.623 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.579 V | A/INA tick-2 幅值  0.0000 V,峰峰     4 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs   114.629 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.651 V | A/INA tick-2 幅值  0.0000 V,峰峰     4 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs   217.153 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.732 V | A/INA tick-2 幅值  0.0007 V,峰峰     8 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs     9.231 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.823 V | A/INA tick-2 幅值  0.0000 V,峰峰     4 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs   238.878 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.925 V | A/INA tick-2 幅值  0.0001 V,峰峰     5 码 | B/INB tick+5 幅值  0.0001 V,峰峰     4 码 | Cs   107.082 pF(未标定) | OTR 0
+[adc] 扫压   偏压   1.040 V | A/INA tick-2 幅值  0.0000 V,峰峰     5 码 | B/INB tick+5 幅值  0.0001 V,峰峰     4 码 | Cs   511.195 pF(未标定) | OTR 0
+[adc] 扫压   偏压   1.169 V | A/INA tick-2 幅值  0.0000 V,峰峰     6 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs   132.804 pF(未标定) | OTR 0
+[adc] 扫压   偏压   1.314 V | A/INA tick-2 幅值  0.0000 V,峰峰     6 码 | B/INB tick+5 幅值  0.0001 V,峰峰     5 码 | Cs   539.393 pF(未标定) | OTR 0
+[adc] 扫压   偏压   1.477 V | A/INA tick-2 幅值  0.0000 V,峰峰     5 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs    47.621 pF(未标定) | OTR 0
+[adc] 扫压   偏压   1.661 V | A/INA tick-2 幅值  0.0000 V,峰峰     4 码 | B/INB tick+5 幅值  0.0000 V,峰峰     5 码 | Cs   129.319 pF(未标定) | OTR 0
+[adc] 扫压   偏压   1.867 V | A/INA tick-2 幅值  0.0001 V,峰峰     4 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs   102.945 pF(未标定) | OTR 0
+[adc] 扫压   偏压   2.099 V | A/INA tick-2 幅值  0.0000 V,峰峰     6 码 | B/INB tick+5 幅值  0.0000 V,峰峰     5 码 | Cs   177.367 pF(未标定) | OTR 0
+[adc] 扫压   偏压   2.360 V | A/INA tick-2 幅值  0.0000 V,峰峰     5 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs   157.343 pF(未标定) | OTR 0
+[adc] 扫压   偏压   2.653 V | A/INA tick-2 幅值  0.0001 V,峰峰     5 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs    59.127 pF(未标定) | OTR 0
+[adc] 扫压   偏压   2.982 V | A/INA tick-2 幅值  0.0000 V,峰峰     6 码 | B/INB tick+5 幅值  0.0001 V,峰峰     4 码 | Cs   346.260 pF(未标定) | OTR 0
+[adc] 扫压   偏压   3.353 V | A/INA tick-2 幅值  0.0000 V,峰峰     5 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs   237.301 pF(未标定) | OTR 0
+[adc] 扫压   偏压   3.769 V | A/INA tick-2 幅值  0.0000 V,峰峰     4 码 | B/INB tick+5 幅值  0.0001 V,峰峰     3 码 | Cs   282.643 pF(未标定) | OTR 0
+[adc] 扫压   偏压   4.238 V | A/INA tick-2 幅值  0.0001 V,峰峰    12 码 | B/INB tick+5 幅值  0.0001 V,峰峰     3 码 | Cs   125.193 pF(未标定) | OTR 0
+[adc] 扫压   偏压   4.764 V | A/INA tick-2 幅值  0.0000 V,峰峰     5 码 | B/INB tick+5 幅值  0.0001 V,峰峰     3 码 | Cs   440.424 pF(未标定) | OTR 0
+[adc] 扫压   偏压   5.356 V | A/INA tick-2 幅值  0.0000 V,峰峰     5 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs   137.803 pF(未标定) | OTR 0
+[adc] 扫压   偏压   6.021 V | A/INA tick-2 幅值  0.0001 V,峰峰     6 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs    32.241 pF(未标定) | OTR 0
+[adc] 扫压   偏压   6.769 V | A/INA tick-2 幅值  0.0000 V,峰峰     4 码 | B/INB tick+5 幅值  0.0001 V,峰峰     4 码 | Cs   215.156 pF(未标定) | OTR 0
+[adc] 扫压   偏压   7.609 V | A/INA tick-2 幅值  0.0001 V,峰峰     4 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs    51.325 pF(未标定) | OTR 0
+[adc] 扫压   偏压   8.555 V | A/INA tick-2 幅值  0.0000 V,峰峰     4 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs   131.330 pF(未标定) | OTR 0
+[adc] 扫压   偏压   9.617 V | A/INA tick-2 幅值  0.0000 V,峰峰     5 码 | B/INB tick+5 幅值  0.0001 V,峰峰     4 码 | Cs   413.234 pF(未标定) | OTR 0
+[adc] 扫压   偏压  10.812 V | A/INA tick-2 幅值  0.0000 V,峰峰     5 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs   557.520 pF(未标定) | OTR 0
+[adc] 扫压   偏压  12.155 V | A/INA tick-2 幅值  0.0000 V,峰峰     6 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs    31.872 pF(未标定) | OTR 0
+[adc] 扫压   偏压  13.664 V | A/INA tick-2 幅值  0.0000 V,峰峰     4 码 | B/INB tick+5 幅值  0.0001 V,峰峰     3 码 | Cs   297.882 pF(未标定) | OTR 0
+[adc] 扫压   偏压  15.362 V | A/INA tick-2 幅值  0.0000 V,峰峰     5 码 | B/INB tick+5 幅值  0.0001 V,峰峰     4 码 | Cs   346.219 pF(未标定) | OTR 0
+[adc] 扫压   偏压  17.270 V | A/INA tick-2 幅值  0.0001 V,峰峰     4 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs    57.475 pF(未标定) | OTR 0
+[adc] 扫压   偏压  19.415 V | A/INA tick-2 幅值  0.0000 V,峰峰     4 码 | B/INB tick+5 幅值  0.0001 V,峰峰     4 码 | Cs   296.712 pF(未标定) | OTR 0
+[adc] 扫压   偏压  21.826 V | A/INA tick-2 幅值  0.0000 V,峰峰     5 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs   482.246 pF(未标定) | OTR 0
+[adc] 扫压   偏压  24.538 V | A/INA tick-2 幅值  0.0000 V,峰峰     4 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs   507.005 pF(未标定) | OTR 0
+[adc] 扫压   偏压  27.585 V | A/INA tick-2 幅值  0.0000 V,峰峰     4 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs   164.556 pF(未标定) | OTR 0
+[adc] 扫压   偏压  31.012 V | A/INA tick-2 幅值  0.0000 V,峰峰     4 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs  1020.564 pF(未标定) | OTR 0
+[adc] 扫压   偏压  34.864 V | A/INA tick-2 幅值  0.0000 V,峰峰     6 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs   188.498 pF(未标定) | OTR 0
+[adc] 扫压   偏压  39.194 V | A/INA tick-2 幅值  0.0001 V,峰峰     4 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs    71.676 pF(未标定) | OTR 0
+[adc] 扫压   偏压  44.062 V | A/INA tick-2 幅值  0.0001 V,峰峰     5 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs    94.545 pF(未标定) | OTR 0
+[adc] 扫压   偏压  49.535 V | A/INA tick-2 幅值  0.0001 V,峰峰     5 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs    38.709 pF(未标定) | OTR 0
+[adc] 扫压   偏压  55.688 V | A/INA tick-2 幅值  0.0000 V,峰峰     5 码 | B/INB tick+5 幅值  0.0000 V,峰峰     5 码 | Cs   164.594 pF(未标定) | OTR 0
+[adc] 扫压   偏压  62.605 V | A/INA tick-2 幅值  0.0000 V,峰峰     7 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs   148.836 pF(未标定) | OTR 0
+[adc] 扫压   偏压  70.381 V | A/INA tick-2 幅值  0.0001 V,峰峰     5 码 | B/INB tick+5 幅值  0.0001 V,峰峰     3 码 | Cs   159.524 pF(未标定) | OTR 0
+[adc] 扫压   偏压  79.123 V | A/INA tick-2 幅值  0.0000 V,峰峰     6 码 | B/INB tick+5 幅值  0.0001 V,峰峰     4 码 | Cs   305.762 pF(未标定) | OTR 0
+[adc] 扫压   偏压  88.951 V | A/INA tick-2 幅值  0.0000 V,峰峰     4 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs   193.355 pF(未标定) | OTR 0
+[adc] 扫压   偏压 100.000 V | A/INA tick-2 幅值  0.0001 V,峰峰     4 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs    38.016 pF(未标定) | OTR 0
+[proto] 扫压结束:60 点已下发到 DAC
+[touch] 按下 (990,96) 点数 1
+[touch] 抬起
+[touch] 按下 (973,77) 点数 1
+[touch] 抬起
+[touch] 按下 (48,20) 点数 1
+[touch] 抬起
+[touch] 按下 (671,398) 点数 1
+[touch] 抬起
+[touch] 按下 (676,108) 点数 1
+[touch] 抬起
+[touch] 按下 (699,87) 点数 1
+[touch] 抬起
+[touch] 按下 (554,87) 点数 1
+[touch] 抬起
+[touch] 按下 (701,98) 点数 1
+[touch] 抬起
+[touch] 按下 (531,81) 点数 1
+[touch] 抬起
+[touch] 按下 (647,63) 点数 1
+[touch] 抬起
+[touch] 按下 (691,90) 点数 1
+[touch] 抬起
+[touch] 按下 (553,87) 点数 1
+[touch] 抬起
+[touch] 按下 (674,93) 点数 1
+[touch] 抬起
+[touch] 按下 (336,113) 点数 1
+[touch] 抬起
+[touch] 按下 (162,86) 点数 1
+[touch] 抬起
+[touch] 按下 (357,66) 点数 1
+[touch] 抬起
+[touch] 按下 (364,82) 点数 1
+[touch] 抬起
+[touch] 按下 (684,108) 点数 1
+[touch] 抬起
+[touch] 按下 (681,86) 点数 1
+[touch] 抬起
+[touch] 按下 (928,66) 点数 1
+[touch] 抬起
+[touch] 按下 (916,98) 点数 1
+[touch] 抬起
+[touch] 按下 (731,105) 点数 1
+[touch] 抬起
+[touch] 按下 (80,15) 点数 1
+[touch] 抬起
+[touch] 按下 (42,18) 点数 1
+[touch] 抬起
+[touch] 按下 (382,226) 点数 1
+[touch] 抬起
+[touch] 按下 (341,339) 点数 1
+[touch] 抬起
+[mc] 激励 → 0.100 MHz(0x80 = 0x10624E)
+[touch] 按下 (50,36) 点数 1
+[touch] 抬起
+[touch] 按下 (672,222) 点数 1
+[touch] 抬起
+[touch] 按下 (248,515) 点数 1
+[touch] 抬起
+[proto] 点测 CISS+COSS+CRSS @ 5.00 V:偏压已下发,300 ms 后采一次(三条卡片共用同一份真实读数)
+[adc] 🔴 单点测量:采集或解调失败 —— 解调不可用:每周期 100 点,超出参考表上限 64
+      ⚠️ 此后不再重复打印这一条。
+      ⇒ 依次查:
+         ① 位流是不是含 0x88–0x98 的那一版;
+         ② 0x90[0] mmcm_locked 是不是 1(没锁就是 MMCM 没起来);
+         ③ 采样率档位是不是太低 —— 每周期点数 < 4 时本层**拒绝解调**
+            (N=2 正好在 Nyquist 上、N=1 混叠到 DC,算出来是噪声);
+         ④ 冒烟看 [adc] 那行的「峰峰」—— 个位数说明输入没信号。
+[touch] 按下 (271,504) 点数 1
+[touch] 抬起
+[proto] 点测 CISS+COSS+CRSS @ 5.00 V:偏压已下发,300 ms 后采一次(三条卡片共用同一份真实读数)
+[touch] 按下 (226,531) 点数 1
+[touch] 抬起
+[proto] 点测 CISS+COSS+CRSS @ 5.00 V:偏压已下发,300 ms 后采一次(三条卡片共用同一份真实读数)
+[touch] 按下 (192,462) 点数 1
+[touch] 抬起
+[touch] 按下 (239,517) 点数 1
+[touch] 抬起
+[proto] 点测 CISS+COSS+CRSS @ 5.00 V:偏压已下发,300 ms 后采一次(三条卡片共用同一份真实读数)
+[touch] 按下 (242,329) 点数 1
+[touch] 抬起
+[touch] 按下 (246,300) 点数 1
+[touch] 抬起
+[touch] 按下 (746,336) 点数 1
+[touch] 抬起
+[touch] 按下 (588,332) 点数 1
+[touch] 抬起
+[touch] 按下 (767,471) 点数 1
+[touch] 抬起
+[proto] 偏压 → 6.00 V  (0x14 = 0x87AE1,模块级 0.600 V ×10)
+[touch] 按下 (211,517) 点数 1
+[touch] 抬起
+[proto] 点测 CISS+COSS+CRSS @ 6.00 V:偏压已下发,300 ms 后采一次(三条卡片共用同一份真实读数)
+[touch] 按下 (41,15) 点数 1
+[touch] 抬起
+[touch] 按下 (351,246) 点数 1
+[touch] 抬起
+[touch] 按下 (536,259) 点数 1
+[touch] 抬起
+[touch] 按下 (655,382) 点数 1
+[touch] 抬起
+[mc] 参数复位:激励 1.000 MHz(0x80 = 0xA3D70A),采样 10.00 MSPS(0x88 = 0x0FE0D,DIV=13,PH_OFF=-2,窗 [-4,+1])  (回读一致)
+[mc] ⚠️ 0x84(CV_CTRL)未被动过 —— DAC 放行权归 Python 侧,复位不含它
+[proto] 复位:0x14 ← 0x80000(0.0 V);激励/采样率/相位回默认见上面 [mc] 那行
+        ⚠️ 0x84(CV_CTRL)未动 —— DAC 放行权归 Python 侧
+[touch] 按下 (44,15) 点数 1
+[touch] 抬起
+[touch] 按下 (685,224) 点数 1
+[touch] 抬起
+[touch] 按下 (263,509) 点数 1
+[touch] 抬起
+[proto] 点测 CISS+COSS+CRSS @ 6.00 V:偏压已下发,300 ms 后采一次(三条卡片共用同一份真实读数)
+[adc] 单点   偏压   6.000 V | A/INA tick-2 幅值  0.0001 V,峰峰     6 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs    65.788 pF(未标定) | OTR 0
+[touch] 按下 (235,491) 点数 1
+[touch] 抬起
+[proto] 点测 CISS+COSS+CRSS @ 6.00 V:偏压已下发,300 ms 后采一次(三条卡片共用同一份真实读数)
+[adc] 单点   偏压   6.000 V | A/INA tick-2 幅值  0.0001 V,峰峰     4 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs    40.825 pF(未标定) | OTR 0
+[touch] 按下 (232,569) 点数 1
+[touch] 抬起
+[touch] 按下 (221,540) 点数 1
+[touch] 抬起
+[proto] 点测 CISS+COSS+CRSS @ 6.00 V:偏压已下发,300 ms 后采一次(三条卡片共用同一份真实读数)
+[adc] 单点   偏压   6.000 V | A/INA tick-2 幅值  0.0001 V,峰峰     3 码 | B/INB tick+5 幅值  0.0001 V,峰峰     4 码 | Cs   275.047 pF(未标定) | OTR 0
+[touch] 按下 (43,28) 点数 1
+[touch] 抬起
+[touch] 按下 (662,424) 点数 1
+[touch] 抬起
+[touch] 按下 (332,99) 点数 1
+[touch] 抬起
+[touch] 按下 (505,96) 点数 1
+[touch] 抬起
+[touch] 按下 (365,115) 点数 1
+[touch] 抬起
+[touch] 按下 (343,41) 点数 1
+[touch] 抬起
+[touch] 按下 (352,81) 点数 1
+[touch] 抬起
+[touch] 按下 (34,30) 点数 1
+[touch] 抬起
+[touch] 按下 (227,153) 点数 1
+[touch] 抬起
+[touch] 按下 (16,21) 点数 1
+[touch] 抬起
+[touch] 按下 (728,404) 点数 1
+[touch] 抬起
+[touch] 按下 (36,26) 点数 1
+[touch] 抬起
+[touch] 按下 (397,410) 点数 1
+[touch] 抬起
+[touch] 按下 (1004,105) 点数 1
+[touch] 抬起
+[touch] 按下 (974,89) 点数 1
+[touch] 抬起
+[touch] 按下 (967,271) 点数 1
+[touch] 抬起
+[touch] 按下 (949,240) 点数 1
+[touch] 抬起
+[touch] 按下 (964,269) 点数 1
+[touch] 抬起
+[touch] 按下 (967,414) 点数 1
+[touch] 抬起
+[proto] 先测 RG:继电器未实现,跳过;**只跑三路扫压**
+[proto] 扫压开始:CISS+COSS+CRSS,0.10 V → 100.00 V,60 点,每点 300 ms
+        Cs 取**真实 ADC 数据**的幅值比(未标定);Cp/D 无相位,不填
+[adc] 扫压   偏压   0.100 V | A/INA tick-2 幅值  0.0001 V,峰峰     6 码 | B/INB tick+5 幅值  0.0001 V,峰峰     3 码 | Cs   195.106 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.112 V | A/INA tick-2 幅值  0.0001 V,峰峰     5 码 | B/INB tick+5 幅值  0.0001 V,峰峰     4 码 | Cs   214.537 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.126 V | A/INA tick-2 幅值  0.0000 V,峰峰     4 码 | B/INB tick+5 幅值  0.0001 V,峰峰     3 码 | Cs   991.388 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.142 V | A/INA tick-2 幅值  0.0000 V,峰峰     6 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs   280.139 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.160 V | A/INA tick-2 幅值  0.0000 V,峰峰     9 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs   661.843 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.180 V | A/INA tick-2 幅值  0.0001 V,峰峰     9 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs    45.571 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.202 V | A/INA tick-2 幅值  0.0001 V,峰峰     8 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs    44.696 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.227 V | A/INA tick-2 幅值  0.0000 V,峰峰     5 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs   166.411 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.255 V | A/INA tick-2 幅值  0.0001 V,峰峰     6 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs   112.234 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.287 V | A/INA tick-2 幅值  0.0001 V,峰峰     3 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs    56.218 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.322 V | A/INA tick-2 幅值  0.0000 V,峰峰     6 码 | B/INB tick+5 幅值  0.0001 V,峰峰     4 码 | Cs  1748.507 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.363 V | A/INA tick-2 幅值  0.0000 V,峰峰     5 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs   149.348 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.408 V | A/INA tick-2 幅值  0.0000 V,峰峰     4 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs   214.970 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.458 V | A/INA tick-2 幅值  0.0001 V,峰峰     5 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs    63.858 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.515 V | A/INA tick-2 幅值  0.0001 V,峰峰     3 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs     9.019 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.579 V | A/INA tick-2 幅值  0.0000 V,峰峰     6 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs    85.212 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.651 V | A/INA tick-2 幅值  0.0000 V,峰峰     6 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs   987.250 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.732 V | A/INA tick-2 幅值  0.0000 V,峰峰     9 码 | B/INB tick+5 幅值  0.0000 V,峰峰     5 码 | Cs   176.494 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.823 V | A/INA tick-2 幅值  0.0000 V,峰峰     7 码 | B/INB tick+5 幅值  0.0001 V,峰峰     3 码 | Cs   176.834 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.925 V | A/INA tick-2 幅值  0.0000 V,峰峰     4 码 | B/INB tick+5 幅值  0.0001 V,峰峰     4 码 | Cs   307.022 pF(未标定) | OTR 0
+[adc] 扫压   偏压   1.040 V | A/INA tick-2 幅值  0.0000 V,峰峰     7 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs   246.210 pF(未标定) | OTR 0
+[adc] 扫压   偏压   1.169 V | A/INA tick-2 幅值  0.0001 V,峰峰     7 码 | B/INB tick+5 幅值  0.0001 V,峰峰     4 码 | Cs   244.625 pF(未标定) | OTR 0
+[adc] 扫压   偏压   1.314 V | A/INA tick-2 幅值  0.0001 V,峰峰    10 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs    66.137 pF(未标定) | OTR 0
+[adc] 扫压   偏压   1.477 V | A/INA tick-2 幅值  0.0001 V,峰峰     7 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs    38.985 pF(未标定) | OTR 0
+[adc] 扫压   偏压   1.661 V | A/INA tick-2 幅值  0.0000 V,峰峰     5 码 | B/INB tick+5 幅值  0.0001 V,峰峰     4 码 | Cs   826.703 pF(未标定) | OTR 0
+[adc] 扫压   偏压   1.867 V | A/INA tick-2 幅值  0.0001 V,峰峰     5 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs    48.062 pF(未标定) | OTR 0
+[adc] 扫压   偏压   2.099 V | A/INA tick-2 幅值  0.0001 V,峰峰     4 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs    77.673 pF(未标定) | OTR 0
+[adc] 扫压   偏压   2.360 V | A/INA tick-2 幅值  0.0001 V,峰峰     5 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs    48.572 pF(未标定) | OTR 0
+[adc] 扫压   偏压   2.653 V | A/INA tick-2 幅值  0.0000 V,峰峰     8 码 | B/INB tick+5 幅值  0.0000 V,峰峰     5 码 | Cs   246.144 pF(未标定) | OTR 0
+[adc] 扫压   偏压   2.982 V | A/INA tick-2 幅值  0.0000 V,峰峰     4 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs   177.688 pF(未标定) | OTR 0
+[adc] 扫压   偏压   3.353 V | A/INA tick-2 幅值  0.0001 V,峰峰     6 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs    65.843 pF(未标定) | OTR 0
+[adc] 扫压   偏压   3.769 V | A/INA tick-2 幅值  0.0000 V,峰峰     8 码 | B/INB tick+5 幅值  0.0001 V,峰峰     3 码 | Cs   362.581 pF(未标定) | OTR 0
+[adc] 扫压   偏压   4.238 V | A/INA tick-2 幅值  0.0000 V,峰峰     6 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs    75.939 pF(未标定) | OTR 0
+[adc] 扫压   偏压   4.764 V | A/INA tick-2 幅值  0.0000 V,峰峰     6 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs   116.399 pF(未标定) | OTR 0
+[adc] 扫压   偏压   5.356 V | A/INA tick-2 幅值  0.0000 V,峰峰     4 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs   248.319 pF(未标定) | OTR 0
+[adc] 扫压   偏压   6.021 V | A/INA tick-2 幅值  0.0000 V,峰峰     3 码 | B/INB tick+5 幅值  0.0001 V,峰峰     3 码 | Cs  1243.061 pF(未标定) | OTR 0
+[adc] 扫压   偏压   6.769 V | A/INA tick-2 幅值  0.0000 V,峰峰     6 码 | B/INB tick+5 幅值  0.0001 V,峰峰     4 码 | Cs   650.770 pF(未标定) | OTR 0
+[adc] 扫压   偏压   7.609 V | A/INA tick-2 幅值  0.0000 V,峰峰     9 码 | B/INB tick+5 幅值  0.0001 V,峰峰     4 码 | Cs  2138.801 pF(未标定) | OTR 0
+[adc] 扫压   偏压   8.555 V | A/INA tick-2 幅值  0.0001 V,峰峰     9 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs    21.466 pF(未标定) | OTR 0
+[adc] 扫压   偏压   9.617 V | A/INA tick-2 幅值  0.0000 V,峰峰     9 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs   130.917 pF(未标定) | OTR 0
+[adc] 扫压   偏压  10.812 V | A/INA tick-2 幅值  0.0001 V,峰峰     8 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs   111.837 pF(未标定) | OTR 0
+[adc] 扫压   偏压  12.155 V | A/INA tick-2 幅值  0.0000 V,峰峰     6 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs   143.241 pF(未标定) | OTR 0
+[adc] 扫压   偏压  13.664 V | A/INA tick-2 幅值  0.0000 V,峰峰     8 码 | B/INB tick+5 幅值  0.0001 V,峰峰     3 码 | Cs   394.680 pF(未标定) | OTR 0
+[adc] 扫压   偏压  15.362 V | A/INA tick-2 幅值  0.0000 V,峰峰     7 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs   240.324 pF(未标定) | OTR 0
+[adc] 扫压   偏压  17.270 V | A/INA tick-2 幅值  0.0002 V,峰峰    10 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs    37.958 pF(未标定) | OTR 0
+[adc] 扫压   偏压  19.415 V | A/INA tick-2 幅值  0.0000 V,峰峰     9 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs   135.872 pF(未标定) | OTR 0
+[adc] 扫压   偏压  21.826 V | A/INA tick-2 幅值  0.0000 V,峰峰     3 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs   383.944 pF(未标定) | OTR 0
+[adc] 扫压   偏压  24.538 V | A/INA tick-2 幅值  0.0000 V,峰峰     8 码 | B/INB tick+5 幅值  0.0001 V,峰峰     3 码 | Cs   403.315 pF(未标定) | OTR 0
+[adc] 扫压   偏压  27.585 V | A/INA tick-2 幅值  0.0000 V,峰峰     7 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs   136.827 pF(未标定) | OTR 0
+[adc] 扫压   偏压  31.012 V | A/INA tick-2 幅值  0.0000 V,峰峰     4 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs   201.062 pF(未标定) | OTR 0
+[adc] 扫压   偏压  34.864 V | A/INA tick-2 幅值  0.0000 V,峰峰     3 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs   138.444 pF(未标定) | OTR 0
+[adc] 扫压   偏压  39.194 V | A/INA tick-2 幅值  0.0000 V,峰峰     5 码 | B/INB tick+5 幅值  0.0001 V,峰峰     4 码 | Cs   462.942 pF(未标定) | OTR 0
+[adc] 扫压   偏压  44.062 V | A/INA tick-2 幅值  0.0000 V,峰峰     4 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs   579.514 pF(未标定) | OTR 0
+[adc] 扫压   偏压  49.535 V | A/INA tick-2 幅值  0.0001 V,峰峰     8 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs    59.270 pF(未标定) | OTR 0
+[adc] 扫压   偏压  55.688 V | A/INA tick-2 幅值  0.0001 V,峰峰     6 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs    78.652 pF(未标定) | OTR 0
+[adc] 扫压   偏压  62.605 V | A/INA tick-2 幅值  0.0000 V,峰峰     9 码 | B/INB tick+5 幅值  0.0001 V,峰峰     3 码 | Cs   209.540 pF(未标定) | OTR 0
+[adc] 扫压   偏压  70.381 V | A/INA tick-2 幅值  0.0000 V,峰峰     6 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs   199.166 pF(未标定) | OTR 0
+[adc] 扫压   偏压  79.123 V | A/INA tick-2 幅值  0.0001 V,峰峰     3 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs    24.718 pF(未标定) | OTR 0
+[adc] 扫压   偏压  88.951 V | A/INA tick-2 幅值  0.0001 V,峰峰     6 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs    20.202 pF(未标定) | OTR 0
+[adc] 扫压   偏压 100.000 V | A/INA tick-2 幅值  0.0000 V,峰峰     8 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs    60.353 pF(未标定) | OTR 0
+[proto] 扫压结束:60 点已下发到 DAC
+[touch] 按下 (996,85) 点数 1
+[touch] 抬起
+[touch] 按下 (979,228) 点数 1
+[touch] 抬起
+[touch] 按下 (966,404) 点数 1
+[touch] 抬起
+[proto] 扫压开始:CRSS,0.10 V → 100.00 V,60 点,每点 300 ms
+        Cs 取**真实 ADC 数据**的幅值比(未标定);Cp/D 无相位,不填
+[adc] 扫压   偏压   0.100 V | A/INA tick-2 幅值  0.0001 V,峰峰     3 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs   106.849 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.112 V | A/INA tick-2 幅值  0.0000 V,峰峰     4 码 | B/INB tick+5 幅值  0.0001 V,峰峰     4 码 | Cs   815.141 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.126 V | A/INA tick-2 幅值  0.0000 V,峰峰     7 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs  1007.554 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.142 V | A/INA tick-2 幅值  0.0001 V,峰峰     6 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs    36.789 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.160 V | A/INA tick-2 幅值  0.0000 V,峰峰     7 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs    42.533 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.180 V | A/INA tick-2 幅值  0.0000 V,峰峰     4 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs   175.033 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.202 V | A/INA tick-2 幅值  0.0001 V,峰峰     9 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs    30.737 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.227 V | A/INA tick-2 幅值  0.0000 V,峰峰     7 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs    86.382 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.255 V | A/INA tick-2 幅值  0.0001 V,峰峰     9 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs    61.687 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.287 V | A/INA tick-2 幅值  0.0000 V,峰峰     4 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs   419.929 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.322 V | A/INA tick-2 幅值  0.0000 V,峰峰     8 码 | B/INB tick+5 幅值  0.0001 V,峰峰     3 码 | Cs   216.170 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.363 V | A/INA tick-2 幅值  0.0001 V,峰峰     7 码 | B/INB tick+5 幅值  0.0001 V,峰峰     3 码 | Cs   180.920 pF(未标定) | OTR 0
+[touch] 按下 (1005,89) 点数 1
+[touch] 抬起
+[adc] 扫压   偏压   0.408 V | A/INA tick-2 幅值  0.0000 V,峰峰     7 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs    71.667 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.458 V | A/INA tick-2 幅值  0.0001 V,峰峰     4 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs    23.138 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.515 V | A/INA tick-2 幅值  0.0000 V,峰峰     3 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs  2068.641 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.579 V | A/INA tick-2 幅值  0.0000 V,峰峰     6 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs   311.834 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.651 V | A/INA tick-2 幅值  0.0000 V,峰峰     8 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs   132.292 pF(未标定) | OTR 0
+[touch] 按下 (964,171) 点数 1
+[touch] 抬起
+[adc] 扫压   偏压   0.732 V | A/INA tick-2 幅值  0.0001 V,峰峰     4 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs    87.278 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.823 V | A/INA tick-2 幅值  0.0000 V,峰峰     6 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs   114.892 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.925 V | A/INA tick-2 幅值  0.0000 V,峰峰     4 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs    79.318 pF(未标定) | OTR 0
+[adc] 扫压   偏压   1.040 V | A/INA tick-2 幅值  0.0000 V,峰峰     4 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs   132.659 pF(未标定) | OTR 0
+[adc] 扫压   偏压   1.169 V | A/INA tick-2 幅值  0.0000 V,峰峰     6 码 | B/INB tick+5 幅值  0.0001 V,峰峰     4 码 | Cs   255.895 pF(未标定) | OTR 0
+[adc] 扫压   偏压   1.314 V | A/INA tick-2 幅值  0.0000 V,峰峰     6 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs    48.217 pF(未标定) | OTR 0
+[adc] 扫压   偏压   1.477 V | A/INA tick-2 幅值  0.0000 V,峰峰     7 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs   135.158 pF(未标定) | OTR 0
+[adc] 扫压   偏压   1.661 V | A/INA tick-2 幅值  0.0000 V,峰峰     9 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs   120.741 pF(未标定) | OTR 0
+[adc] 扫压   偏压   1.867 V | A/INA tick-2 幅值  0.0000 V,峰峰     6 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs   199.338 pF(未标定) | OTR 0
+[touch] 按下 (966,474) 点数 1
+[touch] 抬起
+[proto] 停止扫压:已下发 27/60 点,偏压停在 2.10 V
+[touch] 按下 (952,406) 点数 1
+[touch] 抬起
+[proto] 扫压开始:COSS,0.10 V → 100.00 V,60 点,每点 300 ms
+        Cs 取**真实 ADC 数据**的幅值比(未标定);Cp/D 无相位,不填
+[adc] 扫压   偏压   0.100 V | A/INA tick-2 幅值  0.0000 V,峰峰     4 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs   247.907 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.112 V | A/INA tick-2 幅值  0.0000 V,峰峰     4 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs   101.342 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.126 V | A/INA tick-2 幅值  0.0000 V,峰峰     8 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs  2086.775 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.142 V | A/INA tick-2 幅值  0.0001 V,峰峰     6 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs    61.003 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.160 V | A/INA tick-2 幅值  0.0001 V,峰峰     3 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs   110.046 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.180 V | A/INA tick-2 幅值  0.0000 V,峰峰     8 码 | B/INB tick+5 幅值  0.0001 V,峰峰     4 码 | Cs   312.689 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.202 V | A/INA tick-2 幅值  0.0000 V,峰峰     3 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs   320.639 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.227 V | A/INA tick-2 幅值  0.0001 V,峰峰     9 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs    84.820 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.255 V | A/INA tick-2 幅值  0.0000 V,峰峰     8 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs   303.365 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.287 V | A/INA tick-2 幅值  0.0000 V,峰峰     5 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs    96.923 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.322 V | A/INA tick-2 幅值  0.0001 V,峰峰     7 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs    61.646 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.363 V | A/INA tick-2 幅值  0.0000 V,峰峰     9 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs   140.605 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.408 V | A/INA tick-2 幅值  0.0000 V,峰峰     6 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs   160.117 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.458 V | A/INA tick-2 幅值  0.0000 V,峰峰     7 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs   148.798 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.515 V | A/INA tick-2 幅值  0.0000 V,峰峰     6 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs    58.128 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.579 V | A/INA tick-2 幅值  0.0000 V,峰峰     6 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs   147.515 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.651 V | A/INA tick-2 幅值  0.0000 V,峰峰     8 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs   172.039 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.732 V | A/INA tick-2 幅值  0.0000 V,峰峰     6 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs   241.820 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.823 V | A/INA tick-2 幅值  0.0001 V,峰峰     8 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs    37.796 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.925 V | A/INA tick-2 幅值  0.0001 V,峰峰    13 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs    40.811 pF(未标定) | OTR 0
+[adc] 扫压   偏压   1.040 V | A/INA tick-2 幅值  0.0001 V,峰峰     7 码 | B/INB tick+5 幅值  0.0001 V,峰峰     3 码 | Cs   172.218 pF(未标定) | OTR 0
+[adc] 扫压   偏压   1.169 V | A/INA tick-2 幅值  0.0001 V,峰峰     4 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs   126.032 pF(未标定) | OTR 0
+[adc] 扫压   偏压   1.314 V | A/INA tick-2 幅值  0.0001 V,峰峰    11 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs   113.901 pF(未标定) | OTR 0
+[adc] 扫压   偏压   1.477 V | A/INA tick-2 幅值  0.0000 V,峰峰     6 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs   201.337 pF(未标定) | OTR 0
+[adc] 扫压   偏压   1.661 V | A/INA tick-2 幅值  0.0000 V,峰峰     3 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs   143.491 pF(未标定) | OTR 0
+[adc] 扫压   偏压   1.867 V | A/INA tick-2 幅值  0.0000 V,峰峰     8 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs   170.872 pF(未标定) | OTR 0
+[adc] 扫压   偏压   2.099 V | A/INA tick-2 幅值  0.0001 V,峰峰     8 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs   144.833 pF(未标定) | OTR 0
+[adc] 扫压   偏压   2.360 V | A/INA tick-2 幅值  0.0000 V,峰峰     5 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs   185.280 pF(未标定) | OTR 0
+[adc] 扫压   偏压   2.653 V | A/INA tick-2 幅值  0.0000 V,峰峰     4 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs    97.261 pF(未标定) | OTR 0
+[adc] 扫压   偏压   2.982 V | A/INA tick-2 幅值  0.0001 V,峰峰     6 码 | B/INB tick+5 幅值  0.0001 V,峰峰     5 码 | Cs    98.275 pF(未标定) | OTR 0
+[adc] 扫压   偏压   3.353 V | A/INA tick-2 幅值  0.0001 V,峰峰     8 码 | B/INB tick+5 幅值  0.0001 V,峰峰     3 码 | Cs   104.995 pF(未标定) | OTR 0
+[adc] 扫压   偏压   3.769 V | A/INA tick-2 幅值  0.0001 V,峰峰     6 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs    64.041 pF(未标定) | OTR 0
+[adc] 扫压   偏压   4.238 V | A/INA tick-2 幅值  0.0000 V,峰峰     7 码 | B/INB tick+5 幅值  0.0001 V,峰峰     4 码 | Cs   347.327 pF(未标定) | OTR 0
+[adc] 扫压   偏压   4.764 V | A/INA tick-2 幅值  0.0000 V,峰峰     8 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs   170.053 pF(未标定) | OTR 0
+[adc] 扫压   偏压   5.356 V | A/INA tick-2 幅值  0.0001 V,峰峰     5 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs    31.539 pF(未标定) | OTR 0
+[adc] 扫压   偏压   6.021 V | A/INA tick-2 幅值  0.0001 V,峰峰     7 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs    97.145 pF(未标定) | OTR 0
+[adc] 扫压   偏压   6.769 V | A/INA tick-2 幅值  0.0001 V,峰峰     7 码 | B/INB tick+5 幅值  0.0001 V,峰峰     5 码 | Cs   110.832 pF(未标定) | OTR 0
+[adc] 扫压   偏压   7.609 V | A/INA tick-2 幅值  0.0001 V,峰峰     5 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs    80.363 pF(未标定) | OTR 0
+[adc] 扫压   偏压   8.555 V | A/INA tick-2 幅值  0.0001 V,峰峰     9 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs    58.522 pF(未标定) | OTR 0
+[adc] 扫压   偏压   9.617 V | A/INA tick-2 幅值  0.0001 V,峰峰     8 码 | B/INB tick+5 幅值  0.0001 V,峰峰     4 码 | Cs   141.387 pF(未标定) | OTR 0
+[adc] 扫压   偏压  10.812 V | A/INA tick-2 幅值  0.0001 V,峰峰     3 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs    32.871 pF(未标定) | OTR 0
+[adc] 扫压   偏压  12.155 V | A/INA tick-2 幅值  0.0001 V,峰峰     8 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs    50.180 pF(未标定) | OTR 0
+[adc] 扫压   偏压  13.664 V | A/INA tick-2 幅值  0.0000 V,峰峰     8 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs   100.964 pF(未标定) | OTR 0
+[adc] 扫压   偏压  15.362 V | A/INA tick-2 幅值  0.0003 V,峰峰     9 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs    12.539 pF(未标定) | OTR 0
+[adc] 扫压   偏压  17.270 V | A/INA tick-2 幅值  0.0000 V,峰峰     5 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs   180.845 pF(未标定) | OTR 0
+[adc] 扫压   偏压  19.415 V | A/INA tick-2 幅值  0.0000 V,峰峰     5 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs   348.886 pF(未标定) | OTR 0
+[adc] 扫压   偏压  21.826 V | A/INA tick-2 幅值  0.0000 V,峰峰     5 码 | B/INB tick+5 幅值  0.0001 V,峰峰     3 码 | Cs   976.854 pF(未标定) | OTR 0
+[adc] 扫压   偏压  24.538 V | A/INA tick-2 幅值  0.0000 V,峰峰     9 码 | B/INB tick+5 幅值  0.0001 V,峰峰     4 码 | Cs   190.692 pF(未标定) | OTR 0
+[adc] 扫压   偏压  27.585 V | A/INA tick-2 幅值  0.0000 V,峰峰     4 码 | B/INB tick+5 幅值  0.0001 V,峰峰     4 码 | Cs   188.196 pF(未标定) | OTR 0
+[adc] 扫压   偏压  31.012 V | A/INA tick-2 幅值  0.0000 V,峰峰     4 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs   297.584 pF(未标定) | OTR 0
+[adc] 扫压   偏压  34.864 V | A/INA tick-2 幅值  0.0000 V,峰峰     5 码 | B/INB tick+5 幅值  0.0001 V,峰峰     4 码 | Cs   295.808 pF(未标定) | OTR 0
+[adc] 扫压   偏压  39.194 V | A/INA tick-2 幅值  0.0001 V,峰峰     4 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs    85.712 pF(未标定) | OTR 0
+[adc] 扫压   偏压  44.062 V | A/INA tick-2 幅值  0.0001 V,峰峰    10 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs     7.151 pF(未标定) | OTR 0
+[adc] 扫压   偏压  49.535 V | A/INA tick-2 幅值  0.0001 V,峰峰     7 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs    48.926 pF(未标定) | OTR 0
+[adc] 扫压   偏压  55.688 V | A/INA tick-2 幅值  0.0000 V,峰峰     8 码 | B/INB tick+5 幅值  0.0001 V,峰峰     5 码 | Cs   341.467 pF(未标定) | OTR 0
+[adc] 扫压   偏压  62.605 V | A/INA tick-2 幅值  0.0000 V,峰峰     4 码 | B/INB tick+5 幅值  0.0001 V,峰峰     4 码 | Cs   211.206 pF(未标定) | OTR 0
+[adc] 扫压   偏压  70.381 V | A/INA tick-2 幅值  0.0000 V,峰峰     4 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs   101.681 pF(未标定) | OTR 0
+[adc] 扫压   偏压  79.123 V | A/INA tick-2 幅值  0.0001 V,峰峰     6 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs    23.522 pF(未标定) | OTR 0
+[adc] 扫压   偏压  88.951 V | A/INA tick-2 幅值  0.0000 V,峰峰     5 码 | B/INB tick+5 幅值  0.0001 V,峰峰     3 码 | Cs   389.941 pF(未标定) | OTR 0
+[adc] 扫压   偏压 100.000 V | A/INA tick-2 幅值  0.0000 V,峰峰     3 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs    47.626 pF(未标定) | OTR 0
+[proto] 扫压结束:60 点已下发到 DAC
+[touch] 按下 (49,9) 点数 1
+[touch] 抬起
+[touch] 按下 (643,231) 点数 1
+[touch] 抬起
+[touch] 按下 (45,27) 点数 1
+[touch] 抬起
+[touch] 按下 (721,382) 点数 1
+[touch] 抬起
+[touch] 按下 (530,78) 点数 1
+[touch] 抬起
+[touch] 按下 (726,93) 点数 1
+[touch] 抬起
+[touch] 按下 (986,107) 点数 1
+[touch] 抬起
+[touch] 按下 (974,79) 点数 1
+[touch] 抬起
+[touch] 按下 (687,114) 点数 1
+[touch] 抬起
+[touch] 按下 (541,81) 点数 1
+[touch] 抬起
+[touch] 按下 (53,49) 点数 1
+[touch] 抬起
+[touch] 按下 (59,27) 点数 1
+[touch] 抬起
+[touch] 按下 (404,376) 点数 1
+[touch] 抬起
+[touch] 按下 (994,91) 点数 1
+[touch] 抬起
+[touch] 按下 (961,292) 点数 1
+[touch] 抬起
+[touch] 按下 (985,412) 点数 1
+[touch] 抬起
+[proto] 先测 RG:继电器未实现,跳过;**只跑三路扫压**
+[proto] 扫压开始:CISS+COSS+CRSS,0.10 V → 100.00 V,60 点,每点 300 ms
+        Cs 取**真实 ADC 数据**的幅值比(未标定);Cp/D 无相位,不填
+[adc] 扫压   偏压   0.100 V | A/INA tick-2 幅值  0.0001 V,峰峰     3 码 | B/INB tick+5 幅值  0.0001 V,峰峰     3 码 | Cs    95.476 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.112 V | A/INA tick-2 幅值  0.0000 V,峰峰     4 码 | B/INB tick+5 幅值  0.0001 V,峰峰     3 码 | Cs   235.419 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.126 V | A/INA tick-2 幅值  0.0001 V,峰峰     8 码 | B/INB tick+5 幅值  0.0001 V,峰峰     3 码 | Cs   217.705 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.142 V | A/INA tick-2 幅值  0.0000 V,峰峰     4 码 | B/INB tick+5 幅值  0.0001 V,峰峰     3 码 | Cs   178.408 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.160 V | A/INA tick-2 幅值  0.0001 V,峰峰     9 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs    38.408 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.180 V | A/INA tick-2 幅值  0.0000 V,峰峰     4 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs   156.490 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.202 V | A/INA tick-2 幅值  0.0000 V,峰峰     7 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs    57.320 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.227 V | A/INA tick-2 幅值  0.0000 V,峰峰     4 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs    67.782 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.255 V | A/INA tick-2 幅值  0.0000 V,峰峰     4 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs   207.305 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.287 V | A/INA tick-2 幅值  0.0001 V,峰峰     9 码 | B/INB tick+5 幅值  0.0000 V,峰峰     5 码 | Cs    37.052 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.322 V | A/INA tick-2 幅值  0.0000 V,峰峰     7 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs    50.539 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.363 V | A/INA tick-2 幅值  0.0001 V,峰峰     8 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs   119.387 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.408 V | A/INA tick-2 幅值  0.0000 V,峰峰     8 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs   181.594 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.458 V | A/INA tick-2 幅值  0.0000 V,峰峰    11 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs    89.957 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.515 V | A/INA tick-2 幅值  0.0001 V,峰峰     9 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs    42.527 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.579 V | A/INA tick-2 幅值  0.0001 V,峰峰     7 码 | B/INB tick+5 幅值  0.0001 V,峰峰     4 码 | Cs    99.818 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.651 V | A/INA tick-2 幅值  0.0000 V,峰峰     5 码 | B/INB tick+5 幅值  0.0001 V,峰峰     3 码 | Cs   498.705 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.732 V | A/INA tick-2 幅值  0.0001 V,峰峰     9 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs   119.423 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.823 V | A/INA tick-2 幅值  0.0000 V,峰峰     8 码 | B/INB tick+5 幅值  0.0001 V,峰峰     4 码 | Cs   430.432 pF(未标定) | OTR 0
+[adc] 扫压   偏压   0.925 V | A/INA tick-2 幅值  0.0001 V,峰峰    12 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs    31.381 pF(未标定) | OTR 0
+[adc] 扫压   偏压   1.040 V | A/INA tick-2 幅值  0.0000 V,峰峰     5 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs    55.088 pF(未标定) | OTR 0
+[adc] 扫压   偏压   1.169 V | A/INA tick-2 幅值  0.0000 V,峰峰     5 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs    34.939 pF(未标定) | OTR 0
+[adc] 扫压   偏压   1.314 V | A/INA tick-2 幅值  0.0001 V,峰峰     3 码 | B/INB tick+5 幅值  0.0001 V,峰峰     3 码 | Cs   263.943 pF(未标定) | OTR 0
+[adc] 扫压   偏压   1.477 V | A/INA tick-2 幅值  0.0000 V,峰峰     4 码 | B/INB tick+5 幅值  0.0001 V,峰峰     4 码 | Cs   352.482 pF(未标定) | OTR 0
+[adc] 扫压   偏压   1.661 V | A/INA tick-2 幅值  0.0000 V,峰峰     6 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs    99.750 pF(未标定) | OTR 0
+[adc] 扫压   偏压   1.867 V | A/INA tick-2 幅值  0.0000 V,峰峰     8 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs   154.488 pF(未标定) | OTR 0
+[adc] 扫压   偏压   2.099 V | A/INA tick-2 幅值  0.0000 V,峰峰     9 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs    67.258 pF(未标定) | OTR 0
+[adc] 扫压   偏压   2.360 V | A/INA tick-2 幅值  0.0001 V,峰峰     5 码 | B/INB tick+5 幅值  0.0000 V,峰峰     5 码 | Cs    20.300 pF(未标定) | OTR 0
+[adc] 扫压   偏压   2.653 V | A/INA tick-2 幅值  0.0001 V,峰峰    10 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs    78.153 pF(未标定) | OTR 0
+[adc] 扫压   偏压   2.982 V | A/INA tick-2 幅值  0.0000 V,峰峰     7 码 | B/INB tick+5 幅值  0.0001 V,峰峰     3 码 | Cs   282.045 pF(未标定) | OTR 0
+[adc] 扫压   偏压   3.353 V | A/INA tick-2 幅值  0.0000 V,峰峰     4 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs   134.056 pF(未标定) | OTR 0
+[adc] 扫压   偏压   3.769 V | A/INA tick-2 幅值  0.0000 V,峰峰     8 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs   195.099 pF(未标定) | OTR 0
+[adc] 扫压   偏压   4.238 V | A/INA tick-2 幅值  0.0000 V,峰峰     4 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs   157.437 pF(未标定) | OTR 0
+[adc] 扫压   偏压   4.764 V | A/INA tick-2 幅值  0.0001 V,峰峰     4 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs   109.010 pF(未标定) | OTR 0
+[adc] 扫压   偏压   5.356 V | A/INA tick-2 幅值  0.0001 V,峰峰     4 码 | B/INB tick+5 幅值  0.0001 V,峰峰     4 码 | Cs   245.190 pF(未标定) | OTR 0
+[adc] 扫压   偏压   6.021 V | A/INA tick-2 幅值  0.0000 V,峰峰     4 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs    55.822 pF(未标定) | OTR 0
+[adc] 扫压   偏压   6.769 V | A/INA tick-2 幅值  0.0000 V,峰峰     6 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs   111.325 pF(未标定) | OTR 0
+[adc] 扫压   偏压   7.609 V | A/INA tick-2 幅值  0.0000 V,峰峰     4 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs   115.760 pF(未标定) | OTR 0
+[adc] 扫压   偏压   8.555 V | A/INA tick-2 幅值  0.0000 V,峰峰     8 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs   123.276 pF(未标定) | OTR 0
+[adc] 扫压   偏压   9.617 V | A/INA tick-2 幅值  0.0001 V,峰峰     5 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs    66.614 pF(未标定) | OTR 0
+[adc] 扫压   偏压  10.812 V | A/INA tick-2 幅值  0.0000 V,峰峰    10 码 | B/INB tick+5 幅值  0.0001 V,峰峰     4 码 | Cs   491.094 pF(未标定) | OTR 0
+[adc] 扫压   偏压  12.155 V | A/INA tick-2 幅值  0.0000 V,峰峰     7 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs    68.681 pF(未标定) | OTR 0
+[adc] 扫压   偏压  13.664 V | A/INA tick-2 幅值  0.0000 V,峰峰     9 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs   433.543 pF(未标定) | OTR 0
+[adc] 扫压   偏压  15.362 V | A/INA tick-2 幅值  0.0000 V,峰峰     6 码 | B/INB tick+5 幅值  0.0001 V,峰峰     4 码 | Cs   563.646 pF(未标定) | OTR 0
+[adc] 扫压   偏压  17.270 V | A/INA tick-2 幅值  0.0000 V,峰峰     3 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs   190.715 pF(未标定) | OTR 0
+[adc] 扫压   偏压  19.415 V | A/INA tick-2 幅值  0.0000 V,峰峰     3 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs    62.890 pF(未标定) | OTR 0
+[adc] 扫压   偏压  21.826 V | A/INA tick-2 幅值  0.0001 V,峰峰     5 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs    65.334 pF(未标定) | OTR 0
+[adc] 扫压   偏压  24.538 V | A/INA tick-2 幅值  0.0000 V,峰峰    10 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs   285.903 pF(未标定) | OTR 0
+[adc] 扫压   偏压  27.585 V | A/INA tick-2 幅值  0.0001 V,峰峰     5 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs    73.594 pF(未标定) | OTR 0
+[adc] 扫压   偏压  31.012 V | A/INA tick-2 幅值  0.0001 V,峰峰     7 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs    49.819 pF(未标定) | OTR 0
+[adc] 扫压   偏压  34.864 V | A/INA tick-2 幅值  0.0000 V,峰峰     7 码 | B/INB tick+5 幅值  0.0001 V,峰峰     3 码 | Cs   165.810 pF(未标定) | OTR 0
+[adc] 扫压   偏压  39.194 V | A/INA tick-2 幅值  0.0000 V,峰峰     4 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs   130.944 pF(未标定) | OTR 0
+[adc] 扫压   偏压  44.062 V | A/INA tick-2 幅值  0.0000 V,峰峰     8 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs   172.718 pF(未标定) | OTR 0
+[adc] 扫压   偏压  49.535 V | A/INA tick-2 幅值  0.0000 V,峰峰     4 码 | B/INB tick+5 幅值  0.0001 V,峰峰     4 码 | Cs   915.724 pF(未标定) | OTR 0
+[adc] 扫压   偏压  55.688 V | A/INA tick-2 幅值  0.0001 V,峰峰     7 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs    30.559 pF(未标定) | OTR 0
+[adc] 扫压   偏压  62.605 V | A/INA tick-2 幅值  0.0000 V,峰峰     5 码 | B/INB tick+5 幅值  0.0001 V,峰峰     4 码 | Cs   274.953 pF(未标定) | OTR 0
+[adc] 扫压   偏压  70.381 V | A/INA tick-2 幅值  0.0000 V,峰峰     6 码 | B/INB tick+5 幅值  0.0000 V,峰峰     3 码 | Cs    25.383 pF(未标定) | OTR 0
+[adc] 扫压   偏压  79.123 V | A/INA tick-2 幅值  0.0000 V,峰峰     8 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs   303.751 pF(未标定) | OTR 0
+[adc] 扫压   偏压  88.951 V | A/INA tick-2 幅值  0.0000 V,峰峰     6 码 | B/INB tick+5 幅值  0.0001 V,峰峰     3 码 | Cs   303.932 pF(未标定) | OTR 0
+[adc] 扫压   偏压 100.000 V | A/INA tick-2 幅值  0.0000 V,峰峰     3 码 | B/INB tick+5 幅值  0.0000 V,峰峰     4 码 | Cs    82.908 pF(未标定) | OTR 0
+[proto] 扫压结束:60 点已下发到 DAC
+[touch] 按下 (54,22) 点数 1
+[touch] 抬起
+[touch] 按下 (719,362) 点数 1
+[touch] 抬起
+
+[main] 收到退出信号,收尾…
+
+──── c_ui 统计 ────
+  disp  flush=938  换址=938  矩形同步=1450  flush错=0  换址超时=0  最近错误=0
+  前台物理地址 = 0x38100000
+  touch 轮询=96139  新帧=1112  错误=1  越界点=0  LVGL读取=52721
+  touch 末态 seq=45 count=0 pen=0 err=1 raw68=0x00002D10
+  UI    点击=90  页面=4  等读数的测量指令=17
+  模拟前端  偏压写=342  回读核对失败=0
+  ADC 采集  成功=332  失败=5
+  0x64 = 0x000D53E4  underrun=1  axierr=0  vblank_cnt=249  swap_cnt=170
+  ⚠️  underrun 已置起(粘滞,写 0x60 清):PL 取数时帧缓存还没备好。
+      上板判据是「跑 60 s 后必须为 0」,见 display_probe.py。
+───────────────────
+[main] 屏已切回厂商彩条(0x50 = 0)

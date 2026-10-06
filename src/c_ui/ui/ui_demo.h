@@ -43,6 +43,11 @@ uint32_t UI_Demo_GetSweepEndTenths(void);
 /* 协议层在LVGL主循环上下文中调用以下接口更新界面。 */
 void UI_Demo_SetConnection(uint32_t online);
 void UI_Demo_SetStatusText(const char *text);
+/* 🆕 2026-10-06:「系统复位」页、复位按钮**正下方**的常驻一行。
+   显示测量参数当前值(激励频率 / 采样率 / 相位),由 MeasureConfig 每次改动后刷新。
+   ⚠️ 与表头的 SetStatusText 不是一回事:那个在顶栏、每页都有、显示操作结果;
+   这个是本页专属的参数读数,常驻不消失。 */
+void UI_Demo_SetInitStatusText(const char *text);
 void UI_Demo_SetActualBias(const char *bias_text);
 void UI_Demo_SetActualPath(const char *path_text);
 void UI_Demo_UpdateSingleCapacitance(uint32_t path,
@@ -69,6 +74,14 @@ void UI_Demo_UpdateWaveformPoint(uint32_t kind,
                                  float voltage_v,
                                  float current_ma,
                                  const char *index_text);
+
+/* 🆕 2026-10-06:把上面两组数据**重画到结果页上**。
+   🔴 为什么需要这个导出:`UI_ResultsRefresh()` 是 `static`,只在"进结果页 /
+   切页签"时跑。数据喂进 `g_result_wave[]` / 扫压曲线之后**不会自动重绘**,
+   屏上就出现"数据是新的、画的是旧的"。协议层每轮采集完调一次这个。
+   ⚠️ 结果页**还没构建**时是空操作(内部 `g_results_built` 已挡住)—— 所以
+   在任何页面下调用都安全。 */
+void UI_Demo_RefreshResultViews(void);
 
 void UI_Demo_ClearAllResults(void);
 void UI_Demo_ClearSweep(uint32_t path_or_all);

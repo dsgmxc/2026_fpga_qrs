@@ -210,7 +210,41 @@ module cv_sys #(
     output wire        dac_mosi,    // → DAC1220 SDIO  (J4-34 / Y14 / BANK34)
     output wire        dds_sclk,    // → AD9833  SCLK  (J4-4  / T5  / BANK13)
     output wire        dds_sync,    // → AD9833  FSYNC (J4-6  / U7  / BANK13)
-    output wire        dds_data     // → AD9833  SDATA (J4-2  / T11 / BANK34)
+    output wire        dds_data,    // → AD9833  SDATA (J4-2  / T11 / BANK34)
+
+    //-------------------------------------------------------------------------
+    //  AD9238 高速 ADC(2026-10-06 加)—— 16 根
+    //
+    //  ⚠️ 球号【由用户在板上实际接线后报出】,而且**报了两遍**:
+    //     第一版有 y11 用两次(d1/d3)、w6 用两次(d11/otr)的重复,
+    //     与"模块排针总共 16 个信号"对不上;用户核对后给了下面这版无重复的。
+    //     ⇒ 这是本项目继 DAC/DDS 之后**第二处"接线先于约束"**的信号组。
+    //     引脚约束写在 qrs.srcs/constrs_1/new/led.xdc(工程里唯一启用的 xdc)。
+    //
+    //  ⚠️ 15 根在 BANK13,只有 clk(V13/J4-27)在 BANK34 ——
+    //     与 DDS 那三根同样的跨 bank 情形,功能无影响(两 bank 同为 3.3 V)。
+    //
+    //  ⚠️ 本模块是**单通道**接法(12 根数据线 + 1 个时钟)。
+    //     AD9238 芯片本身有 A/B 两个通道、各自 12 位独立输出总线,
+    //     这里只用其中一组。将来要双通道(DLIA 的 Z 反演要 MAG_A/MAG_B)
+    //     就得再引 12~15 根线 —— 那是硬件侧动作,PL 侧本版不做。
+    //
+    //  ⚠️ `adc_clk` 端口名以 `clk` 结尾 ⇒ IP Integrator 会把它推断成一条
+    //     **输出时钟接口**,不给 FREQ_HZ 会在每次打开 BD 时报
+    //     CRITICAL WARNING: [IP_Flow 19-4751]。这里照 lcd_clk 的既有做法
+    //     只补 X_INTERFACE_PARAMETER、**故意不加 X_INTERFACE_INFO**。
+    //     ⚠️ FREQ_HZ 填的是**上限 65 MHz**,不是复位默认的 10 MHz ——
+    //        它是 BD 侧的静态提示量,取最坏值;实际频率由 0x88 的 DIV 决定。
+    //        (与 lcd_clk 填 50000000 同属一类"设计值口径"。)
+    //     ⛔ 不要因为这里有点别扭就把它改名成 adc_sclk 之类 ——
+    //        它是**真时钟域**,不是 SPI 移位时钟,补 FREQ_HZ 才是对的修法。
+    //-------------------------------------------------------------------------
+    (* X_INTERFACE_PARAMETER = "XIL_INTERFACENAME adc_clk,FREQ_HZ 65000000,PHASE 0.000" *)
+    output wire        adc_clk,     // → AD9238 CLK   (V13 / J4-27)
+    output wire        adc_oe_n,    // → AD9238 OEB   (U13 / J4-28),低有效
+    output wire        adc_pdn,     // → AD9238 PDWN  (V6  / J4-21),高有效
+    input  wire [11:0] adc_d,       // ← AD9238 D0..D11 (W11 Y11 Y12 Y13 V10 V11 W9 W10 Y8 Y9 Y6 Y7)
+    input  wire        adc_otr      // ← AD9238 OTR   (W6  / J4-18)
 );
 
     //=========================================================================
@@ -245,9 +279,20 @@ module cv_sys #(
     // 模拟前端配置(2026-10-05 加)—— 同样必须在从机例化【之前】声明
     wire [31:0] cfg_bias_code;      // 0x14 [19:0] → dac_1220.code
     wire        cfg_bias_set;       // 0x14 写 → 1 拍脉冲 → dac_1220.set_in
-    wire        cfg_dac_rst_n;      // 0x84[0] → 与 s_axi_aresetn 与后驱动 dac_1220.rst_n
+    // 🔴 2026-10-06 由 cfg_dac_rst_n 改名 cfg_clk_release,消费者由 1 个变 2 个:
+    //      · dac_1220.rst_n   (与 s_axi_aresetn 相与)
+    //      · ADC 的 MMCM RST  (取反后驱动,见 §8)
+    //    两者前置条件相同(FCLK0 必须已是 50.000 MHz)⇒ 共用一位。
+    wire        cfg_clk_release;    // 0x84[0] → 时钟就绪放行
     wire [31:0] cfg_dds_freq;       // 0x80 [27:0] → adc_9833.code
     wire        cfg_dds_set;        // 0x80 写 → 1 拍脉冲 → adc_9833.set_in
+
+    // ADC 采集(2026-10-06 加)—— 同样必须在从机例化【之前】声明
+    wire [31:0] cfg_adc_cfg;        // 0x88 [7:0]DIV [15:8]PH_OFF [16]CONT [17]OEB_N [18]PDN
+    wire        cfg_adc_go;         // 0x8C[0] 写 → 1 拍脉冲
+    wire [31:0] cfg_adc_buf_idx;    // 0x94 [11:0] 缓冲读索引
+    wire [31:0] sts_adc_sts;        // 0x90 [0]locked [1]done [2]busy [3]otr
+    wire [31:0] sts_adc_buf_data;   // 0x98 [11:0]采样 [12]OTR
     // dac_1220 的 init_done —— 【回送给从机】给上电脉冲开门。
     //   ⚠️ 方向是从机收、DAC 发,所以它在从机端口表里是 input。
     //      dac_1220 的 set_in 只在 NORMAL_WAIT 状态里才锁存,不等 init_done
@@ -304,10 +349,17 @@ module cv_sys #(
         // 模拟前端(2026-10-05)
         .cfg_bias_code    (cfg_bias_code   ),
         .cfg_bias_set     (cfg_bias_set    ),
-        .cfg_dac_rst_n    (cfg_dac_rst_n   ),
         .cfg_dds_freq     (cfg_dds_freq    ),
         .cfg_dds_set      (cfg_dds_set     ),
-        .dac_init_done    (dac_init_done   )
+        .dac_init_done    (dac_init_done   ),
+
+        // ADC 采集(2026-10-06)
+        .cfg_clk_release  (cfg_clk_release ),
+        .cfg_adc_cfg      (cfg_adc_cfg     ),
+        .cfg_adc_go       (cfg_adc_go      ),
+        .cfg_adc_buf_idx  (cfg_adc_buf_idx ),
+        .sts_adc_sts      (sts_adc_sts     ),
+        .sts_adc_buf_data (sts_adc_buf_data)
     );
 
     //=========================================================================
@@ -585,7 +637,7 @@ module cv_sys #(
         // 🔴 不是 s_axi_aresetn 直连 —— 初始化必须等软件把 FCLK0 补到
         //    50.000 MHz 之后才放行(写 0x84[0]=1)。理由见下面 §上电时序:
         //    三段复位图案是有【双向窗口】的,超上界就完全不复位。
-        .rst_n     (s_axi_aresetn & cfg_dac_rst_n),
+        .rst_n     (s_axi_aresetn & cfg_clk_release),
         .dac_sclk  (dac_sclk            ),
         .dac_cs    (dac_cs              ),
         .dac_mosi  (dac_mosi            ),
@@ -606,5 +658,141 @@ module cv_sys #(
         .set_in    (cfg_dds_set         ),   // 0x80 写脉冲(上电不发,见从机注释)
         .init_done ()                        // 未引出,见上
     );
+
+    //=========================================================================
+    //  8. ADC 采集通路(2026-10-06 新增)
+    //
+    //  【为什么自己例化 MMCME2_ADV,而不是再拉一个 clk_wiz IP】
+    //    ① 本层的章程是"只做例化 + 引线";多一个 IP 就多一个要跟着刷的 .xci;
+    //    ② 参数全是常量,用不上 IP 向导;
+    //    ③ 下面这份例化模板是**从本工程里已 OOC 综合通过的那一份逐字抄的**:
+    //         qrs.gen/sources_1/ip/clk_wiz_0/clk_wiz_0_clk_wiz.v
+    //       ⇒ 端口名与参数名都有出处,不靠记忆拼(这是 2026-10-05 那次
+    //         "刷新 module reference 时才想起端口名以 clk 结尾会被推断"的教训)。
+    //
+    //  【频率账】
+    //     VCO     = CLKIN1 × CLKFBOUT_MULT_F / DIVCLK_DIVIDE
+    //             = 50 MHz × 26.000 / 1 = 1300 MHz
+    //     CLKOUT0 = VCO / CLKOUT0_DIVIDE_F = 1300 / 10.000 = **130 MHz**
+    //
+    //    ⚠️ VCO 1300 MHz 对 xc7z020clg400-**2** 合法(-2 档 MMCM VCO 上限 1440)。
+    //       同一组参数已经在 qrs.runs/clk_wiz_0_synth_1 那次 OOC 综合里跑过本器件。
+    //       ⛔ 若将来换成 **-1** 档(上限 1200),这组参数会超范围 ——
+    //          把 DIVCLK_DIVIDE 改 2、CLKOUT0_DIVIDE_F 改 5(VCO 650 MHz)即可,
+    //          输出频率不变。
+    //
+    //  【为什么 RST 挂在 cfg_clk_release 上,而不是 s_axi_aresetn】
+    //    CLKIN1_PERIOD 硬编码 20 ns(即 50 MHz)。板上 BOOT.BIN 把 FCLK0
+    //    留在 **27.78 MHz** ⇒ VCO 只有 361 MHz,低于 MMCM 下限 600 ⇒ **锁不住**。
+    //    必须等软件 apply_fclk0() 把它改到 50.000 MHz 之后才能锁上。
+    //    ⇒ 与 dac_1220 复用**同一位** cfg_clk_release(0x84[0])。
+    //
+    //    ✅ 失败方向是安全的:FCLK0 若是 27.78 MHz,读 0x90[0] = 0,
+    //       而且 adc_capture 被按在复位态、adc_clk 不输出 —— 不会跑到一个
+    //       频率错误的时钟上产生"看起来有数据但换算全错"的结果。
+    //    ⚠️ 但 adc_clk 此刻是【静止低电平】而不是高阻,ADC 也就不采样。
+    //       要彻底消除这个上电窗口,得重建 BOOT.BIN(原 F1 选项 B,至今未做)。
+    //
+    //  【为什么 CLKOUT0 要过 BUFG】
+    //    MMCM 的 CLKOUTxx 是"时钟信号"但不是"时钟布线资源",直接当域时钟用
+    //    会报时序问题。必须过 BUFG —— clk_wiz 生成的代码每一路都是这么做的。
+    //    反馈同样要过 BUFG(clk_wiz 里那个 clkf_buf),不能直连。
+    //=========================================================================
+    wire clk_adc_raw;
+    wire clk_adc_base;
+    wire clk_fb_raw;
+    wire clk_fb_buf;
+    wire mmcm_locked;
+
+    // MMCM RST 是**高有效**,cfg_clk_release 是"1 = 放行" ⇒ 取反。
+    wire mmcm_rst = ~(s_axi_aresetn & cfg_clk_release);
+
+    MMCME2_ADV #(
+        .BANDWIDTH            ("OPTIMIZED"  ),
+        .CLKOUT4_CASCADE      ("FALSE"      ),
+        .COMPENSATION         ("ZHOLD"      ),
+        .STARTUP_WAIT         ("FALSE"      ),
+        .DIVCLK_DIVIDE        (1            ),
+        .CLKFBOUT_MULT_F      (26.000       ),   // VCO = 50 × 26 / 1 = 1300 MHz
+        .CLKFBOUT_PHASE       (0.000        ),
+        .CLKFBOUT_USE_FINE_PS ("FALSE"      ),
+        .CLKOUT0_DIVIDE_F     (10.000       ),   // 1300 / 10 = 130 MHz
+        .CLKOUT0_PHASE        (0.000        ),
+        .CLKOUT0_DUTY_CYCLE   (0.500        ),
+        .CLKOUT0_USE_FINE_PS  ("FALSE"      ),
+        .CLKIN1_PERIOD        (20.000       )    // ★ 20 ns = 50 MHz,不是 27.78 MHz
+    ) u_adc_mmcm (
+        // 输出时钟 —— 未用的一律不连(命名关联,可以省略)
+        .CLKFBOUT   (clk_fb_raw    ),
+        .CLKOUT0    (clk_adc_raw   ),
+        // 输入时钟控制
+        .CLKFBIN    (clk_fb_buf    ),
+        .CLKIN1     (s_axi_aclk    ),
+        .CLKIN2     (1'b0          ),
+        .CLKINSEL   (1'b1          ),            // 恒选 CLKIN1
+        // 动态重配置口 —— 本设计不用,全部接死
+        .DADDR      (7'h0          ),
+        .DCLK       (1'b0          ),
+        .DEN        (1'b0          ),
+        .DI         (16'h0         ),
+        .DWE        (1'b0          ),
+        // 动态相移口 —— 本设计不用(相位调整走 adc_capture 的 PH_OFF,不是这里)
+        .PSCLK      (1'b0          ),
+        .PSEN       (1'b0          ),
+        .PSINCDEC   (1'b0          ),
+        // 控制与状态
+        .LOCKED     (mmcm_locked   ),
+        .PWRDWN     (1'b0          ),
+        .RST        (mmcm_rst      )
+    );
+
+    BUFG u_adc_fb_buf  (.O(clk_fb_buf  ), .I(clk_fb_raw ));
+    BUFG u_adc_clk_buf (.O(clk_adc_base), .I(clk_adc_raw));
+
+    // ⚠️ ADC 的低有效复位请求 = cfg_clk_release & s_axi_aresetn & mmcm_locked。
+    //    末一项让它**锁不住就保持复位**,而不是让采集逻辑跑在一个
+    //    频率错误的时钟上。adc_capture 内部对它做"异步置位 / 同步释放"。
+    wire adc_rst_n_async = s_axi_aresetn & cfg_clk_release & mmcm_locked;
+
+    adc_capture u_adc_capture (
+        .clk_base        (clk_adc_base       ),
+        .rst_n_async     (adc_rst_n_async    ),
+        .mmcm_locked     (mmcm_locked        ),
+        .clk_axi         (s_axi_aclk         ),
+
+        // cfg_* —— 位域切分:**在这里切**,而不是把 32 位原值整个丢进去。
+        //   ⇒ adc_capture 的端口边界自带契约,读代码的人不用回头查寄存器表。
+        .cfg_div         (cfg_adc_cfg[ 7: 0] ),
+        .cfg_ph_off      (cfg_adc_cfg[15: 8] ),   // 有符号
+        .cfg_cont        (cfg_adc_cfg[16]    ),
+        .cfg_oe_n        (cfg_adc_cfg[17]    ),
+        .cfg_pdn         (cfg_adc_cfg[18]    ),
+        .cfg_go          (cfg_adc_go         ),
+
+        // ADC 物理引脚
+        .adc_clk         (adc_clk            ),
+        .adc_oe_n        (adc_oe_n           ),
+        .adc_pdn         (adc_pdn            ),
+        .adc_d           (adc_d              ),
+        .adc_otr         (adc_otr            ),
+
+        // 状态 → 从机 0x90
+        //   [0] locked [1] done [2] busy [3] otr_sticky,其余保留读 0
+        .sts_mmcm_locked (sts_adc_sts[0]     ),
+        .sts_done        (sts_adc_sts[1]     ),
+        .sts_busy        (sts_adc_sts[2]     ),
+        .sts_otr         (sts_adc_sts[3]     ),
+
+        // 缓冲读口 → 从机 0x94/0x98
+        .rd_idx          (cfg_adc_buf_idx[11:0]),
+        .rd_data         (sts_adc_buf_data[11:0]),
+        .rd_otr          (sts_adc_buf_data[12]  )
+    );
+
+    // sts_adc_sts / sts_adc_buf_data 的【未用高位】显式接 0。
+    //   ⚠️ 不接的话它们悬空,综合出 warning,读回值还不确定 ——
+    //      而"未实现位读 0"是本文件对 0x64~0x7C 立下的既有约定,这里要一致。
+    assign sts_adc_sts[31:4]        = 28'h0;
+    assign sts_adc_buf_data[31:13]  = 19'h0;
 
 endmodule

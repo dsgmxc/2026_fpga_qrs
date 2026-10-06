@@ -12,6 +12,9 @@
 #include "engineering_parameters.h"
 #include "lvgl.h"
 #include "sweep_interpolation.h"
+/* 🆕 2026-10-06:「系统复位」页新增的测量参数控件(激励频率 / 采样率 / 相位)。
+ *    这是本文件相对前序工程的**唯一新增依赖** —— 界面控件调用它,其余四页未动。 */
+#include "measure_config.h"
 
 LV_FONT_DECLARE(ui_font_cn_20);
 LV_FONT_DECLARE(ui_font_cn_28);
@@ -157,6 +160,11 @@ static lv_obj_t *g_engineering_qrcode;
 static lv_obj_t *g_engineering_qr_mode_label;
 static lv_obj_t *g_engineering_qr_status_label;
 static lv_obj_t *g_engineering_qr_model_label;
+/* 🆕 2026-10-06「系统复位」页的测量参数控件与常驻状态行(见 UI_ShowInitialize) */
+static lv_obj_t *g_init_status_label;        /* 复位按钮正下方的常驻一行        */
+static lv_obj_t *g_init_dds_buttons[5];      /* 激励频率档位(0x80)             */
+static lv_obj_t *g_init_div_buttons[5];      /* 采样率档位(0x88 DIV + PH_OFF)  */
+static lv_obj_t *g_init_phase_buttons[3];    /* 相位:−1 / 居中 / +1            */
 static lv_chart_series_t *g_sweep_series[3];
 static lv_obj_t *g_keypad_overlay;
 static lv_obj_t *g_keypad_title_label;
@@ -273,6 +281,11 @@ static void UI_UpdateSingleBiasLabel(void);
 static void UI_UpdateSweepBiasLabel(void);
 static void UI_UpdateCommonStatus(void);
 static void UI_CreateBiasKeypad(void);
+/* 🆕 2026-10-06「系统复位」页的测量参数控件 */
+static void UI_UpdateInitConfigStyle(void);
+static void UI_InitDdsEvent(lv_event_t *event);
+static void UI_InitDivEvent(lv_event_t *event);
+static void UI_InitPhaseEvent(lv_event_t *event);
 static void UI_ActivatePage(UI_Page page);
 static void UI_RebuildSweepChart(void);
 static void UI_SetSweepProgress(uint32_t progress_permille);
@@ -2984,6 +2997,15 @@ static void UI_InitModalConfirmEvent(lv_event_t *event)
     UI_RecordAction(203u);
     ++g_ui_reset_request_count;
     command_queued = DisplayProtocol_RequestReset();
+    if (command_queued)
+    {
+        /* ★ 复位把三项参数改回默认了,按钮高亮**必须跟着从 getter 重算** ——
+         *   否则会出现"状态行写着 10.00MSPS、采样率那行却还亮着 5MSPS"这种
+         *   自相矛盾(2026-10-06 上板实测到)。
+         *   ⚠️ 只补高亮:状态行的**文字**由 `MeasureConfig_RestoreDefaults()`
+         *   内部已经刷过,这里不重复调,免得两处都能刷新、以后改一处漏一处。 */
+        UI_UpdateInitConfigStyle();
+    }
     if (g_modal_overlay != NULL)
     {
         lv_obj_del(g_modal_overlay);
@@ -3073,11 +3095,253 @@ static void UI_InitResetEvent(lv_event_t *event)
                     NULL);
 }
 
+/* ==========================================================================
+ * 🆕 2026-10-06「系统复位」页的测量参数控件
+ *
+ * 【档位表为什么放在界面这一层】
+ *   按钮文字("10MSPS" vs "10M")是**给用户看的**,属于界面;
+ *   数值本身与下发归 `measure_config.c`。分开之后,改档位表只动这里,
+ *   改下发/回读/窗口计算只动那边,不会互相牵连。
+ *
+ * 【这两个表要和 measure_config.h 的默认值对得上】
+ *   `10MSPS` 那档(DIV=13)必须是 `CV_ADC_DIV_DEFAULT`,`1MHz` 那档必须是
+ *   `CV_DDS_HZ_DEFAULT` —— 否则上电后没有任何一个按钮是高亮的,一看就知道错。
+ * ========================================================================== */
+
+static const uint32_t g_init_dds_choices[5] =
+    {100000u, 500000u, 1000000u, 2000000u, 5000000u};
+static const char *const g_init_dds_texts[5] =
+    {"100kHz", "500kHz", "1MHz", "2MHz", "5MHz"};
+
+static const uint32_t g_init_div_choices[5] = {130u, 65u, 26u, 13u, 10u};
+static const char *const g_init_div_texts[5] =
+    {"1MSPS", "2MSPS", "5MSPS", "10MSPS", "13MSPS"};
+
+static const int32_t g_init_phase_deltas[3] = {-1, 0, 1};
+static const char *const g_init_phase_texts[3] = {"相位 -1", "居中", "相位 +1"};
+
+/* 动作码。避开既有占用:100/101、201–203、210–214、220、240–242、310–313、320–322。
+ * 250–259 给频率档位,260–262 给相位 —— 与既有的分段习惯一致。 */
+#define UI_INIT_ACTION_DDS_BASE    250u
+#define UI_INIT_ACTION_DIV_BASE    255u
+#define UI_INIT_ACTION_PHASE_BASE  260u
+
+/** @brief 一组档位按钮的选中态:选中的换底色 + 2 px 边框(照 UI_UpdateSinglePathStyle 的写法)。
+ *  @param selected 选中下标;传 `count` 或更大值时**一个都不选**(相位行用得上)。 */
+static void UI_InitStyleRow(lv_obj_t *const *buttons, uint32_t count,
+                            uint32_t selected)
+{
+    uint32_t index;
+
+    for (index = 0u; index < count; ++index)
+    {
+        lv_obj_t *button = buttons[index];
+
+        if (button == NULL)
+        {
+            continue;
+        }
+
+        if (index == selected)
+        {
+            lv_obj_set_style_bg_color(button,
+                                      lv_color_hex(UI_COLOR_CYAN),
+                                      LV_PART_MAIN | LV_STATE_DEFAULT);
+            lv_obj_set_style_border_color(button,
+                                          lv_color_hex(UI_COLOR_CYAN),
+                                          LV_PART_MAIN);
+            lv_obj_set_style_border_width(button, 2, LV_PART_MAIN);
+        }
+        else
+        {
+            lv_obj_set_style_bg_color(button,
+                                      lv_color_hex(UI_COLOR_SURFACE),
+                                      LV_PART_MAIN | LV_STATE_DEFAULT);
+            lv_obj_set_style_border_color(button,
+                                          lv_color_hex(UI_COLOR_BORDER),
+                                          LV_PART_MAIN);
+            lv_obj_set_style_border_width(button, 1, LV_PART_MAIN);
+        }
+    }
+}
+
+/** @brief 在档位表里找 @p value 的下标。找不到返回 @p count(⇒ 一个都不高亮)。 */
+static uint32_t UI_ChoiceIndex(const uint32_t *choices, uint32_t count,
+                               uint32_t value)
+{
+    uint32_t index;
+
+    for (index = 0u; index < count; ++index)
+    {
+        if (choices[index] == value)
+        {
+            return index;
+        }
+    }
+
+    return count;
+}
+
+/** @brief 按当前参数(而不是按本地的点击记录)重算三行的高亮。 */
+static void UI_UpdateInitConfigStyle(void)
+{
+    UI_InitStyleRow(g_init_dds_buttons, 5u,
+                    UI_ChoiceIndex(g_init_dds_choices, 5u,
+                                   MeasureConfig_GetDdsHz()));
+    UI_InitStyleRow(g_init_div_buttons, 5u,
+                    UI_ChoiceIndex(g_init_div_choices, 5u,
+                                   MeasureConfig_GetSampleDiv()));
+    /* 相位是连续量,没有"当前档";只有"是不是正好在窗中心"。
+     * 不在中心时传 3(= count)⇒ 三个按钮都不高亮,如实反映"手动偏了"。 */
+    UI_InitStyleRow(g_init_phase_buttons, 3u,
+                    MeasureConfig_IsPhaseCentered() ? 1u : 3u);
+}
+
+/**
+ * @brief 从 MeasureConfig **主动拉一次**当前参数,填进常驻状态行。
+ *
+ * 🔴 **为什么必须有这个函数**:本页是**首次进入才构建**的,而上电时
+ *    `MeasureConfig_Init()`(在 `UI_Demo_Init()` 之后)就已经下发过参数、
+ *    也推过一次状态行了 —— 但那时标签还不存在,`UI_Demo_SetInitStatusText()`
+ *    按设计**静默丢弃**。不在这里补拉一次,页面会带着**空白状态行**出现,
+ *    看起来像"参数没下发"。控件可以靠 `UI_UpdateInitConfigStyle()` 从
+ *    getter 恢复高亮,文字不行 —— 文字只有这一个来源。
+ */
+static void UI_RefreshInitStatusLine(void)
+{
+    char line[96];
+
+    MeasureConfig_FormatLine(line, sizeof(line));
+    UI_Demo_SetInitStatusText(line);
+}
+
+/**
+ * @brief 顶栏那一行也报一声(纯文本)。参数读数在常驻状态行里,这里只说"做了什么"。
+ *
+ * ⚠️ 带格式的那几条**不走这个函数**,直接在调用点用 `lv_label_set_text_fmt`
+ *    (照 `UI_UpdateCommonStatus()` 的既有写法)—— 本文件**没有** include
+ *    `<stdio.h>` 也没有 `<stdarg.h>`(前序就是这样,里面 19 处 "snprintf"
+ *    其实全是 `lv_snprintf`)。为一个提示去动前序的 include 块不划算。
+ */
+static void UI_InitAnnounce(const char *text)
+{
+    if ((text != NULL) && (g_status_label != NULL))
+    {
+        lv_label_set_text(g_status_label, text);
+    }
+}
+
+/* user_data 里装的是**下标 + 1**(0 会被 LVGL 当成 NULL user_data,不能用)。 */
+static uint32_t UI_InitEventIndex(lv_event_t *event)
+{
+    return (uint32_t)(uintptr_t)lv_event_get_user_data(event);
+}
+
+static void UI_InitDdsEvent(lv_event_t *event)
+{
+    uint32_t index;
+
+    if ((event == NULL) || (lv_event_get_code(event) != LV_EVENT_CLICKED))
+    {
+        return;
+    }
+
+    index = UI_InitEventIndex(event);
+    if ((index == 0u) || (index > 5u))
+    {
+        return;
+    }
+    index--;
+
+    UI_RecordAction(UI_INIT_ACTION_DDS_BASE + index);
+    (void)MeasureConfig_SetDdsHz(g_init_dds_choices[index]);
+    UI_UpdateInitConfigStyle();
+
+    if (g_status_label != NULL)
+    {
+        lv_label_set_text_fmt(g_status_label, "状态:激励已设为 %s",
+                              g_init_dds_texts[index]);
+    }
+}
+
+static void UI_InitDivEvent(lv_event_t *event)
+{
+    uint32_t index;
+
+    if ((event == NULL) || (lv_event_get_code(event) != LV_EVENT_CLICKED))
+    {
+        return;
+    }
+
+    index = UI_InitEventIndex(event);
+    if ((index == 0u) || (index > 5u))
+    {
+        return;
+    }
+    index--;
+
+    UI_RecordAction(UI_INIT_ACTION_DIV_BASE + index);
+    (void)MeasureConfig_SetSampleDiv(g_init_div_choices[index]);
+    UI_UpdateInitConfigStyle();
+
+    /* ⚠️ 这里改的是**采样率**,它同时动了相位(窗口跟着分频比走)——
+     *    状态行里两项都会变,是正常的,不是 bug。 */
+    if (g_status_label != NULL)
+    {
+        lv_label_set_text_fmt(g_status_label,
+                              "状态:采样率已设为 %s(相位随之移到窗中心)",
+                              g_init_div_texts[index]);
+    }
+}
+
+static void UI_InitPhaseEvent(lv_event_t *event)
+{
+    uint32_t index;
+
+    if ((event == NULL) || (lv_event_get_code(event) != LV_EVENT_CLICKED))
+    {
+        return;
+    }
+
+    index = UI_InitEventIndex(event);
+    if ((index == 0u) || (index > 3u))
+    {
+        return;
+    }
+    index--;
+
+    UI_RecordAction(UI_INIT_ACTION_PHASE_BASE + index);
+
+    if (g_init_phase_deltas[index] == 0)
+    {
+        (void)MeasureConfig_CenterPhase();
+        UI_InitAnnounce("状态:相位已回到窗口中心");
+    }
+    else if (!MeasureConfig_NudgePhase(g_init_phase_deltas[index]))
+    {
+        /* 越出采样窗 —— **没有写下去**。如实说,别让用户以为动了。 */
+        UI_InitAnnounce("状态:相位已到采样窗边缘,未改动");
+    }
+    else if (g_status_label != NULL)
+    {
+        lv_label_set_text_fmt(g_status_label, "状态:相位已调到 %+d",
+                              (int)MeasureConfig_GetPhase());
+    }
+
+    UI_UpdateInitConfigStyle();
+}
+
 static void UI_ShowInitialize(void)
 {
     lv_obj_t *screen = g_page_containers[UI_PAGE_INITIALIZE];
     lv_obj_t *panel;
     lv_coord_t panel_width = (lv_coord_t)LCD_PIXEL_WIDTH - 220;
+    /* 三行参数控件共用的排版参数(与 UI_CreatePathButtons 的取法一致) */
+    lv_coord_t row_x = 152;
+    lv_coord_t row_gap = 10;
+    lv_coord_t row_width;
+    uint32_t row_count;
+    uint32_t index;
 
     g_ui_current_page = UI_PAGE_INITIALIZE;
 
@@ -3090,7 +3354,7 @@ static void UI_ShowInitialize(void)
                            110,
                            94,
                            panel_width,
-                           330,
+                           400,          /* 原 330 —— 下面加了状态行 + 三行参数 */
                            UI_COLOR_SURFACE_LIGHT,
                            20);
     lv_obj_set_style_border_color(panel,
@@ -3102,35 +3366,120 @@ static void UI_ShowInitialize(void)
                   &ui_font_cn_28,
                   UI_COLOR_TEXT,
                   24,
-                  24,
+                  20,
                   panel_width - 48,
-                  40,
+                  36,
                   LV_TEXT_ALIGN_CENTER);
     UI_CreateText(panel,
                   "显示板只发送 mcu_reset 指令\n偏压降低与安全等待由测量后端完成",
                   &ui_font_cn_20,
                   UI_COLOR_STATUS,
                   36,
-                  78,
+                  60,
                   panel_width - 72,
-                  64,
+                  52,
                   LV_TEXT_ALIGN_CENTER);
 
     UI_CreateButton(panel,
                     "发送复位指令",
                     UI_COLOR_RED,
                     (panel_width - 320) / 2,
-                    166,
+                    120,
                     320,
-                    60,
+                    56,
                     UI_InitResetEvent,
                     NULL);
+
+    /* ★ 常驻状态行 —— **就在复位按钮正下方**,不随操作消失,每次参数改动后刷新。
+     *   内容由 `MeasureConfig_FormatLine()` 拼(激励 / 采样率 / 相位)。
+     *   偏压与回路**不在这儿重复** —— 它们在常驻顶栏(`g_header_bias_label`),
+     *   重复一份就多一个"两处显示不一致"的机会。 */
+    g_init_status_label =
+        UI_CreateText(panel, "", &ui_font_cn_20, UI_COLOR_CYAN,
+                      24, 184, panel_width - 48, 28, LV_TEXT_ALIGN_CENTER);
+
+    /* ---- 第 1 行:激励频率(0x80)------------------------------------ */
+    UI_CreateText(panel,
+                  "激励频率",
+                  &ui_font_cn_20,
+                  UI_COLOR_STATUS,
+                  18, 224, 120, 30,
+                  LV_TEXT_ALIGN_LEFT);
+    row_count = 5u;
+    row_width = (panel_width - 18 - row_x -
+                 ((lv_coord_t)row_count - 1) * row_gap) / (lv_coord_t)row_count;
+    for (index = 0u; index < row_count; ++index)
+    {
+        g_init_dds_buttons[index] =
+            UI_CreateButton(panel,
+                            g_init_dds_texts[index],
+                            UI_COLOR_SURFACE,
+                            row_x + (lv_coord_t)index * (row_width + row_gap),
+                            216,
+                            row_width,
+                            44,
+                            UI_InitDdsEvent,
+                            (void *)(uintptr_t)(index + 1u));
+    }
+
+    /* ---- 第 2 行:采样率(0x88 —— DIV 与 PH_OFF 一起写)-------------- */
+    UI_CreateText(panel,
+                  "采样率",
+                  &ui_font_cn_20,
+                  UI_COLOR_STATUS,
+                  18, 280, 120, 30,
+                  LV_TEXT_ALIGN_LEFT);
+    for (index = 0u; index < row_count; ++index)
+    {
+        g_init_div_buttons[index] =
+            UI_CreateButton(panel,
+                            g_init_div_texts[index],
+                            UI_COLOR_SURFACE,
+                            row_x + (lv_coord_t)index * (row_width + row_gap),
+                            272,
+                            row_width,
+                            44,
+                            UI_InitDivEvent,
+                            (void *)(uintptr_t)(index + 1u));
+    }
+
+    /* ---- 第 3 行:采样相位微调(给手动找眼用)----------------------- */
+    UI_CreateText(panel,
+                  "采样相位",
+                  &ui_font_cn_20,
+                  UI_COLOR_STATUS,
+                  18, 336, 120, 30,
+                  LV_TEXT_ALIGN_LEFT);
+    row_count = 3u;
+    row_width = (panel_width - 18 - row_x -
+                 ((lv_coord_t)row_count - 1) * row_gap) / (lv_coord_t)row_count;
+    for (index = 0u; index < row_count; ++index)
+    {
+        g_init_phase_buttons[index] =
+            UI_CreateButton(panel,
+                            g_init_phase_texts[index],
+                            UI_COLOR_SURFACE,
+                            row_x + (lv_coord_t)index * (row_width + row_gap),
+                            328,
+                            row_width,
+                            44,
+                            UI_InitPhaseEvent,
+                            (void *)(uintptr_t)(index + 1u));
+    }
+
+    /* ★ 按**当前参数**点亮,不是按默认值 —— 界面可能是在参数已被改过之后才
+     *   第一次构建的(切页顺序不保证),照默认值点亮会和状态行自相矛盾。 */
+    UI_UpdateInitConfigStyle();
+    /* ★ 状态行的文字同理,必须**主动拉**:上电那次推送发生在本页构建之前,
+     *   已经被静默丢弃了(详见 UI_RefreshInitStatusLine 的注释)。 */
+    UI_RefreshInitStatusLine();
+
     UI_CreateText(screen,
-                  "二次确认后发送指令  后端复位时显示离线状态",
+                  "二次确认后发送指令   ·   采样率上限 13 MSPS(130 MHz 基准除不出 20 MSPS)",
                   &ui_font_cn_20,
                   UI_COLOR_TEXT_MUTED,
                   60,
-                  456,
+                  506,
                   (lv_coord_t)LCD_PIXEL_WIDTH - 120,
                   32,
                   LV_TEXT_ALIGN_CENTER);
@@ -4713,6 +5062,20 @@ static void UI_ResultsRefresh(void)
     UI_ResultTabApply();
 }
 
+/* 协议层用的导出包装。
+ * 🔴 为什么必须有:上面那个是 `static`,而数据(`g_result_wave[]` 与扫压曲线)
+ *    喂进来之后**没有任何东西会重画** —— 只有"进结果页 / 切页签"这两个
+ *    事件会调 `UI_ResultsRefresh()`。⇒ 屏上表现为"数据是新的、画的是旧的"。
+ * ⚠️ 只在结果页**可见**时才真的重画。不可见时 `UI_ResultsRefresh()` 里那几
+ *    条 `lv_chart_refresh` 只是把对象标脏,LVGL 不会为不可见对象做无效区计算,
+ *    代价很小;但每轮采集都调一次的频率远高于界面变化频率,所以**节流放在
+ *    调用方**(见 `pynq_protocol.c::adc_service`),这里不做内部节流 ——
+ *    内部节流会让"改完数据立刻想看"变成"等 80 ms 再说",反而更难用。 */
+void UI_Demo_RefreshResultViews(void)
+{
+    UI_ResultsRefresh();
+}
+
 /* --------------------------------------------------------------------------
  * 页签
  * ------------------------------------------------------------------------ */
@@ -5757,6 +6120,20 @@ void UI_Demo_SetStatusText(const char *text)
     if ((text != NULL) && (g_status_label != NULL))
     {
         lv_label_set_text(g_status_label, text);
+    }
+}
+
+/* 🆕 2026-10-06:测量参数那一行(**「系统复位」页、复位按钮正下方**)。
+ * 与上面那个不是一回事 —— 上面是顶栏的操作结果,这个是本页常驻的参数读数。
+ * ⚠️ 页面还没构建过时 `g_init_status_label` 是 NULL ⇒ 静默跳过。
+ *    这是**故意的**:上电时 MeasureConfig_Init() 就在 UI_Demo_Init() 之后立刻调,
+ *    而「系统复位」页要到用户第一次点进去才构建。值为 NULL 时跳过,
+ *    等页面构建时再用 UI_UpdateInitConfigStyle() + 一次主动刷新补上。 */
+void UI_Demo_SetInitStatusText(const char *text)
+{
+    if ((text != NULL) && (g_init_status_label != NULL))
+    {
+        lv_label_set_text(g_init_status_label, text);
     }
 }
 

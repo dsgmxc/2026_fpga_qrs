@@ -77,6 +77,9 @@ uint32_t LV_PortIndev_GetOutOfRangeCount(void);
 uint32_t DisplayProtocol_GetRefusedCount(void);
 uint32_t DisplayProtocol_GetBiasWriteCount(void);
 uint32_t DisplayProtocol_GetBiasVerifyFailCount(void);
+/* 🆕 ADC 采集计数 —— 结果页波形的数据源(见 `adc_sample.c`)。 */
+uint32_t DisplayProtocol_GetAdcCaptureCount(void);
+uint32_t DisplayProtocol_GetAdcFailCount(void);
 /* 协议层生命周期 —— 定义在 pynq_protocol.c。
    两者都必须在 UI_Demo_Init() **之后**调用:Init 会动 LVGL 对象(在线标志/状态栏),
    Process 里跑扫压步进状态机(按驻留时间下发下一个偏压点)。 */
@@ -224,6 +227,10 @@ static void dump_stats(void)
     printf("  模拟前端  偏压写=%u  回读核对失败=%u\n",
            (unsigned)DisplayProtocol_GetBiasWriteCount(),
            (unsigned)DisplayProtocol_GetBiasVerifyFailCount());
+    /* 结果页那四条波形是真的采到了没有 —— 失败计数非 0 就看 [adc] 那一行 */
+    printf("  ADC 采集  成功=%u  失败=%u\n",
+           (unsigned)DisplayProtocol_GetAdcCaptureCount(),
+           (unsigned)DisplayProtocol_GetAdcFailCount());
 
     /* 帧缓存欠载是"PS 供给跟不上 PL 取数"的直接证据 —— 单列一行,别埋在计数里 */
     uint32_t st = cv_reg_read(CV_REG_FB_STATUS);

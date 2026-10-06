@@ -85,6 +85,14 @@ FAIL 行),原始文本属于"跑一次就能再出来"的中间产物,不入库�
 | `system_wrapper_drc_routed.rpt` | 设计规则检查 —— 「DRC 0 error」的出处 |
 
 ⚠️ 这 4 份对应的是**当前入库位流**(`board/qrs.bit`)那一版实现,**两者须同批更新**。
+
+> **当前入库位流**(2026-10-06 起):
+> `board/qrs.bit` md5 **`886b250b…`**、`board/qrs.hwh` md5 **`afeeb7b9…`**。
+> 这一版相对上一版(`30b7f46e…`)的变化是**接入 AD9238 采集通路**:
+> `cv_sys.v` 新增 16 个 ADC 端口、`cv_axi_lite_slave.v` 新增 `0x88 / 0x8C / 0x90 / 0x94 / 0x98`
+> 五个寄存器,并把 `0x84[0]` 由 `dac_rst_n` **改名扩义**为 `clk_release`
+> (同时放行 `dac_1220` 初始化与 ADC 的 MMCM 两个消费者)。
+> 上面 4 份 `.rpt` 与它**同批**(同一次 `impl_1` 运行)。
 ⚠️ 工程目录里另有 7 份 `.rpt`(`power` / `bus_skew` / `control_sets` / `route_status` 等),
 与 M3 三项无关,未入库。
 

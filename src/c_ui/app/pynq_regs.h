@@ -50,6 +50,117 @@ extern "C" {
  *    避免两个写入方;这里只负责把"还没放行"这件事**喊出来**,不要静默。
  */
 #define CV_CTRL_DAC_RST_N    0x1u    /* [0] 1 = 已放行 / 0 = 仍按在复位     */
+
+/* ------------------------------------------------------------------ */
+/* AD9238 采集通路(2026-10-06 进位流)                                  */
+/* ------------------------------------------------------------------ */
+#define CV_REG_ADC_CFG       0x88u   /* RW [7:0]DIV [15:8]PH_OFF(s) [16]CONT
+                                        [17]OEB_N [18]PDN                   */
+#define CV_REG_ADC_CTRL      0x8Cu   /* W  [0]GO —— ★ 命令,1 拍脉冲,读回恒 0 */
+#define CV_REG_ADC_STS       0x90u   /* RO [0]mmcm_locked [1]done [2]busy
+                                        [3]otr_sticky                       */
+#define CV_REG_ADC_BUF_IDX   0x94u   /* RW [11:0] 采样缓冲读指针(4096 深) */
+#define CV_REG_ADC_BUF_DATA  0x98u   /* RO [11:0]sample [12]OTR            */
+
+/* 0x90 位域 */
+#define CV_ADC_STS_LOCKED(s) ((uint32_t)((s) & 0x1u))
+#define CV_ADC_STS_DONE(s)   ((uint32_t)(((s) >> 1) & 0x1u))
+#define CV_ADC_STS_BUSY(s)   ((uint32_t)(((s) >> 2) & 0x1u))
+#define CV_ADC_STS_OTR(s)    ((uint32_t)(((s) >> 3) & 0x1u))
+
+/* 0x98 位域 */
+#define CV_ADC_SAMPLE(d)     ((uint32_t)((d) & 0xFFFu))
+#define CV_ADC_OTR(d)        ((uint32_t)(((d) >> 12) & 0x1u))
+
+/* 0x88 [17]/[18] —— 🔴 **不要往界面上暴露**。
+ * 实测(2026-10-06):把 [17] 写 1 后 128 个采样点**全部等于 4087**(p-p = 0),
+ * 写 0 才恢复正弦。也就是说这一位会让 ADC 输出**冻结**。
+ * 板上丝印是 `OEB`,RTL 里的信号名却是 `OEB_N`,极性约定还没有从 RTL 追到引脚;
+ * 在追清之前,它只该在排障脚本里出现,不该变成一个"一点就坏"的界面按钮。 */
+#define CV_ADC_CFG_OEB_N     0x20000u
+#define CV_ADC_CFG_PDN       0x40000u
+
+/* 0x88 [16] CONT:1 = 连续采集,0 = 单次(等 PS 写 GO)。
+ * 本项目用**单次** —— 采 4096 点置 done,PS 读完再发下一次,不抢 AXI 带宽。 */
+#define CV_ADC_CFG_CONT      0x10000u
+
+/* ------------------------------------------------------------------ */
+/* AD9238 采样率与相位                                                 */
+/* ------------------------------------------------------------------ */
+#define CV_ADC_CLK_BASE_HZ   130000000u  /* MMCM:50×26/1 = 1300,CLKOUT0 = 130 MHz */
+#define CV_ADC_DIV_DEFAULT   13u         /* 130/13 = 10.0 MSPS(RTL 0x88 复位值)   */
+
+/**
+ * @brief 分频比 → 端口 A 采样窗中心(PH_OFF,单位 = tick = 一个 130 MHz 拍)。
+ *
+ * = `1.5 − P/4`,四舍五入到整数 tick。**三点实测吻合**(2026-10-06):
+ *     DIV=13 → −2      DIV=26 → −5      DIV=130 → −31
+ *
+ * 🔴 **换采样率必须同时换 PH_OFF。** 窗口位置随 P 走,只改 DIV 会让采样点滑出
+ *    被驱动的窗口 —— 现象是"换了速率就没波形了",**不报错**。
+ *    窗 = tick ∈ [2 − P/2, +1],宽 P/2(P=13 时就是 −4…+1 这 6 拍)。
+ *
+ * ⚠️ 整数运算,**与 `cv_regs.py::adc_phase_center()` 逐位等价**。
+ *    别写成 `lround((6.0 - p) / 4.0)`:那在负半轴是"五 away from zero",
+ *    与 Python 的 `round()`("五取偶")在 (6−P) ≡ 2 (mod 4) 上会差 1。
+ */
+static inline int32_t cv_adc_phase_center(uint32_t div)
+{
+    int32_t n = 6 - (int32_t)((div < 2u) ? 2u : div);
+
+    return (n >= 0) ? ((n + 2) / 4) : -(((-n) + 2) / 4);
+}
+
+/**
+ * @brief 分频比 → **port B 时间槽**的窗口中心 tick,已折回寄存器合法范围。
+ *
+ * 🔴 **为什么有 A 和 B 两个中心**(2026-10-06 实测,见 `report/llm-log/LLM-045.md` §G):
+ *    那 12 位总线是**双端口时分复用**的 —— 一条总线在一个 `adc_clk` 周期里
+ *    **轮流输出两路**(INA / INB),各占半个周期:
+ *
+ *    | 端口 | 窗口(单位 130 MHz tick) | 宽度 | 中心 |
+ *    |---|---|---|---|
+ *    | A(INA) | `tick ∈ [2 − P/2, +1]` | P/2 | `1.5 − P/4` |
+ *    | B(INB) | `tick ∈ [+2, P/2 + 1]` | P/2 | `1.5 + P/4` |
+ *
+ *    ⇒ **两个中心各在一边**,`cv_adc_phase_center()` 只是 A 的。
+ *    P=13 时 A = −2、B = **+5**(窗 `[+2,+7]`,实测那一段正是"有信号/静止"
+ *    交替的两条带之一)。⛔ **不能拿 `PH_OFF = 0` 当"通用"值** ——
+ *    它对 A 是窗内一点、对 B **已在窗外**。
+ *
+ * ⚠️ 与 `cv_adc_phase_center()` **同一条舍入规则**(半远离零,
+ *    整数算术,避开 Python 银行家舍入);`cv_regs.py` 侧**尚无 port B 对应物**,
+ *    哪天 Python 也要用,记得一起补 —— 这里先留个明处,别让它悄悄分叉。
+ */
+static inline int32_t cv_adc_phase_center_b(uint32_t div)
+{
+    int32_t p    = (int32_t)((div < 2u) ? 2u : div);
+    int32_t m    = 6 + p;                   /* 1.5 + P/4 == (6 + P) / 4 */
+    int32_t t    = (m + 2) / 4;             /* 半远离零舍入 */
+    int32_t half = p >> 1;
+    int32_t hi   = p - 1 - half;            /* 寄存器合法上界 */
+
+    /* 窗可能绕回(小 P 时 `P/2+1` 会越过合法上界),折回可达范围 */
+    if (t > hi) {
+        t -= p;
+    }
+    return t;
+}
+
+/** @brief 分频比 → 采样率(Hz)。与 `adc_capture.v` 的 `P = max(div, 2)` 一致。 */
+static inline uint32_t cv_adc_sample_hz(uint32_t div)
+{
+    uint32_t p = (div < 2u) ? 2u : div;
+
+    return CV_ADC_CLK_BASE_HZ / p;
+}
+
+/** @brief DIV + 有符号 PH_OFF → 0x88 的 32 位字(其余位保持 0)。 */
+static inline uint32_t cv_adc_cfg_word(uint32_t div, int32_t ph_off)
+{
+    return ((div & 0xFFu) | (uint32_t)(((uint32_t)ph_off & 0xFFu) << 8));
+}
+
 #define CV_REG_LCD_CTRL      0x50u   /* RW [1:0] src_sel                   */
 #define CV_REG_LCD_FILL      0x54u   /* RW [23:0] RGB888 整屏填充          */
 #define CV_REG_FB_BASE0      0x58u   /* RW 帧缓存 0 物理基址(64 KB 对齐)  */
@@ -164,6 +275,11 @@ static inline uint32_t cv_bias_code_to_tenths(uint32_t code)
  *    ⇒ 这里只能写常量。换晶体就要改这一行 + cv_regs.py 的 DDS_MCLK_HZ。 */
 #define CV_DDS_MCLK_HZ       25000000u
 #define CV_DDS_FREQ_1MHZ     0x0A3D70Au    /* 10737418 → 999 999.98 Hz */
+/* 🔄 2026-10-06:界面上**有**频率控件了(「系统复位」页五档按钮),
+ *    实现在 `app/measure_config.c`。原注释"界面上没有频率控件"已作废。
+ *    默认值/复位值仍是 1 MHz(决策 D08),只是不再"固定"。 */
+#define CV_DDS_HZ_MIN        1000u         /* 与 AD9833 无关的下限,防呆 */
+#define CV_DDS_HZ_MAX        12500000u     /* AD9833 手册:输出上限 MCLK/2 */
 
 /** @brief 频率 → 28 位频率字。 */
 static inline uint32_t cv_dds_hz_to_code(uint32_t hz)
