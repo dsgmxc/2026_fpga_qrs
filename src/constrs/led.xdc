@@ -60,8 +60,10 @@ set_property -dict {PACKAGE_PIN M19 IOSTANDARD LVCMOS33} [get_ports touch_rst_n]
 # 2026-10-05 加。球号【由用户在板上实际接线后报出】,不是照表挑的 ——
 #   这是本项目里唯一一处"接线先于约束"的信号组。
 #
-#   DAC1220 :  SCLK = W15 (J4-36)    CS    = W13 (J4-32)    SDIO = Y14 (J4-34)
-#   AD9833  :  SCLK = T5  (J4-4)     FSYNC = U7  (J4-6)     SDATA = T11 (J4-2)
+# 2026-10-07 用户重新接线:两组固定占满 J4 的 31–36 脚
+#   DAC1220 :  SCLK = W15 (J4-36)    CS    = W13 (J4-32)    SDIO = Y14 (J4-34)   ← 未动
+#   AD9833  :  SCLK = W14 (J4-33)    FSYNC = V12 (J4-31)    SDATA = V15 (J4-35)  ← 换线
+#   奇数列(31/33/35)= DDS、偶数列(32/34/36)= DAC。
 #
 # 电平全 LVCMOS33。两个 bank 都已是 3.3 V,依据不同:
 #   · BANK34 —— 本文件上面已跑通的 LCD 那 30 根线就是 3.3 V;
@@ -69,9 +71,8 @@ set_property -dict {PACKAGE_PIN M19 IOSTANDARD LVCMOS33} [get_ports touch_rst_n]
 #               constrs_1/new/pin.xdc` 把 Y12/Y13/V10/V11/W9/W10/Y8/Y9/Y11
 #               全用 LVCMOS33 且能综合通过。
 #
-# ⚠️ DDS 三根线【跨 bank】:T11 属 BANK34,T5/U7 属 BANK13
-#    (J4 第 2 脚夹在一排 BANK13 脚中间)。功能无影响 —— 两 bank 同为 3.3 V ——
-#    但将来做时序/引脚分组时不要把这三根当成一组。
+# ✅ 换线后 DDS 三根线【不再跨 bank】—— 31–36 脚全在 BANK34。
+#    旧版是 T11(BANK34)/ T5 / U7(BANK13),此处原写"不要把这三根当成一组"的提醒作废。
 #
 # ⚠️ 本工程里 DAC 这三行【曾经】也写在同目录的 io.xdc 里(内容一模一样),
 #    但那个文件 IS_ENABLED = 0、综合时根本不 Parsing —— 2026-10-02 触摸
@@ -82,47 +83,63 @@ set_property -dict {PACKAGE_PIN M19 IOSTANDARD LVCMOS33} [get_ports touch_rst_n]
 set_property -dict {PACKAGE_PIN W15 IOSTANDARD LVCMOS33} [get_ports dac_sclk]
 set_property -dict {PACKAGE_PIN W13 IOSTANDARD LVCMOS33} [get_ports dac_cs]
 set_property -dict {PACKAGE_PIN Y14 IOSTANDARD LVCMOS33} [get_ports dac_mosi]
-set_property -dict {PACKAGE_PIN T5  IOSTANDARD LVCMOS33} [get_ports dds_sclk]
-set_property -dict {PACKAGE_PIN U7  IOSTANDARD LVCMOS33} [get_ports dds_sync]
-set_property -dict {PACKAGE_PIN T11 IOSTANDARD LVCMOS33} [get_ports dds_data]
+set_property -dict {PACKAGE_PIN W14 IOSTANDARD LVCMOS33} [get_ports dds_sclk]
+set_property -dict {PACKAGE_PIN V12 IOSTANDARD LVCMOS33} [get_ports dds_sync]
+set_property -dict {PACKAGE_PIN V15 IOSTANDARD LVCMOS33} [get_ports dds_data]
 
-# ---- AD9238 高速 ADC(16 根,2026-10-06 加)------------------------------------
-# 球号【由用户在板上实际接线后报出】。第一版报的名单有重复
-#   (y11 同时给了 d1/d3,w6 同时给了 d11/otr),与"模块排针共 16 个信号"矛盾;
-#   下面这版是用户核对后的无重复名单,并与 J4 脚号单调对应(J4-27/28 = clk/oeb)。
+# ---- AD9238 高速 ADC(16 根接线 / 18 脚排线,2026-10-07 换线)-------------------
+# 球号【由用户在板上实际接线后报出】。2026-10-07 用户重新接线:
+#   模块换成一根 2×9 排线,整段落在 **J4 第 1–18 脚**,顺序与脚号一一对应。
 #
-#   OEB_N = U13 (J4-28)   CLK  = V13 (J4-27)
-#   D0..D11 = W11 Y11 Y12 Y13 V10 V11 W9 W10 Y8 Y9 Y6 Y7   (J4-26 .. J4-15)
-#   PDN   = V6  (J4-21)   OTR  = W6  (J4-18)
+#   OEB  = V5  (J4-1)    CLK   = T11 (J4-2)
+#   (NC) = U5  (J4-3)    (NC)  = T5  (J4-4)     ← 模块侧悬空脚,【不约束,见下】
+#   D0..D11 = V7 U7 W8 V8 U9 U8 U10 T9 W6 V6 Y7 Y6   (J4-5 .. J4-16)
+#   PDN  = Y9  (J4-17)   OTR   = Y8  (J4-18)
 #
-# 电平 LVCMOS33。15 根在 BANK13、只有 CLK(V13)在 BANK34 —— 跨 bank,
-#   功能无影响(两 bank 同为 3.3 V)。BANK13 用 3.3 V 的依据与 DDS 那三根相同:
+# ⚠️ U5 / T5 两根【有意不写约束】—— 它们是模块排针上的空脚(用户 2026-10-07:
+#   "nc 大概就是悬空引脚,不管它")。**不约束**是有意的:若那两根实际在模块
+#   内部接地,FPGA 一旦驱动就是短路 ⇒ 让它们保持未使用、综合器默认高阻。
+#   (故本段只有 16 行 set_property,而排线是 18 根 —— 不是漏了。)
+#
+# 电平 LVCMOS33。16 根里 **15 根在 BANK13、只有 CLK(T11)在 BANK34** —— 跨 bank,
+#   功能无影响(两 bank 同为 3.3 V)。BANK13 用 3.3 V 的依据不变:
 #   厂商例程 30_digital_voltmeter 把 Y12/Y13/V10/V11/W9/W10/Y8/Y9/Y11
-#   全用 LVCMOS33 且综合通过。
+#   全用 LVCMOS33 且综合通过(那些球号本轮已全部让出,依据本身仍成立)。
 #
-# 🔴 【D0/D11 的顺序没有第二条证据】—— 上面的 D0..D11 完全照用户报的名单排。
+# ⚠️ CLK(T11)【不是时钟能力脚】—— Vivado 实测 IS_CLK_CAPABLE = 0 / IS_GLOBAL_CLK = 0
+#   (link_design -part xc7z020clg400-2 → get_package_pins T11 → IO_L1P_T0_34)。
+#   **但这不影响**:adc_clk 是 FPGA 的【输出】(cv_sys.v:243 `output wire adc_clk`,
+#   由 adc_capture 的计数器 `assign adc_clk = (cnt < half)` 产生),
+#   MMCM 的输入是 PS FCLK0(50 MHz),根本不经过这个脚。
+#   换线前的 V13(IO_L3N_T0_DQS_34)同样 clk_cap = 0,当年也是这么跑通的。
+#
+# 🔴 【D0/D11 的顺序在换线后作废,必须重验】—— 下面的 D0..D11 照用户报的名单排。
 #    D0 是 LSB、D11 是 MSB(AD9238 手册 + 模块原理图 D0_A(LSB)/D11_A(MSB))。
-#    若实际接反,症状是**采样值位序整体倒置**(正弦会变成锯齿状的怪波形),
-#    一眼能看出来 —— 上板第一件事就是看这个。
+#    ⚠️ LLM-045 那次"位序判定正确"是在【换线前】的接线下做的 ⇒ 结论不再有效。
+#    判据不变:接反的症状是采样值位序整体倒置(正弦变锯齿状的怪波形),一眼能看出。
+#
+# 🔴 【采样窗刻度同样作废】—— PH_OFF 的窗口中心依赖 FPGA↔ADC 的传播延迟(输出时钟
+#    出去、数据回来一个来回),换脚换线后窗口会平移。旧的 −2 / −5 / −31 不得沿用,
+#    上板必须重扫。⚠️ 与 R08「时序常数与物理配置绑定」同族 —— 这是第二次踩。
 #
 # ⚠️ 【时序约束不在这里,见文件末尾的说明】—— 130 MHz 域的时钟由 MMCM 自动
 #    派生,手工再 create_clock 会重复定义报错。
-set_property -dict {PACKAGE_PIN V13 IOSTANDARD LVCMOS33} [get_ports adc_clk]
-set_property -dict {PACKAGE_PIN U13 IOSTANDARD LVCMOS33} [get_ports adc_oe_n]
-set_property -dict {PACKAGE_PIN V6  IOSTANDARD LVCMOS33} [get_ports adc_pdn]
-set_property -dict {PACKAGE_PIN W6  IOSTANDARD LVCMOS33} [get_ports adc_otr]
-set_property -dict {PACKAGE_PIN W11 IOSTANDARD LVCMOS33} [get_ports {adc_d[0]}]
-set_property -dict {PACKAGE_PIN Y11 IOSTANDARD LVCMOS33} [get_ports {adc_d[1]}]
-set_property -dict {PACKAGE_PIN Y12 IOSTANDARD LVCMOS33} [get_ports {adc_d[2]}]
-set_property -dict {PACKAGE_PIN Y13 IOSTANDARD LVCMOS33} [get_ports {adc_d[3]}]
-set_property -dict {PACKAGE_PIN V10 IOSTANDARD LVCMOS33} [get_ports {adc_d[4]}]
-set_property -dict {PACKAGE_PIN V11 IOSTANDARD LVCMOS33} [get_ports {adc_d[5]}]
-set_property -dict {PACKAGE_PIN W9  IOSTANDARD LVCMOS33} [get_ports {adc_d[6]}]
-set_property -dict {PACKAGE_PIN W10 IOSTANDARD LVCMOS33} [get_ports {adc_d[7]}]
-set_property -dict {PACKAGE_PIN Y8  IOSTANDARD LVCMOS33} [get_ports {adc_d[8]}]
-set_property -dict {PACKAGE_PIN Y9  IOSTANDARD LVCMOS33} [get_ports {adc_d[9]}]
-set_property -dict {PACKAGE_PIN Y6  IOSTANDARD LVCMOS33} [get_ports {adc_d[10]}]
-set_property -dict {PACKAGE_PIN Y7  IOSTANDARD LVCMOS33} [get_ports {adc_d[11]}]
+set_property -dict {PACKAGE_PIN T11 IOSTANDARD LVCMOS33} [get_ports adc_clk]
+set_property -dict {PACKAGE_PIN V5  IOSTANDARD LVCMOS33} [get_ports adc_oe_n]
+set_property -dict {PACKAGE_PIN Y9  IOSTANDARD LVCMOS33} [get_ports adc_pdn]
+set_property -dict {PACKAGE_PIN Y8  IOSTANDARD LVCMOS33} [get_ports adc_otr]
+set_property -dict {PACKAGE_PIN V7  IOSTANDARD LVCMOS33} [get_ports {adc_d[0]}]
+set_property -dict {PACKAGE_PIN U7  IOSTANDARD LVCMOS33} [get_ports {adc_d[1]}]
+set_property -dict {PACKAGE_PIN W8  IOSTANDARD LVCMOS33} [get_ports {adc_d[2]}]
+set_property -dict {PACKAGE_PIN V8  IOSTANDARD LVCMOS33} [get_ports {adc_d[3]}]
+set_property -dict {PACKAGE_PIN U9  IOSTANDARD LVCMOS33} [get_ports {adc_d[4]}]
+set_property -dict {PACKAGE_PIN U8  IOSTANDARD LVCMOS33} [get_ports {adc_d[5]}]
+set_property -dict {PACKAGE_PIN U10 IOSTANDARD LVCMOS33} [get_ports {adc_d[6]}]
+set_property -dict {PACKAGE_PIN T9  IOSTANDARD LVCMOS33} [get_ports {adc_d[7]}]
+set_property -dict {PACKAGE_PIN W6  IOSTANDARD LVCMOS33} [get_ports {adc_d[8]}]
+set_property -dict {PACKAGE_PIN V6  IOSTANDARD LVCMOS33} [get_ports {adc_d[9]}]
+set_property -dict {PACKAGE_PIN Y7  IOSTANDARD LVCMOS33} [get_ports {adc_d[10]}]
+set_property -dict {PACKAGE_PIN Y6  IOSTANDARD LVCMOS33} [get_ports {adc_d[11]}]
 
 # ---- 跨时钟域约束(2026-10-06 加)---------------------------------------------
 # 时钟名出处:**不是猜的**,是读 `report_clocks` 得到的

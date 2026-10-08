@@ -347,9 +347,15 @@ static bool adc_capture_pair(void)
      *    现象是 `done` 不置位(超时),很容易被误判成"位流不对"。
      *    这里提前给出"换哪个档位"这种可执行的提示。 */
     if (!AdcSample_TickLegal(div, tick_a) || !AdcSample_TickLegal(div, tick_b)) {
+        /* ⚠️ 原文案是"换更大的 DIV(1/2/5/10/13 MSPS 里挑)"——
+         *    2026-10-08 起那是**做不到的建议**:采样率已固定 65 MSPS、
+         *    界面上没有换档的入口。所以这里改说实质:刻度算错了。
+         *    真遇到它,说明 `cv_adc_phase_center()` / `_b()` 的折回与当前
+         *    `CV_ADC_DIV_DEFAULT` 不一致 —— 那是个代码缺陷,不是"挑一档"。 */
         AdcSample_SetErrorf("DIV=%u 下窗口中心越出寄存器合法范围"
-                            "(A tick %+d / B tick %+d)。该档位下某一槽采不到,"
-                            "换更大的 DIV(1/2/5/10/13 MSPS 里挑)。",
+                            "(A tick %+d / B tick %+d)。采样率已固定 65 MSPS"
+                            "(DIV=2),没有别的档可换 ⇒ 这是"
+                            "cv_adc_phase_center() 的折回与 DIV 不一致,属代码缺陷。",
                             (unsigned)div, (int)tick_a, (int)tick_b);
         return false;
     }
@@ -414,20 +420,80 @@ static void adc_log_pair(const char *tag, float bias_v)
  *
  * 用户口径:通道 A → 电压图,通道 B → 电流图(A = INA 槽,B = INB 槽)。
  * ⚠️ 通道 B 本身是跨阻放大器的**输出电压**,这里按 `ADC_SAMPLE_R_TIA` 折算成电流。
+ *
+ * 🔴 **2026-10-08:采集点数与显示点数在这里分开。**
+ *    以前两者是同一个数(`ADC_SAMPLE_POINTS` = 250),所以"读多少画多少"是自洽的。
+ *    采样率固定 65 MSPS + 加长窗之后,解调要的是**满窗 8192 点**
+ *    (`L = 6500/7800/8190/8190`),而波形图的容量只有
+ *    `UI_Demo_WaveMaxSamples()` = 480 点 —— 直接把 8192 点喂进去,
+ *    `ui_demo.c` 会**静默截断**到前 480 点(94% 的采样被丢掉),
+ *    屏上表现为"波形是平的或者只有一小段",**不报错**。
+ *
+ *    ⇒ 喂之前先算「画哪一段」和「抽稀多少」:
+ *
+ *    | 激励 | 窗长 L | 整周期 m | 一周期点数 L/m | 显示区间 min(L,3周期) | 抽稀 stride |
+ *    |---|---|---|---|---|---|
+ *    | 10 kHz  | 6500 |    1 | 6500 | 6500 | 14 |
+ *    | 100 kHz | 7800 |   12 |  650 | 1950 |  5 |
+ *    | 1 MHz   | 8190 |  126 |   65 |  195 |  1 |
+ *
+ *    取「3 个周期」而不是整窗:整窗周期数一多,480 个像素画几百个周期
+ *    只会画出摩尔纹,**看不出波形形状**。
+ *    ⚠️ 10 kHz 只有 `m = 1`(激励正好落在第 1 根谱线上),所以它画的就是整窗。
+ *    📌 10 MHz 档已于 2026-10-08 从界面删除(AD9833 的 25 MHz MCLK 输出不了),
+ *       本表的对应行随之删除 —— 但**上面的 stride 公式一个字都不用改**：
+ *       它是由 `L`/`m` 现算的,不是查表。
  */
 static void adc_feed_point_waveform(void)
 {
+    uint32_t max_pts = UI_Demo_WaveMaxSamples();
+    uint32_t l = 0u;
+    uint32_t m = 0u;
+    uint32_t period;
+    uint32_t show;
+    uint32_t stride;
     uint32_t i;
+    uint32_t fed = 0u;
 
-    UI_Demo_BeginWaveform(UI_DEMO_WAVE_POINT, ADC_SAMPLE_POINTS);
-    for (i = 0u; i < ADC_SAMPLE_POINTS; ++i) {
-        float v = AdcSample_CodesToVolts((float)s_code_a[i]);
-        float m = (AdcSample_CodesToVolts((float)s_code_b[i]) /
-                   ADC_SAMPLE_R_TIA) * 1000.0f;      /* A → mA */
+    AdcSample_LastWindow(&l, &m);
 
-        UI_Demo_UpdateWaveformPoint(UI_DEMO_WAVE_POINT, i + 1u,
-                                    ADC_SAMPLE_POINTS, v, m, NULL);
+    if ((l == 0u) || (m == 0u)) {
+        /* 还没成功解调过(或解调失败)—— 退回"把整块缓冲粗看一遍"。
+         * 这时不该假装知道周期,所以整窗抽稀,至少让人看到有没有信号。 */
+        l = ADC_SAMPLE_POINTS;
+        m = 1u;
     }
+    period = l / m;
+    if (period == 0u) {
+        period = 1u;
+    }
+
+    show = period * 3u;
+    if (show > l)                  { show = l; }
+    if (show > ADC_SAMPLE_POINTS)  { show = ADC_SAMPLE_POINTS; }
+
+    stride = (max_pts == 0u) ? 1u : ((show + max_pts - 1u) / max_pts);
+    if (stride == 0u) {
+        stride = 1u;
+    }
+
+    /* 喂进去的总点数 = ceil(show / stride)。先算出来 —— 这个 API 的
+     * `total_samples` 是"最终会有多少点",要一次给全,不能边喂边变。 */
+    fed = (show + stride - 1u) / stride;
+
+    UI_Demo_BeginWaveform(UI_DEMO_WAVE_POINT, fed);
+    for (i = 0u; i < show; i += stride) {
+        float v = AdcSample_CodesToVolts((float)s_code_a[i]);
+        float cur = (AdcSample_CodesToVolts((float)s_code_b[i]) /
+                     ADC_SAMPLE_R_TIA) * 1000.0f;   /* A → mA */
+
+        UI_Demo_UpdateWaveformPoint(UI_DEMO_WAVE_POINT, (i / stride) + 1u,
+                                    fed, v, cur, NULL);
+    }
+
+    printf("[adc] 波形:窗长 %u 点(%u 个激励周期),显示前 %u 点、每 %u 点取一 → %u 点\n",
+           (unsigned)l, (unsigned)m, (unsigned)show, (unsigned)stride,
+           (unsigned)fed);
 }
 
 /**
@@ -793,7 +859,7 @@ void DisplayProtocol_Init(void)
     /* ⚠️ 这两句必须在 UI_Demo_Init() 之后跑 —— 它们会动 LVGL 标签。
      *    调用顺序由 main.c:361→364 保证。 */
 
-    /* ---- 测量参数:激励 1 MHz + 采样 10 MSPS + 相位到窗中心,一次下发 ----
+    /* ---- 测量参数:激励 1 MHz + 采样 65 MSPS(DIV=2,固定)+ 相位到窗中心 ----
      * 🔄 2026-10-06:原来这里只写 0x80(激励)。现在整组参数归 `MeasureConfig`,
      *    它同时会刷「系统复位」页那一行常驻状态 —— 本页此刻**还没构建**
      *    (首次进入才建),那次刷新会被静默丢弃,页面构建时会自己补拉,
@@ -872,7 +938,7 @@ void DisplayProtocol_Process(void)
  *
  *      `0x14` 偏压      → 0 V(码 0x80000)
  *      `0x80` 激励      → 1 MHz
- *      `0x88` 采样率    → DIV=13 → 10 MSPS
+ *      `0x88` 采样率    → DIV=2 → 65 MSPS(2026-10-08 统一固定)
  *      `0x88` 相位      → 该分频比的窗口中心(−2)
  *      扫压状态 / 曲线  → 清空
  *      常驻状态行       → 刷新(由 MeasureConfig 自己推)

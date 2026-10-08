@@ -162,9 +162,19 @@ static lv_obj_t *g_engineering_qr_status_label;
 static lv_obj_t *g_engineering_qr_model_label;
 /* 🆕 2026-10-06「系统复位」页的测量参数控件与常驻状态行(见 UI_ShowInitialize) */
 static lv_obj_t *g_init_status_label;        /* 复位按钮正下方的常驻一行        */
-static lv_obj_t *g_init_dds_buttons[5];      /* 激励频率档位(0x80)             */
-static lv_obj_t *g_init_div_buttons[5];      /* 采样率档位(0x88 DIV + PH_OFF)  */
-static lv_obj_t *g_init_phase_buttons[3];    /* 相位:−1 / 居中 / +1            */
+/* 🔴 **档位数一律走这两个宏**(2026-10-08)。**
+ *    原先每个数都在 5 处重复(回调守卫 / 档位表 / 按钮表 / 版面 row_count /
+ *    高亮),**没有任何一处能自动发现别处的漂移** —— 2026-10-08 上板踩到的
+ *    "65MSPS 那颗按钮点了没反应"就是守卫停在旧档位数导致的**静默 return**。
+ *    收成宏之后,数组维度与守卫都由同一个数导出,这类漂移在编译期就现形。 */
+#define UI_INIT_DDS_COUNT    3u   /* 激励频率档位(0x80)—— 10k/100k/1M */
+#define UI_INIT_PHASE_COUNT  3u   /* 相位:−1 / 居中 / +1                    */
+
+static lv_obj_t *g_init_dds_buttons[UI_INIT_DDS_COUNT];
+/* ⛔ **采样率行已于 2026-10-08 删除** —— 采样率统一固定 65 MSPS 不可改,
+ *    留一行"点了没反应"的按钮只会重现本次刚修掉的那个症状。
+ *    当前采样率仍可见:常驻状态行(`MeasureConfig_FormatLine()`)里有。 */
+static lv_obj_t *g_init_phase_buttons[UI_INIT_PHASE_COUNT];
 static lv_chart_series_t *g_sweep_series[3];
 static lv_obj_t *g_keypad_overlay;
 static lv_obj_t *g_keypad_title_label;
@@ -284,7 +294,6 @@ static void UI_CreateBiasKeypad(void);
 /* 🆕 2026-10-06「系统复位」页的测量参数控件 */
 static void UI_UpdateInitConfigStyle(void);
 static void UI_InitDdsEvent(lv_event_t *event);
-static void UI_InitDivEvent(lv_event_t *event);
 static void UI_InitPhaseEvent(lv_event_t *event);
 static void UI_ActivatePage(UI_Page page);
 static void UI_RebuildSweepChart(void);
@@ -3103,28 +3112,58 @@ static void UI_InitResetEvent(lv_event_t *event)
  *   数值本身与下发归 `measure_config.c`。分开之后,改档位表只动这里,
  *   改下发/回读/窗口计算只动那边,不会互相牵连。
  *
- * 【这两个表要和 measure_config.h 的默认值对得上】
- *   `10MSPS` 那档(DIV=13)必须是 `CV_ADC_DIV_DEFAULT`,`1MHz` 那档必须是
- *   `CV_DDS_HZ_DEFAULT` —— 否则上电后没有任何一个按钮是高亮的,一看就知道错。
+ * 【档位表要和 `measure_config.h` 的默认值对得上】
+ *   `1MHz` 那档必须是 `CV_DDS_HZ_DEFAULT` —— 否则上电后没有任何一个按钮
+ *   是高亮的,一看就知道错。
+ *   (原表里还有一条 `10MSPS` 那档必须是 `CV_ADC_DIV_DEFAULT`;
+ *    **采样率行 2026-10-08 已删**,那条约束随之消失。)
  * ========================================================================== */
 
-static const uint32_t g_init_dds_choices[5] =
-    {100000u, 500000u, 1000000u, 2000000u, 5000000u};
-static const char *const g_init_dds_texts[5] =
-    {"100kHz", "500kHz", "1MHz", "2MHz", "5MHz"};
+/* 🔴 **2026-10-08 档位表由 5 档改成 4 档:`10k / 100k / 1M / 10M`;
+ *    同日随后收成 3 档 —— 10 MHz 删掉(理由见下)。**
+ *   ⛔ 原表 `{100k, 500k, 1M, 2M, 5M}` 的问题不是"不好",而是
+ *      **它从没跟采样率一起被验算过**:采样率统一固定 65 MSPS(不更改)之后,
+ *      解调要求窗覆盖整数个激励周期,而 65 MSPS 下**最低可用激励 = f_s/250 内**,
+ *      10 kHz 与 100 kHz 在旧的 4096 点窗下**一个都放不下**
+ *      (`q = 6500 / 650`),继续摆着就是"组合不合理"本身。
+ *   ⇒ 配套改了采集缓冲(4096 → 8192,`adc_capture.v`)才让这些档成立:
+ *
+ *     | 激励 | q | 窗长 L | 整周期 m | 点/周期 |
+ *     |---|---|---|---|---|
+ *     | 10 kHz  | 6500 | 6500 |    1 | 6500 |
+ *     | 100 kHz |  650 | 7800 |   12 |   65 |
+ *     | 1 MHz   |   65 | 8190 |  126 |   65 |
+ *     | ~~10 MHz~~ | ~~13~~ | ~~8190~~ | ~~1260~~ | ~~6.5~~ |  ← 已删
+ *
+ *   🔴 **10 MHz 为什么删:算术成立、物理不成立。**
+ *      AD9833 的 MCLK 是**焊死的 25 MHz**(决策 D10,FPGA 供不了),
+ *      `f_out = code × 25 MHz / 2^28` ⇒ 10 MHz 只有 **2.5 个 DAC 点/周期**,
+ *      而且 15 MHz 镜像离主频只隔 5 MHz。**实测输出不了**(2026-10-08 用户判定),
+ *      ⇒ 这一档留在表上就是又一个"点了没反应"。
+ *      ⛔ 别按"再调调参数就行"处理:这是 DAC 采样定理的硬限制,不是配置问题。
+ *      要 10 MHz 只能换激励源(MCLK ≥ 100 MHz 的 DDS),属硬件改动。
+ *
+ *   ⚠️ 10 kHz 那一档 `m = 1` ⇒ 激励正好落在**第 1 根谱线**上,
+ *      整窗内的基线漂移会直接进信号 bin(DC 不会,整周期 Σcos = 0 精确抵消)。
+ *      判据:同一器件同一偏压下,10 kHz 与 100 kHz 反演的 Cs 应当接近;
+ *      差得多则嫌疑是漂移。
+ */
+static const uint32_t g_init_dds_choices[UI_INIT_DDS_COUNT] =
+    {10000u, 100000u, 1000000u};
+static const char *const g_init_dds_texts[UI_INIT_DDS_COUNT] =
+    {"10kHz", "100kHz", "1MHz"};
 
-static const uint32_t g_init_div_choices[5] = {130u, 65u, 26u, 13u, 10u};
-static const char *const g_init_div_texts[5] =
-    {"1MSPS", "2MSPS", "5MSPS", "10MSPS", "13MSPS"};
-
-static const int32_t g_init_phase_deltas[3] = {-1, 0, 1};
-static const char *const g_init_phase_texts[3] = {"相位 -1", "居中", "相位 +1"};
+static const int32_t g_init_phase_deltas[UI_INIT_PHASE_COUNT] = {-1, 0, 1};
+static const char *const g_init_phase_texts[UI_INIT_PHASE_COUNT] =
+    {"相位 -1", "居中", "相位 +1"};
 
 /* 动作码。避开既有占用:100/101、201–203、210–214、220、240–242、310–313、320–322。
- * 250–259 给频率档位,260–262 给相位 —— 与既有的分段习惯一致。 */
+ * 250–253 给频率档位(现用 250–252,3 档),261–263 给相位(3 档)—— 与既有的分段习惯一致。
+ * ⚠️ **253–260 现在是空的**:253 是 10 MHz 删除后空出来的,255–260 原属采样率段
+ *    (2026-10-08 随该行删除)。相位段**故意留在 261 不动**:挪它要改历史记录里的
+ *    动作码,而空着的码没有代价。将来加档位优先用 253,再往下用。 */
 #define UI_INIT_ACTION_DDS_BASE    250u
-#define UI_INIT_ACTION_DIV_BASE    255u
-#define UI_INIT_ACTION_PHASE_BASE  260u
+#define UI_INIT_ACTION_PHASE_BASE  261u
 
 /** @brief 一组档位按钮的选中态:选中的换底色 + 2 px 边框(照 UI_UpdateSinglePathStyle 的写法)。
  *  @param selected 选中下标;传 `count` 或更大值时**一个都不选**(相位行用得上)。 */
@@ -3182,19 +3221,20 @@ static uint32_t UI_ChoiceIndex(const uint32_t *choices, uint32_t count,
     return count;
 }
 
-/** @brief 按当前参数(而不是按本地的点击记录)重算三行的高亮。 */
+/** @brief 按当前参数(而不是按本地的点击记录)重算两行的高亮。
+ *
+ *  ⚠️ 原来还有一行"采样率",2026-10-08 随该行删除 —— 采样率固定 65 MSPS。
+ *     它的高亮原本靠 `MeasureConfig_GetSampleDiv()` 对 `g_init_div_choices`
+ *     取下标,现在连表一起没了,别再往这里加回来。 */
 static void UI_UpdateInitConfigStyle(void)
 {
-    UI_InitStyleRow(g_init_dds_buttons, 5u,
-                    UI_ChoiceIndex(g_init_dds_choices, 5u,
+    UI_InitStyleRow(g_init_dds_buttons, UI_INIT_DDS_COUNT,
+                    UI_ChoiceIndex(g_init_dds_choices, UI_INIT_DDS_COUNT,
                                    MeasureConfig_GetDdsHz()));
-    UI_InitStyleRow(g_init_div_buttons, 5u,
-                    UI_ChoiceIndex(g_init_div_choices, 5u,
-                                   MeasureConfig_GetSampleDiv()));
     /* 相位是连续量,没有"当前档";只有"是不是正好在窗中心"。
-     * 不在中心时传 3(= count)⇒ 三个按钮都不高亮,如实反映"手动偏了"。 */
-    UI_InitStyleRow(g_init_phase_buttons, 3u,
-                    MeasureConfig_IsPhaseCentered() ? 1u : 3u);
+     * 不在中心时传 count ⇒ 三个按钮都不高亮,如实反映"手动偏了"。 */
+    UI_InitStyleRow(g_init_phase_buttons, UI_INIT_PHASE_COUNT,
+                    MeasureConfig_IsPhaseCentered() ? 1u : UI_INIT_PHASE_COUNT);
 }
 
 /**
@@ -3247,7 +3287,12 @@ static void UI_InitDdsEvent(lv_event_t *event)
     }
 
     index = UI_InitEventIndex(event);
-    if ((index == 0u) || (index > 5u))
+    /* 🔴 **上界一律写 `UI_INIT_DDS_COUNT`,不要再写字面量。**
+     *    2026-10-08 上板踩到的"按钮点了没反应"就是这里写死成旧的档位数 5,
+     *    而该行已扩到 6 档 ⇒ 最后一颗传进来 `index = 6` **当场静默 return**
+     *    (触摸有事件、回调不执行、无任何日志)。
+     *    现在档位数由宏导出,改表就自动改到这里 —— 编译期对齐,不靠人记。 */
+    if ((index == 0u) || (index > UI_INIT_DDS_COUNT))
     {
         return;
     }
@@ -3264,35 +3309,13 @@ static void UI_InitDdsEvent(lv_event_t *event)
     }
 }
 
-static void UI_InitDivEvent(lv_event_t *event)
-{
-    uint32_t index;
-
-    if ((event == NULL) || (lv_event_get_code(event) != LV_EVENT_CLICKED))
-    {
-        return;
-    }
-
-    index = UI_InitEventIndex(event);
-    if ((index == 0u) || (index > 5u))
-    {
-        return;
-    }
-    index--;
-
-    UI_RecordAction(UI_INIT_ACTION_DIV_BASE + index);
-    (void)MeasureConfig_SetSampleDiv(g_init_div_choices[index]);
-    UI_UpdateInitConfigStyle();
-
-    /* ⚠️ 这里改的是**采样率**,它同时动了相位(窗口跟着分频比走)——
-     *    状态行里两项都会变,是正常的,不是 bug。 */
-    if (g_status_label != NULL)
-    {
-        lv_label_set_text_fmt(g_status_label,
-                              "状态:采样率已设为 %s(相位随之移到窗中心)",
-                              g_init_div_texts[index]);
-    }
-}
+/* ⛔ `UI_InitDivEvent()` 已于 2026-10-08 **删除** —— 采样率固定 65 MSPS,
+ *    该行连同 `g_init_div_choices/texts`、`g_init_div_buttons`、
+ *    `UI_INIT_ACTION_DIV_BASE` 一起移除。
+ *    📌 历史:`LLM-054` 记录的"65MSPS 那颗按钮点了没反应"就发生在这个函数里
+ *    (守卫写死 `> 5u`,而该行已扩到 6 档)。**留着这行就等于留着那个缺陷的宿主。**
+ *    采样率本身仍由 `CV_ADC_DIV_DEFAULT`(= 2 → 65 MSPS)下发,
+ *    并显示在常驻状态行里(`MeasureConfig_FormatLine()`)。 */
 
 static void UI_InitPhaseEvent(lv_event_t *event)
 {
@@ -3405,7 +3428,7 @@ static void UI_ShowInitialize(void)
                   UI_COLOR_STATUS,
                   18, 224, 120, 30,
                   LV_TEXT_ALIGN_LEFT);
-    row_count = 5u;
+    row_count = UI_INIT_DDS_COUNT;
     row_width = (panel_width - 18 - row_x -
                  ((lv_coord_t)row_count - 1) * row_gap) / (lv_coord_t)row_count;
     for (index = 0u; index < row_count; ++index)
@@ -3422,35 +3445,17 @@ static void UI_ShowInitialize(void)
                             (void *)(uintptr_t)(index + 1u));
     }
 
-    /* ---- 第 2 行:采样率(0x88 —— DIV 与 PH_OFF 一起写)-------------- */
-    UI_CreateText(panel,
-                  "采样率",
-                  &ui_font_cn_20,
-                  UI_COLOR_STATUS,
-                  18, 280, 120, 30,
-                  LV_TEXT_ALIGN_LEFT);
-    for (index = 0u; index < row_count; ++index)
-    {
-        g_init_div_buttons[index] =
-            UI_CreateButton(panel,
-                            g_init_div_texts[index],
-                            UI_COLOR_SURFACE,
-                            row_x + (lv_coord_t)index * (row_width + row_gap),
-                            272,
-                            row_width,
-                            44,
-                            UI_InitDivEvent,
-                            (void *)(uintptr_t)(index + 1u));
-    }
-
-    /* ---- 第 3 行:采样相位微调(给手动找眼用)----------------------- */
+    /* ---- 第 2 行:采样相位微调(给手动找眼用)-----------------------
+     * ⛔ 原来的"第 2 行:采样率"已于 2026-10-08 删除(采样率固定 65 MSPS),
+     *    所以相位行**从 y = 328 上移到 y = 272**,顶掉空出来的那一格。
+     *    ⚠️ 上移要连标签一起移(336 → 280),只移按钮会让标签悬在下一行的位置。 */
     UI_CreateText(panel,
                   "采样相位",
                   &ui_font_cn_20,
                   UI_COLOR_STATUS,
-                  18, 336, 120, 30,
+                  18, 280, 120, 30,
                   LV_TEXT_ALIGN_LEFT);
-    row_count = 3u;
+    row_count = UI_INIT_PHASE_COUNT;
     row_width = (panel_width - 18 - row_x -
                  ((lv_coord_t)row_count - 1) * row_gap) / (lv_coord_t)row_count;
     for (index = 0u; index < row_count; ++index)
@@ -3460,7 +3465,7 @@ static void UI_ShowInitialize(void)
                             g_init_phase_texts[index],
                             UI_COLOR_SURFACE,
                             row_x + (lv_coord_t)index * (row_width + row_gap),
-                            328,
+                            272,
                             row_width,
                             44,
                             UI_InitPhaseEvent,
@@ -3475,7 +3480,7 @@ static void UI_ShowInitialize(void)
     UI_RefreshInitStatusLine();
 
     UI_CreateText(screen,
-                  "二次确认后发送指令   ·   采样率上限 13 MSPS(130 MHz 基准除不出 20 MSPS)",
+                  "二次确认后发送指令   ·   采样率固定 65 MSPS(不可调,发复位即回此档)",
                   &ui_font_cn_20,
                   UI_COLOR_TEXT_MUTED,
                   60,
@@ -4704,6 +4709,11 @@ static lv_obj_t *UI_CreateResultSubpage(lv_obj_t *parent)
 /* --------------------------------------------------------------------------
  * 波形缓存(单点波形 / 扫压包络)
  * ------------------------------------------------------------------------ */
+
+uint32_t UI_Demo_WaveMaxSamples(void)
+{
+    return UI_WAVE_MAX_SAMPLES;
+}
 
 void UI_Demo_BeginWaveform(uint32_t kind, uint32_t total_samples)
 {

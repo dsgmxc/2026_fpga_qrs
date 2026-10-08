@@ -31,6 +31,8 @@ adc_probe.py —— AD9238 采集通路【常驻】板上探针(2026-10-06)
 命令表
 ================================================================================
     init                    加载位流 + FCLK0=50M + 放行(0x84[0]=1)。**全程只许一次**
+    attach                  只映射 MMIO,**不加载位流**(PL 已由 main.py 加载好时用)。
+                            与 init 二选一,每个上电周期只用其一。
     fclk [mhz]              单独重设 FCLK0(默认 50)。init 里那步失败时补投
     sts                     读 0x84 / 0x88 / 0x90
     dump <div> <ph> [n]     单次采集,读 n 个点(默认 64),打统计 + 原始值
@@ -45,13 +47,16 @@ adc_probe.py —— AD9238 采集通路【常驻】板上探针(2026-10-06)
     0x88 ADC_CFG       RW [7:0]DIV [15:8]PH_OFF(有符号) [16]CONT [17]OE_N [18]PDN
     0x8C ADC_CTRL      RW [0]GO(1 脉冲,读回 0)
     0x90 ADC_STS       RO [0]mmcm_locked [1]done [2]busy [3]otr_sticky
-    0x94 ADC_BUF_IDX   RW [11:0]
+    0x94 ADC_BUF_IDX   RW [12:0]
     0x98 ADC_BUF_DATA  RO [11:0]sample [12]OTR
 
 ⚠️ PH_OFF 是**相对 adc_clk 下降沿的有符号偏移**,有效范围 [-P/2, P-1-P/2]
    (P = DIV)。越界不会误触发,只是**永远采不到**、done 不置位 —— 失败方向安全。
-⚠️ 复位默认 ADC_CFG = 0x0000000D ⇒ DIV=13 / 10 MSPS / PH_OFF=0
-   ⇒ **0x88 读回 0x0D 就是"新位流已加载"的判据**(旧位流没这个寄存器,读 0)
+⚠️ 复位默认 ADC_CFG 随版本变,是**判位流新旧**最快的判据(旧位流没这个寄存器,读 0):
+       0x0000000D ⇒ DIV=13 / 10 MSPS  ← 2026-10-08 之前的位流
+       0x00000002 ⇒ DIV=2  / 65 MSPS  ← 🆕 2026-10-08 起(采样率统一 65 MSPS)
+   ⛔ 只能在**刚加载完位流、还没有别人写过 0x88** 时读。`c_ui` 一上来就会写它
+      ⇒ 用 `attach`(PL 已由 main.py 加载)时读到的不是复位默认值,别据此判新旧。
 """
 
 import os
@@ -76,7 +81,7 @@ R_ADC_STS = 0x90
 R_ADC_BUF_IDX = 0x94
 R_ADC_BUF_DATA = 0x98
 
-BUF_N = 4096
+BUF_N = 8192
 BIT_FILE = '/home/xilinx/qrs.bit'
 CMD_FILE = '/home/xilinx/adc_cmd.txt'
 
@@ -125,12 +130,50 @@ def cmd_init(st):
         print("[init] 🔴 放行写失败:%s" % e, flush=True)
 
     # --- 位流身份判据 -------------------------------------------------------
+    # 🔴 2026-10-08:复位默认由 0x0D(DIV=13/10 MSPS)改成 **0x02(DIV=2/65 MSPS)**。
+    #    ⛔ 只有走到这一步才看得到它 —— 下一条 `cmd_sts` 之前没人写过 0x88。
+    #    从 `attach` 进来时 0x88 已被 `c_ui` 写过,**本判据不适用**,那时靠
+    #    `wr 0x94 0x1FFF` 的回读(13 位掩码)判新旧,见本文件头。
     cfg = st['mmio'].read(R_ADC_CFG)
-    if cfg == 0x0000000D:
-        print("[init] ✅ 0x88 = 0x0000000D ⇒ **这是新位流**(DIV=13/PH=0 复位默认)", flush=True)
+    if cfg == 0x00000002:
+        print("[init] ✅ 0x88 = 0x00000002 ⇒ **这是 2026-10-08 之后的位流**"
+              "(DIV=2 / 65 MSPS / 缓冲 8192)", flush=True)
+    elif cfg == 0x0000000D:
+        print("[init] 🔴 0x88 = 0x0000000D ⇒ **这是旧位流**(DIV=13 / 缓冲 4096)。"
+              "65 MSPS 与 10k/100k 两档激励在当前位流上**不成立** —— 先换位流。", flush=True)
     else:
-        print("[init] 🔴 0x88 = 0x%08X ≠ 0x0000000D ⇒ **疑似旧位流或译码不对**,"
-              "后面的采集结果不可信" % cfg, flush=True)
+        print("[init] 🔴 0x88 = 0x%08X 既不是 0x00000002 也不是 0x0000000D "
+              "⇒ 位流版本不明或译码不对,后面的采集结果不可信" % cfg, flush=True)
+    cmd_sts(st)
+
+
+def cmd_attach(st):
+    """只映射 MMIO,**不加载位流** —— 给「PL 已经由别的进程加载好」的情形用。
+
+    🔴 存在的理由(2026-10-07 补):`init` 里那句 `Overlay()` 是**本上电周期
+       唯一允许的一次**,而它常已被 `main.py` 用掉(UI 正常跑着就是这个状态)。
+       此时本探针仍然可以读写寄存器 —— `/dev/mem` 的 mmap **不排斥多进程**,
+       位流也早就在 PL 里了。缺的只是 `st['mmio']` 这个映射,补上即可。
+
+       ⛔ `attach` 与 `init` 每个上电周期只用其一。为防手滑,attach 成功后
+          **主动占住 `st['ol']`** —— `cmd_init` 开头那句 `st.get('ol') is not None`
+          就会拦住后来的 `Overlay()`。这是复用既有守卫,不是新加逻辑。
+
+    ⚠️ attach **不碰 FCLK0**。若 PL 是 `main.py` 加载的,FCLK0 已由
+       `board.py::apply_fclk0()` 设成 50 MHz;要复核请单独投 `sts` 看
+       `0x90[0] locked` 是否为 1(为 0 ⇒ ADC 时钟没起来,先查 FCLK0)。
+    """
+    from pynq import MMIO
+
+    if st.get('mmio') is not None:
+        print("!! 已经 attach/init 过了。")
+        return
+    st['mmio'] = MMIO(AXI_BASE, 0x1000)
+    st['slcr'] = MMIO(SLCR_BASE, 0x1000)
+    st['ol'] = 'attached-externally'        # 占位:让 cmd_init 的守卫拒绝二次 Overlay
+
+    print("[attach] MMIO 已映射(未加载位流,未改 FCLK0)。0x84 = 0x%08X"
+          % st['mmio'].read(R_CV_CTRL), flush=True)
     cmd_sts(st)
 
 
@@ -340,9 +383,11 @@ def run_cmd(c, st):
         sys.exit(0)
     if op == 'init':
         return cmd_init(st)
+    if op == 'attach':
+        return cmd_attach(st)
     if st.get('mmio') is None:
-        print("!! 还没 init(位流没加载)。先投递 init —— 那是本上电周期唯一一次加载。",
-              flush=True)
+        print("!! 还没 init/attach(MMIO 没映射)。二选一先投:位流未加载投 `init`,"
+              "已由别的进程(如 main.py)加载好则投 `attach`。", flush=True)
         return
     if op == 'sts':
         return cmd_sts(st)

@@ -52,6 +52,7 @@ skill/
 | [`rtl-constant-experiment-must-verify-netlist/`](rtl-constant-experiment-must-verify-netlist/skill.md) | 把 RTL 常量当实验自变量时:源码不是证据,综合后网表才是 | ✅ **已落地** |
 | [`use-layout-as-ruler/`](use-layout-as-ruler/skill.md) | 用被测对象自己的几何当量具,而不是用人的手当量具 | ✅ **已落地** |
 | [`gbk-example-porting/`](gbk-example-porting/skill.md) | 中文厂商 GBK 例程向 Linux 工具链移植:往返校验 + 正文 md5 | ✅ **已落地** |
+| [`silent-capacity-gates/`](silent-capacity-gates/skill.md) | 改一个容量时沿路的 `掩码/上限/截断`:静默型 / 报错型 / **上限型≠容量型** 三分法 | ✅ **已落地**(2026-10-08) |
 
 ### ⏸ 计划中但**未落地**(缺"已验证的效果"与"来源",不建空壳)
 
@@ -62,7 +63,7 @@ skill/
 |---|---|---|
 | `hls-ap-none-rtl-integration/` | HLS 裸端口模块在 RTL 中例化的踩坑清单 | HLS 两个核(`dlia_core` / `cordic_polar`)**一行都还没写** |
 | `vivado-input-delay-calc/` | 并行 ADC 的 `set_input_delay` 计算与约束模板 | 目前只有输入方向约束,`set_output_delay` 尚未写;`clk_adc` 频率未定 |
-| `cic-coherent-sampling/` | 相干采样参数解算(M / R / f 的整数周期关系) | 只有**纸面推导**,尚无仿真或上板验证 |
+| `cic-coherent-sampling/` | 相干采样参数解算(M / R / f 的整数周期关系) | ⚠️ **卡点已减半**:数字域那一半(整窗 DFT 的窗长解算)2026-10-08 **已上板验证**(三档窗长 `6500/7800/8190`,见 `report/measurements/20261008_65msps_window_board_acceptance.md`);**仍缺 CIC 那一半** —— `dlia_core` / `cordic_polar` 一行还没写 |
 | `prompt-hls-pipeline/` | 从算法描述生成 HLS 并引导流水线优化的提示词模板 | 同上 —— 没有实际用过的提示词 |
 | `prompt-timing-triage/` | 把时序报告喂给 LLM 做瓶颈定位的提示词模板 | 同上 |
 | `golden-compare-script/` | 黄金参考自动比对与误差报告生成 | 现在的手法是**离散的变异测试**,还没有沉淀出脚本化流程 |
@@ -98,13 +99,15 @@ skill/
 所以正确做法是:**从项目第一天起,每踩一个坑就回来补一条**。
 `report/llm-log/` 里的纠错轨迹,就是本目录的原料。
 
-**本目录当前状态(2026-10-03)**:
+**本目录当前状态(2026-10-08)**:
 
 - 索引提名过 **73** 个候选 skill 名(`grep -oE 'skill/[a-z0-9-]+' report/llm-log/INDEX.md | sort -u | wc -l`),
-  **已落地 10 项**。
-- 落地的 10 项**全部**满足五要素;「已验证的效果」全部可追到
+  **已落地 11 项**(2026-10-08 新增 `silent-capacity-gates/`)。
+- 落地的 11 项**全部**满足五要素;「已验证的效果」全部可追到
   `report/measurements/` 的存档或 `report/llm-log/` 的记录编号。
 - **未落地的项写进上表并说明卡点**,不以空壳充数。
+- 📌 新增项的来源固定是**同一周内真实发生的事**:`LLM-055` 的三道静默关卡 +
+  一次上板验收(`20261008_65msps_window_board_acceptance.md`)。**没有为了凑数而写。**
 
 **归属声明**:本目录下的 `skill.md` 均为 **Claude 撰写的 markdown 文档**
 (`CLAUDE.md` §6.0:非代码文档属模型职责)。

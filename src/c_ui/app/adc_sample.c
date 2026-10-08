@@ -42,17 +42,39 @@
 
 /* 等待超时(ms)。`cv_millis()` 只有 1 ms 分辨力,所以这几个数要**明显大于**
  * 真实耗时,不然会把"正常但慢"判成超时。真实耗时量级:
- *   收满 4096 点:1 MSPS 档(DIV=130)最长 = 4096 µs ≈ 4.1 ms
+ *   收满 8192 点:最快档(DIV=2,65 MSPS)= 126 µs;最慢档(DIV=130)= 8.2 ms
  *   最慢档(DIV=2 → 65 MHz)只要 63 µs
  * ⇒ done 给 200 ms 是 ~50 倍余量,不会误报。 */
 #define ADC_WAIT_IDLE_MS      50u
 #define ADC_WAIT_GO_MS        50u
 #define ADC_WAIT_DONE_MS      200u
 
-/** 解调参考表的点数上限。DIV=2(65 MHz)时每周期有 65 点,取 64 不够 —— 但那一档
- *  本来就采不出可用波形(见 `adc_capture.v` 文件头),所以只需覆盖**实际会用**的
- *  档位:DIV=5 → 26 点、DIV=13 → 10 点、DIV=26 → 5 点。64 留了足够余量。 */
-#define ADC_DEMOD_MAX_N       64u
+/** 🔴 **参考表的点数上限 = 一次解调用多少个采样点(窗长)**,不是"每周期最多几点"。
+ *
+ *  2026-10-07 改。旧实现按**一个激励周期**建表,于是表长 = `f_s/f_e`,
+ *  激励一调低表就爆(`100 kHz + 10 MSPS` → 100 点 > 64)——
+ *  那是**这张表能装多少**,不是 DFT 的限制。DFT 的唯一要求是
+ *  **窗覆盖整数个激励周期**(`L·f_e/f_s ∈ ℤ`),它**不要求 `f_s/f_e` 是整数**。
+ *  改成按**整窗 `L` 点**建表后,表长只跟窗长走,与频率比**无关**。
+ *
+ *  🔴 **2026-10-08 由 256 改 8192。** 这是"加长窗"改动里的**第二道闸**:
+ *     `ADC_SAMPLE_POINTS` 从 250 提到 8192 后,各档激励的窗长
+ *     `L = 6500 / 7800 / 8190` **全部超过 256** ⇒ 表长不改的话
+ *     `build_table()` 直接 `return false`,用户看到的是
+ *     「解调不可用:窗长 6500 点,超出参考表上限 256」——
+ *     **数字上算得出来、这里装不下**,与 `ui_demo.c` 那个停在旧档位的
+ *     回调守卫是同一个形状(算得对、闸在中间)。
+ *
+ *  ⚠️ 它是 `static` 的 `.bss`,**不是栈**:8192 × 4 B × 2 张表 = 64 KB,
+ *     改大不会炸栈。若哪天改成局部变量,64 KB 就会当场爆栈。
+ *  ⚠️ 必须 ≥ `ADC_SAMPLE_POINTS`(`L ≤ n`)。两个值一起改。 */
+#define ADC_DEMOD_MAX_L       ADC_SAMPLE_POINTS
+
+/** 窗内至少要有几个激励周期。低于此值 ⇒ 窗里连一个完整周期都没有,
+ *  相关运算等于在比"两个不同的东西",不如明说不解调。
+ *  (当前实现下不会触发 —— 由"窗长必须是 `q` 的整数倍"这条保证 `m ≥ 1`;
+ *   留作断言用。) */
+#define ADC_DEMOD_MIN_M       1u
 
 #define ADC_TWO_PI            6.28318530717958647692
 
@@ -65,9 +87,10 @@
  *    原来写 192,`-Wformat-truncation` 实测报**截断** —— 恰好在这种
  *    "就靠这行字定位"的时候把最关键的尾句吃掉。加宽到 320 留余量。 */
 static char     s_err[320];
-static uint32_t s_tab_n;                            /* 表是按哪个 N 建的 */
-static float    s_tab_cos[ADC_DEMOD_MAX_N];
-static float    s_tab_sin[ADC_DEMOD_MAX_N];
+static uint32_t s_tab_m;                            /* 表是按哪组 (M, L) 建的 */
+static uint32_t s_tab_l;
+static float    s_tab_cos[ADC_DEMOD_MAX_L];
+static float    s_tab_sin[ADC_DEMOD_MAX_L];
 
 /* ==========================================================================
  * 小工具
@@ -297,32 +320,55 @@ out:
  * ========================================================================== */
 
 /**
- * @brief 按每周期 @p n 点建 cos/sin 参考表(只在 n 变化时重建)。
- *
- * 🔴 **为什么是运行时建表,不是编译期常量表**:每周期采样点数
- *    `N = f_s / f_e = 130 / DIV` 随用户选的档位变(DIV=5 → 26 点、
- *    13 → 10 点、26 → 5 点)。写死 10 点只对 DIV=13 成立。
- *    建表最多 26 次 `cos()`/`sin()`,一次采集摊到可以忽略;
- *    而且 `libm` 本来就已经链了(`pynq_protocol.c` 用了 `powf`)。
+ * @brief 最大公约数(Euclid)。用来把激励/采样率化到最简比。
  */
-static bool build_table(uint32_t n)
+static uint32_t gcd_u32(uint32_t a, uint32_t b)
+{
+    while (b != 0u) {
+        uint32_t t = a % b;
+
+        a = b;
+        b = t;
+    }
+    return a;
+}
+
+/**
+ * @brief 按**整窗 @p l 点、内含 @p m 个激励周期**建 cos/sin 参考表(只在 (m,l) 变化时重建)。
+ *
+ * 🔴 **为什么是整窗表,不是"一个周期"的表**(2026-10-07 改):
+ *    旧实现建的是**一个激励周期**的表(`cos(2πk/n)`,`k = 0..n-1`),调用处用
+ *    `k % n` 循环取 ⇒ 表长 = `f_s/f_e`,**必须整除**,且激励一调低表就爆。
+ *    那两条都是**实现**的派生品,不是 DFT 的要求。DFT 只要求窗覆盖整数个周期;
+ *    按整窗建表时,周期数体现在**相位步进**里,与频率比是否整除**无关**。
+ *    ⇒ 表长只跟窗长走(`l ≤ ADC_DEMOD_MAX_L`),与 `f_e/f_s` 无关。
+ *
+ * 相位步进必须是 `2π·m/l` **而不是** `2π/l`:后者是"一个周期占满整个窗",
+ * 会把激励当成 DC,算出来恒等于窗内平均值。
+ *
+ * 🔴 **为什么是运行时建表,不是编译期常量表**:`m` 与 `l` 都随用户选的
+ *    激励 / 采样率档位变。建表最多 `l` 次 `cos()`/`sin()`(≤ 250),
+ *    一次采集摊到可以忽略;而且 `libm` 本来就已经链了(`pynq_protocol.c` 用了 `powf`)。
+ */
+static bool build_table(uint32_t m, uint32_t l)
 {
     uint32_t k;
 
-    if (n == s_tab_n) {
-        return true;                        /* 同一档位,复用 */
+    if ((m == s_tab_m) && (l == s_tab_l)) {
+        return true;                        /* 同一组参数,复用 */
     }
-    if ((n == 0u) || (n > ADC_DEMOD_MAX_N)) {
+    if ((m == 0u) || (l == 0u) || (l > ADC_DEMOD_MAX_L)) {
         return false;
     }
 
-    for (k = 0u; k < n; ++k) {
-        double ph = ADC_TWO_PI * (double)k / (double)n;
+    for (k = 0u; k < l; ++k) {
+        double ph = ADC_TWO_PI * (double)m * (double)k / (double)l;
 
         s_tab_cos[k] = (float)cos(ph);
         s_tab_sin[k] = (float)sin(ph);
     }
-    s_tab_n = n;
+    s_tab_m = m;
+    s_tab_l = l;
     return true;
 }
 
@@ -330,8 +376,10 @@ bool AdcSample_Demodulate(const uint32_t *code, uint32_t n,
                           uint32_t sample_hz, uint32_t fe_hz,
                           float *out_i, float *out_q, float *out_mag)
 {
-    uint32_t nn;
-    uint32_t use;
+    uint32_t g;
+    uint32_t q;
+    uint32_t m;
+    uint32_t l;
     uint32_t k;
     double   si = 0.0;
     double   sq = 0.0;
@@ -347,45 +395,68 @@ bool AdcSample_Demodulate(const uint32_t *code, uint32_t n,
         return false;
     }
 
-    nn = sample_hz / fe_hz;                 /* 每周期采样点数 */
-    if (nn < ADC_SAMPLE_DEMOD_MIN_N) {
+    /* ★ 相干采样只要求「窗覆盖整数个激励周期」,即 `L·f_e/f_s ∈ ℤ`。
+     *   把它化到最简:`f_e/f_s = p/q`(gcd 约分)⇒ **`L` 必须是 `q` 的整数倍**,
+     *   此时窗内恰好有 `m = L·p/q` 个整周期,参考取 `cos(2π·m·k/L)`。
+     *   ⛔ 不要写成"`f_s/f_e` 必须整除" —— 那是个**更强、且 DFT 不要求**的条件,
+     *      它只在"按一个周期循环查表"的旧实现下才必须(见 build_table 的注释)。
+     *   ⛔ 也不要用 `round(m·f_s/f_e)` 反推 `l`:那个乘积**未必接近整数**
+     *      (`2 MHz + 65 MSPS` → `8 × 32.5 = 260`、退一位得 `7 × 32.5 = 227.5`),
+     *      四舍五入后这一窗**不是整数个周期**,泄漏消不掉 ——
+     *      而且**不报错**。本实现第一版就是这么写的,靠数值自检才发现
+     *      (`2 MHz + 65 MSPS` 的 mag 得 999.47 而非 1000.00)。 */
+    g = gcd_u32(sample_hz, fe_hz);
+    q = sample_hz / g;                      /* 最简分母:波形每 q 点重复一次 */
+    l = (n / q) * q;                        /* ≤ n 的最大 q 的整数倍 = 窗长 */
+    m = (l / q) * (fe_hz / g);              /* 窗内整周期数 */
+
+    /* 窗内放不下整数个激励周期:激励太低 / 采样率太高(`q > n` ⇒ `l == 0`)。
+     * ⚠️ 这个方向**与"每周期点数不够"正好相反** —— 两条各自写明往哪边调,
+     *    否则照错的指引排查会往反方向走(`LLM-050` 记过这个缺陷)。 */
+    if ((l == 0u) || (m < ADC_DEMOD_MIN_M)) {
         (void)snprintf(s_err, sizeof(s_err),
-                       "解调不可用:每周期只有 %u 点(下限 %u) —— "
+                       "解调不可用:%u 点里放不下整数个激励周期"
+                       "(激励 %u Hz 对采样率 %u Hz 太低,窗长必须是 %u 点的整数倍)。"
+                       "把激励调高,或把采样率调低。",
+                       (unsigned)n, (unsigned)fe_hz, (unsigned)sample_hz,
+                       (unsigned)q);
+        return false;
+    }
+
+    /* 每周期点数 = `l/m`,**真比值**(= `q/p`),不是整数除法的截断值。
+     * 🔴 旧实现用 `sample_hz / fe_hz` 的**整数商**当每周期点数:
+     *    `2 MHz + 13 MSPS` 得 6、真值 6.5 ⇒ 建出的表对**任何一个周期都不成立**,
+     *    而且**不报错**,静默返回一个错的数。改成真比值后这一格是精确的。 */
+    if (((double)l / (double)m) < (double)ADC_SAMPLE_DEMOD_MIN_N) {
+        (void)snprintf(s_err, sizeof(s_err),
+                       "解调不可用:每周期只有 %.2f 点(下限 %u)—— "
                        "采样率 %u Hz 对 %u Hz 激励太低。"
                        "N=2 正好在 Nyquist 上、N=1 直接混叠到 DC,算出来是噪声。"
-                       "换 DIV 更小的档位(DIV=13 → 10 点、DIV=5 → 26 点)。",
-                       (unsigned)nn, (unsigned)ADC_SAMPLE_DEMOD_MIN_N,
+                       "把激励调低,或把采样率调高。",
+                       (double)l / (double)m, (unsigned)ADC_SAMPLE_DEMOD_MIN_N,
                        (unsigned)sample_hz, (unsigned)fe_hz);
         return false;
     }
-    if (!build_table(nn)) {
+
+    if (!build_table(m, l)) {
         (void)snprintf(s_err, sizeof(s_err),
-                       "解调不可用:每周期 %u 点,超出参考表上限 %u",
-                       (unsigned)nn, (unsigned)ADC_DEMOD_MAX_N);
+                       "解调不可用:窗长 %u 点,超出参考表上限 %u",
+                       (unsigned)l, (unsigned)ADC_DEMOD_MAX_L);
         return false;
     }
 
-    /* ★ 截到**整数个激励周期**。不截的话平均窗盖不住整周期,
-     *   Σcos / Σsin 不为 0 ⇒ 2f_e 谐波和直流都抵不干净,曲线带纹波。 */
-    use = (n / nn) * nn;
-    if (use == 0u) {
-        (void)snprintf(s_err, sizeof(s_err),
-                       "解调不可用:只有 %u 点,不足一个激励周期(%u 点)",
-                       (unsigned)n, (unsigned)nn);
-        return false;
-    }
-
-    for (k = 0u; k < use; ++k) {
+    for (k = 0u; k < l; ++k) {
         double x = (double)code[k];
 
-        si += x * (double)s_tab_cos[k % nn];
-        sq -= x * (double)s_tab_sin[k % nn];
+        si += x * (double)s_tab_cos[k];
+        sq -= x * (double)s_tab_sin[k];
     }
 
-    /* ×2/use 归一化到**幅值**:x[n] = A·cos(ωn+φ) ⇒ I = A·cosφ、Q = A·sinφ。
-     * 直流项被 Σcos = Σsin = 0 精确消掉 ⇒ ADC 的偏置不用另做改正。 */
-    si = (2.0 * si) / (double)use;
-    sq = (2.0 * sq) / (double)use;
+    /* ×2/l 归一化到**幅值**:x[k] = A·cos(2πmk/l + φ) ⇒ I = A·cosφ、Q = A·sinφ。
+     * 直流项被 Σcos = Σsin = 0 精确消掉(整周期 ⇒ 整圈单位根之和为零)
+     * ⇒ ADC 的偏置不用另做改正。 */
+    si = (2.0 * si) / (double)l;
+    sq = (2.0 * sq) / (double)l;
 
     *out_i = (float)si;
     *out_q = (float)sq;
@@ -393,4 +464,13 @@ bool AdcSample_Demodulate(const uint32_t *code, uint32_t n,
         *out_mag = (float)sqrt((si * si) + (sq * sq));
     }
     return true;
+}
+
+/* `s_tab_m` / `s_tab_l` 是 build_table() 的记忆,只在**成功建表**后更新,
+ * 所以它们天然就是"最近一次成功解调用的窗参数" —— 不需要另存一份副本
+ * (另存一份就有两个真相,迟早漂移)。 */
+void AdcSample_LastWindow(uint32_t *out_l, uint32_t *out_m)
+{
+    if (out_l != NULL) { *out_l = s_tab_l; }
+    if (out_m != NULL) { *out_m = s_tab_m; }
 }

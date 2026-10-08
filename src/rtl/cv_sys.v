@@ -208,9 +208,9 @@ module cv_sys #(
     output wire        dac_sclk,    // → DAC1220 SCLK  (J4-36 / W15 / BANK34)
     output wire        dac_cs,      // → DAC1220 CS    (J4-32 / W13 / BANK34)
     output wire        dac_mosi,    // → DAC1220 SDIO  (J4-34 / Y14 / BANK34)
-    output wire        dds_sclk,    // → AD9833  SCLK  (J4-4  / T5  / BANK13)
-    output wire        dds_sync,    // → AD9833  FSYNC (J4-6  / U7  / BANK13)
-    output wire        dds_data,    // → AD9833  SDATA (J4-2  / T11 / BANK34)
+    output wire        dds_sclk,    // → AD9833  SCLK  (J4-33 / W14 / BANK34)
+    output wire        dds_sync,    // → AD9833  FSYNC (J4-31 / V12 / BANK34)
+    output wire        dds_data,    // → AD9833  SDATA (J4-35 / V15 / BANK34)
 
     //-------------------------------------------------------------------------
     //  AD9238 高速 ADC(2026-10-06 加)—— 16 根
@@ -221,8 +221,10 @@ module cv_sys #(
     //     ⇒ 这是本项目继 DAC/DDS 之后**第二处"接线先于约束"**的信号组。
     //     引脚约束写在 qrs.srcs/constrs_1/new/led.xdc(工程里唯一启用的 xdc)。
     //
-    //  ⚠️ 15 根在 BANK13,只有 clk(V13/J4-27)在 BANK34 ——
-    //     与 DDS 那三根同样的跨 bank 情形,功能无影响(两 bank 同为 3.3 V)。
+    //  ⚠️ 15 根在 BANK13,只有 clk(T11/J4-2)在 BANK34 —— 跨 bank,功能无影响
+    //     (两 bank 同为 3.3 V)。⚠️ T11 **不是时钟能力脚**(2026-10-07 实测
+    //     IS_CLK_CAPABLE = 0,IO_L1P_T0_34),但 adc_clk 是本模块的**输出**、
+    //     MMCM 的输入取 PS FCLK0 ⇒ 不影响。换线前的 V13 同样不是时钟脚。
     //
     //  ⚠️ 本模块是**单通道**接法(12 根数据线 + 1 个时钟)。
     //     AD9238 芯片本身有 A/B 两个通道、各自 12 位独立输出总线,
@@ -240,11 +242,11 @@ module cv_sys #(
     //        它是**真时钟域**,不是 SPI 移位时钟,补 FREQ_HZ 才是对的修法。
     //-------------------------------------------------------------------------
     (* X_INTERFACE_PARAMETER = "XIL_INTERFACENAME adc_clk,FREQ_HZ 65000000,PHASE 0.000" *)
-    output wire        adc_clk,     // → AD9238 CLK   (V13 / J4-27)
-    output wire        adc_oe_n,    // → AD9238 OEB   (U13 / J4-28),低有效
-    output wire        adc_pdn,     // → AD9238 PDWN  (V6  / J4-21),高有效
-    input  wire [11:0] adc_d,       // ← AD9238 D0..D11 (W11 Y11 Y12 Y13 V10 V11 W9 W10 Y8 Y9 Y6 Y7)
-    input  wire        adc_otr      // ← AD9238 OTR   (W6  / J4-18)
+    output wire        adc_clk,     // → AD9238 CLK   (T11 / J4-2)
+    output wire        adc_oe_n,    // → AD9238 OEB   (V5  / J4-1),低有效
+    output wire        adc_pdn,     // → AD9238 PDWN  (Y9  / J4-17),高有效
+    input  wire [11:0] adc_d,       // ← AD9238 D0..D11 (V7 U7 W8 V8 U9 U8 U10 T9 W6 V6 Y7 Y6)
+    input  wire        adc_otr      // ← AD9238 OTR   (Y8  / J4-18)
 );
 
     //=========================================================================
@@ -290,7 +292,7 @@ module cv_sys #(
     // ADC 采集(2026-10-06 加)—— 同样必须在从机例化【之前】声明
     wire [31:0] cfg_adc_cfg;        // 0x88 [7:0]DIV [15:8]PH_OFF [16]CONT [17]OEB_N [18]PDN
     wire        cfg_adc_go;         // 0x8C[0] 写 → 1 拍脉冲
-    wire [31:0] cfg_adc_buf_idx;    // 0x94 [11:0] 缓冲读索引
+    wire [31:0] cfg_adc_buf_idx;    // 0x94 [12:0] 缓冲读索引(2026-10-08 12→13 位)
     wire [31:0] sts_adc_sts;        // 0x90 [0]locked [1]done [2]busy [3]otr
     wire [31:0] sts_adc_buf_data;   // 0x98 [11:0]采样 [12]OTR
     // dac_1220 的 init_done —— 【回送给从机】给上电脉冲开门。
@@ -784,7 +786,10 @@ module cv_sys #(
         .sts_otr         (sts_adc_sts[3]     ),
 
         // 缓冲读口 → 从机 0x94/0x98
-        .rd_idx          (cfg_adc_buf_idx[11:0]),
+        //   ⚠️ 13 位对应 BUF_DEPTH=8192。⚠️ 单改这一行不够 ——
+        //      cv_axi_lite_slave.v 的写掩码也必须放到 32'h0000_1FFF,
+        //      否则索引 ≥4096 被静默截断成小数,读到另一个点且不报错。
+        .rd_idx          (cfg_adc_buf_idx[12:0]),
         .rd_data         (sts_adc_buf_data[11:0]),
         .rd_otr          (sts_adc_buf_data[12]  )
     );

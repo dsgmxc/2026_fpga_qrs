@@ -68,6 +68,15 @@ void UI_Demo_UpdateResistance(const char *resistance_text, uint32_t valid);
 #define UI_DEMO_WAVE_SWEEP   1u
 
 void UI_Demo_BeginWaveform(uint32_t kind, uint32_t total_samples);
+
+/** @brief 波形图能存多少点(= `ui_demo.c::UI_WAVE_MAX_SAMPLES`)。
+ *
+ *  为什么要暴露:采集缓冲 8192 点**远大于**波形图容量,喂之前必须先抽稀。
+ *  抽稀方(`pynq_protocol.c::adc_feed_point_waveform`)若自己写一份常数,
+ *  就成了"同一个数写在两处" —— 改一处不改另一处的后果是**静默只画前 N 点**,
+ *  屏上看不出少,只会觉得"波形怎么是平的"(2026-10-08 之前就是这个症状:
+ *  480 上限截掉 8192 点里的 94%)。 ⇒ 只留这一个定义点。 */
+uint32_t UI_Demo_WaveMaxSamples(void);
 void UI_Demo_UpdateWaveformPoint(uint32_t kind,
                                  uint32_t index,
                                  uint32_t total_samples,

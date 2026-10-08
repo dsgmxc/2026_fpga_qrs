@@ -81,7 +81,7 @@
 //                                          见端口区 cfg_clk_release 的长注释。
 //                                       为什么不放 0x18:那是 RANGE_SEL 的规格位置。
 //                           0x88 6'h22 ADC_CFG         <-- 2026-10-06 新增
-//                                     [ 7: 0] DIV     分频比 P(≥2),复位 13 → 10 MHz
+//                                     [ 7: 0] DIV     分频比 P(≥2),复位 2 → 65 MHz(2026-10-08 定)
 //                                     [15: 8] PH_OFF  采样相位偏移(有符号,单位=clk_base 周期)
 //                                     [16]    CONT    1=自由运行 / 0=单次 GO 触发
 //                                     [17]    OEB_N   0=ADC 输出使能
@@ -92,7 +92,7 @@
 //                           0x90 6'h24 ADC_STS         RO  <-- 2026-10-06 新增
 //                                     [0] mmcm_locked  [1] done  [2] busy  [3] otr_sticky
 //                           0x94 6'h25 ADC_BUF_IDX     RW  <-- 2026-10-06 新增
-//                                     [11:0] 缓冲读索引(0..4095)
+//                                     [12:0] 缓冲读索引(0..8191)
 //                           0x98 6'h26 ADC_BUF_DATA    RO  <-- 2026-10-06 新增
 //                                     [11:0] 采样值 [12] OTR
 //
@@ -241,13 +241,13 @@ module cv_axi_lite_slave #(
     output wire                                 cfg_clk_release, // 0x84[0] → dac_1220.rst_n / MMCM RST
 
     //-------------------------------------------------------------------------
-    // ADC 采集(2026-10-06 加)—— 130 MHz 分频 + 4096 深缓冲
+    // ADC 采集(2026-10-06 加)—— 130 MHz 分频 + 8192 深缓冲(2026-10-08 加长)
     //   同样【不是 AXI 端口,不要加 X_INTERFACE_INFO】—— 普通线网,在 cv_sys 内消化。
     //   位域 mask 交给消费侧做(本层出寄存器原值;但见下面 0x88 的例外说明)。
     //-------------------------------------------------------------------------
     output wire [C_S_AXI_DATA_WIDTH-1:0]        cfg_adc_cfg,      // 0x88
     output wire                                 cfg_adc_go,       // 0x8C[0] 写 → 1 拍脉冲
-    output wire [C_S_AXI_DATA_WIDTH-1:0]        cfg_adc_buf_idx,  // 0x94 [11:0] 读索引
+    output wire [C_S_AXI_DATA_WIDTH-1:0]        cfg_adc_buf_idx,  // 0x94 [12:0] 读索引(2026-10-08 12→13 位)
     input  wire [C_S_AXI_DATA_WIDTH-1:0]        sts_adc_sts,      // 0x90
     input  wire [C_S_AXI_DATA_WIDTH-1:0]        sts_adc_buf_data, // 0x98
     // adc_capture 的 done/busy 之类【不单独开口】—— 已经打包进 sts_adc_sts,
@@ -453,21 +453,22 @@ module cv_axi_lite_slave #(
             //       未放行时它恒 0 ⇒ 脉冲不发,寄存器 0 V 与 DAC 状态不会互相说谎。
             cv_ctrl   <= 32'h0000_0000;     // bit0 clk_release = 0 = 保持复位
             //-----------------------------------------------------------------
-            // ADC_CFG(0x88)复位值 = 分频比 13 → 130 MHz / 13 = **10 MHz**
+            // ADC_CFG(0x88)复位值 = 分频比 2 → 130 MHz / 2 = **65 MHz**
+            //   🔴 2026-10-08 由 13(=10 MHz)改为 2。理由:采样率**统一固定
+            //      65 MSPS 不再可调**,复位值必须是这一档 —— 否则"界面显示 65、
+            //      硬件复位回 10"就是个不一致组合(正是要消灭的那类)。
+            //      ⛔ 原文"默认给 10 MHz 因为杜邦线接不出 65 MHz"**已作废**:
+            //        用户换 2×9 排线后 P=2 实测可用(见 adc_capture.v 文件头 ②)。
             //   其余位全 0:
             //     PH_OFF = 0 → 采在 adc_clk 下降沿(tick 0,见 adc_capture.v)
-            //       ⚠️ 这里**不是**数据眼中心。实测(P=13,2026-10-06)眼中心在 PH_OFF = −2,
-            //          与复位值 0 差 **2 个 tick**。0 仍落在数据稳定窗 [−4, +1] 内,
-            //          所以上电即可用、不必等软件改;但软件换分频比时**必须**把 PH_OFF
-            //          一起按窗中心写(c_ui 侧 `measure_config.c::adc_window`)——
-            //          窗位置随 P 走,只改 DIV 会让采样点滑出去,且**不报错**。
+            //       ⚠️ P=2 的合法刻度只有 {−1, 0} 两个(半个周期一格,无细调余量),
+            //          0 实测即干净正弦(p-p=42,250 点 3.85 个周期,2026-10-07)。
+            //          c_ui 侧 `cv_adc_phase_center(2)` 折回到 −1,两者都在窗内。
             //     CONT   = 0 → 单次模式,等 PS 写 GO 才采
             //     OEB_N  = 0 → ADC 输出**使能**(与已删除的 adc_9833/ad9238 老代码一致)
             //     PDN    = 0 → 不掉电
-            // ⚠️ 为什么默认给 10 MHz 而不是最高频:杜邦线接不出 65 MHz,
-            //    默认值应当是"上电就一定能用的那档"。改分频比由 PS 界面控制。
             //-----------------------------------------------------------------
-            adc_cfg     <= 32'h0000_000D;   // [7:0]=13,其余 0
+            adc_cfg     <= 32'h0000_0002;   // [7:0]=2,其余 0
             adc_buf_idx <= 32'h0000_0000;
         end else if (do_write) begin        //    PS 必须先写基址再切源,顺序错就是黑屏。
             case (awaddr_r[7:2])
@@ -480,11 +481,15 @@ module cv_axi_lite_slave #(
                 IDX_DDS_FREQ : dds_freq  <= wdata_r;
                 // ⚠️ 下面两个【掩码到有效位】,理由同 0x84:读回必须是已生效值。
                 //    ADC_CFG 有效到 [18](DIV/PH_OFF/CONT/OEB_N/PDN),掩到 19 位;
-                //    ADC_BUF_IDX 有效到 [11](4096 深),掩到 12 位。
+                //    ADC_BUF_IDX 有效到 [12](8192 深),掩到 13 位。
                 //    上面那些整字存的寄存器是"留给将来的位还能读回"的历史约定,
                 //    控制寄存器不适用。
                 IDX_ADC_CFG     : adc_cfg     <= wdata_r & 32'h0007_FFFF;
-                IDX_ADC_BUF_IDX : adc_buf_idx <= wdata_r & 32'h0000_0FFF;
+                // ⚠️ 掩码 = 缓冲深度 −1。2026-10-08 BUF_DEPTH 4096→8192 ⇒ 掩码
+                //    12 位→13 位。**这一行是本改动真正的闸**:忘记放宽的话,
+                //    写 5000 会被静默截成 904,读回的是**另一个点的数据**,
+                //    不报错、不复位、不复位 done —— 与"按钮守卫停在旧档位"同形。
+                IDX_ADC_BUF_IDX : adc_buf_idx <= wdata_r & 32'h0000_1FFF;
                 // ⚠️ 这里同样【没有】IDX_ADC_CTRL —— 0x8C 是命令,见下面的脉冲块。
                 IDX_LCD_CTRL : lcd_ctrl <= wdata_r;
                 IDX_LCD_FILL : lcd_fill <= wdata_r;

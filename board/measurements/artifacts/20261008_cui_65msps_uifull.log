@@ -1,0 +1,88 @@
+==========================================================================
+  MOSFET C-V 在线监测平台 · PS 侧启动
+==========================================================================
+  VERSION      0x00010000
+  link_check   True
+  fclk0_real   27.7778 MHz
+  fclk0_pynq   41.6667 MHz (PYNQ 算的,不是真值)
+  fclk0_expect 50.0
+  pclk_window  (40.8, 67.2)
+[cv_monitor] VERSION  = 0x00010000  (expect 0x00010000)
+[cv_monitor] SCRATCH  = 0xDEADBEEF / 0xA5A55A5A  (expect 0xDEADBEEF / 0xA5A55A5A)
+[cv_monitor] link_check: PASS
+
+--- FCLK0(就是像素时钟)---
+  改前 27.7778 MHz(DIV0=6 DIV1=6)  ← BOOT.BIN 留下的默认值
+[fclk0] 50.0000 MHz (IO_PLL 1000 / DIV0 20 / DIV1 1)  ✓ 在窗口内 [40.8~67.2]
+  改后 50.0000 MHz(设计值 50.0 MHz)
+  📌 口径:写文档一律写「设计值 50 MHz / 真值 50.0000 MHz」
+
+--- DAC 初始化放行(0x84 CV_CTRL)---
+[dac] 已放行初始化 @ FCLK0 50.0000 MHz —— 约 0.8 s 后偏压生效
+
+--- 显示通路 ---
+  帧缓存 fb0=0x38100000  fb1=0x38230000(1228800 B / 块,64 KB 对齐)
+
+--- 触摸通路 ---
+  <TouchEvent NEW  seq=  0 count=0 pen=0 err=0 (   0,   0)>   (没碰屏时 seq 不动、pen_down=0 属正常)
+
+--- 界面 ---
+[ui] 启动:/home/xilinx/c_ui_src/c_ui --axi-base 0x43C00000 --poll-ms 10 --fb0 0x38100000 --fb1 0x38230000
+[ui] ⚠️ 需要读 /dev/mem —— 本进程必须是 root(main.py 已经是)
+  👀 屏上应当出现前序那套 LVGL 界面(首页)。点一下按钮看页面切不切。
+  ⚠️ 触摸的坐标轴是否要翻转,以 tools/touch_probe.py 的实测为准。
+──── c_ui 启动 ────
+  axi_base = 0x43C00000   fb0 = 0x38100000   fb1 = 0x38230000   poll = 10 ms   touch = 开
+[regs] /dev/mem 已映射 AXI 0x43C00000(4096 B)
+[disp] direct_mode 双缓冲就绪:fb0=0x38100000 fb1=0x38230000 前台=0(非缓存映射;无 DMA2D,矩形同步走 CPU memcpy)
+[touch] 链路检查:0x68 = 0x00000300(seq=3 count=0 pen=0 err=0)
+[indev] 指针设备已注册(坐标来自 PL 的 0x68/0x6C/0x70)
+[mc] 测量参数已下发:
+       激励   1.000 MHz   → 0x80 = 0xA3D70A
+       采样   10.00 MSPS  → 0x88 = 0x0FE0D  (DIV=13,PH_OFF=-2,窗 [-4,+1])
+       (回读一致)
+[proto] 已接管测量指令(C 侧直写寄存器,方案 A)
+        激励 = 1000000 Hz(0x80 = 0xA3D70A);采样率/相位明细见上面 [mc] 那几行
+        偏压 = 0.0 V(0x14 = 0x80000)
+        扫压驻留 = 300 ms(可用 CV_SWEEP_DWELL_MS 覆盖)
+        ⚠️ 回路切换仍无硬件(本位流里没有 relay_ctrl),只回显到界面;
+           Cs 走真实 ADC 采样(adc_sample.c),未标定,Cp/D 因无相位不填
+[main] 等第一帧画完再切到 DDR 源(期间屏上应显示厂商彩条)…
+[main] 首帧已提交(flush=1),已切到 DDR 源(0x50 = 2)
+[touch] PL 报过总线错(err 粘滞位置起,0x68=0x00000310)。
+        这是**历史累计**标志,只有重新配置 PL 才清 ——
+        本次只报告一次,之后正常读。若触摸一直无反应,
+        那才需要查 I2C 上拉 / GT911 底板。
+[touch] 按下 (356,214) 点数 1
+[touch] 抬起
+[touch] 按下 (816,381) 点数 1
+[touch] 抬起
+[mc] 采样 → 65.00 MSPS(DIV=2,PH_OFF -2 → -1,窗 [-1,-1])
+[touch] 按下 (66,11) 点数 1
+[touch] 抬起
+[touch] 按下 (649,217) 点数 1
+[touch] 抬起
+[touch] 按下 (263,307) 点数 1
+[touch] 抬起
+[touch] 按下 (725,333) 点数 1
+[touch] 抬起
+[touch] 按下 (442,335) 点数 1
+[touch] 抬起
+[touch] 按下 (733,436) 点数 1
+[touch] 抬起
+[proto] 偏压 → 5.00 V  (0x14 = 0x86666,模块级 0.500 V ×10)
+[touch] 按下 (282,510) 点数 1
+[touch] 抬起
+[proto] 点测 CISS @ 5.00 V:偏压已下发,300 ms 后采一次(波形进结果页)
+[adc] 单点   偏压   5.000 V | A/INA tick-1 幅值  0.0001 V,峰峰     5 码 | B/INB tick+0 幅值  0.0090 V,峰峰    39 码 | Cs 12942.154 pF(未标定) | OTR 0
+[proto] Cp / D 卡片显示 `--` 是**故意的**:两者都要 V 与 I 的相位差,
+        而 INA/INB 两个时间槽是**两次独立采集**、相位不相关 ⇒ 只能用幅值比
+        出 Cs。要填上 Cp/D 得让 PL 同时采两���(给 adc_capture 加第二组
+        缓冲 + 重下位流),本轮不做。见 adc_sample.h 文件头。
+[touch] 按下 (42,30) 点数 1
+[touch] 抬起
+[touch] 按下 (695,399) 点数 1
+[touch] 抬起
+[touch] 按下 (336,96) 点数 1
+[touch] 抬起
+
