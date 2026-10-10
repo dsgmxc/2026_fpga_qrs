@@ -38,6 +38,7 @@ skill/
 | [`pynq-overlay-bringup/`](pynq-overlay-bringup/skill.md) | Overlay 加载与自检清单:`sudo -E`、`.bit`/`.hwh` 同名、FCLK 必须在 `Overlay()` 之后、hwh 版本兼容验证法 | ✅ **已落地** |
 | [`pynq-register-map-pattern/`](pynq-register-map-pattern/skill.md) | 自写 AXI4-Lite 从机寄存器文件:设计范式 + 上板故障定位 | ✅ **已落地** |
 | [`pynq-ddr-framebuffer-display/`](pynq-ddr-framebuffer-display/skill.md) | DDR 帧缓存 + PL 实时取行驱动并行 RGB 屏:带宽预算、AXI3 硬门、`ARPROT` 全量 DECERR、cache 一致性、防撕裂 | ✅ **已落地** |
+| [`count-both-sides-of-interface/`](count-both-sides-of-interface/skill.md) | **接口两侧都要数**:「一次调用 = 一笔事务」是假设不是事实;附 `struct.pack_into` 在设备 mmap 上**先写一个 0** 的实测 | ✅ **已落地**(2026-10-10) |
 
 ### 项目 Skill
 
@@ -72,15 +73,18 @@ skill/
 
 ## 📌 阅读建议(评委会关心的问题)
 
-**「十项里哪几项最有实操价值?」**
+**「这么多项里哪几项最有实操价值?」**
 
-1. **`measurement-instrument-can-be-wrong/`** —— 素材最厚(八次真实事故,跨 8 个不同工具)。
-   它解决的是**上游问题**:测量本身是否可信。队伍拿到自己的板子上,第一天就会用到。
-2. **`stale-artifact-silent-reuse/`** —— 四次发作分布在**四个不同工具**上
+1. **`count-both-sides-of-interface/`** —— **代价最高的一次误判**(4 天),但结论最便宜:
+   一行 Python 改法。真正值钱的是**判据 0** —— 先问"我数的这个量是在接口哪一侧数的"。
+   任何写 AXI 寄存器的 PYNQ 队伍,第一天就会踩到 `struct.pack_into` 那一支。
+2. **`measurement-instrument-can-be-wrong/`** —— 素材最厚(八次真实事故,跨 8 个不同工具)。
+   它解决的是**上游问题**:测量本身是否可信。
+3. **`stale-artifact-silent-reuse/`** —— 四次发作分布在**四个不同工具**上
    (烧录器 / 工程文件 / BD 缓存 / 仿真器),说明是**系统性风险**而非某工具 bug。
-3. **`pynq-ddr-framebuffer-display/`** —— 三个通用 PYNQ 技能里技术含量最高的一个:
+4. **`pynq-ddr-framebuffer-display/`** —— 通用 PYNQ 技能里技术含量最高的一个:
    一次真实的"整屏全黑"根因定位,**判据选择、单变量分离、双观测者**三样都在里面。
-4. **`use-layout-as-ruler/`** —— 最短,但**效率提升最明显**:一个悬了两轮的问题,
+5. **`use-layout-as-ruler/`** —— 最短,但**效率提升最明显**:一个悬了两轮的问题,
    换问法后**一次按压结案**。
 
 **「这些是成功了才写的吗?」**
@@ -99,15 +103,20 @@ skill/
 所以正确做法是:**从项目第一天起,每踩一个坑就回来补一条**。
 `report/llm-log/` 里的纠错轨迹,就是本目录的原料。
 
-**本目录当前状态(2026-10-08)**:
+**本目录当前状态(2026-10-10)**:
 
 - 索引提名过 **73** 个候选 skill 名(`grep -oE 'skill/[a-z0-9-]+' report/llm-log/INDEX.md | sort -u | wc -l`),
-  **已落地 11 项**(2026-10-08 新增 `silent-capacity-gates/`)。
-- 落地的 11 项**全部**满足五要素;「已验证的效果」全部可追到
+  **已落地 12 项**(2026-10-08 新增 `silent-capacity-gates/`;2026-10-10 新增
+  `count-both-sides-of-interface/`)。
+- 落地的 12 项**全部**满足五要素;「已验证的效果」全部可追到
   `report/measurements/` 的存档或 `report/llm-log/` 的记录编号。
 - **未落地的项写进上表并说明卡点**,不以空壳充数。
-- 📌 新增项的来源固定是**同一周内真实发生的事**:`LLM-055` 的三道静默关卡 +
-  一次上板验收(`20261008_65msps_window_board_acceptance.md`)。**没有为了凑数而写。**
+- 📌 新增项的来源固定是**同一周内真实发生的事**:
+  - `silent-capacity-gates/` ← `LLM-055` 的三道静默关卡 + 一次上板验收
+    (`20261008_65msps_window_board_acceptance.md`);
+  - `count-both-sides-of-interface/` ← `LLM-059` 的四天误判 +
+    `20261010_relay_cfg_write_anomaly.md` §9(记录互相矛盾)→ §10(结案)。
+  **没有为了凑数而写。**
 
 **归属声明**:本目录下的 `skill.md` 均为 **Claude 撰写的 markdown 文档**
 (`CLAUDE.md` §6.0:非代码文档属模型职责)。

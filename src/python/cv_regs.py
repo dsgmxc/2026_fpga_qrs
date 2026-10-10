@@ -80,16 +80,38 @@ REG = {
     # ---- 测量主链(PL 侧尚未实现,见 PL_IMPLEMENTED_REGS)-------------------
     "CTRL":       0x00,   # RW  [0]start [1]soft_rst [2]ac_en [3]relay_en [4]cal_mode
     "STATUS":     0x04,   # RO  [0]busy [1]done [2]fault [15:8]err_code [31:16]meas_cnt
+                          # ★ 2026-10-10 起 [0..2] 与 [15:8] **由 relay_ctrl 驱动**,可以用
+                          #   ⚠️ 但它现在只反映**继电器/挡位子状态机**,不是整机状态 ——
+                          #      [31:16] meas_cnt **未实现**(meas_fsm 不存在),恒 0
+                          # ⚠️ 键名见 STATUS_BIT / RELAY_ERR 常量
     "NCO_FREQ":   0x08,   # RW
     "NCO_PHASE":  0x0C,   # RW
     "EXC_AMP":    0x10,   # RW
     "BIAS_CODE":  0x14,   # RW  [19:0] → dac_1220.code ★ 2026-10-05 已实现,见 BIAS_* 常量
                           #     ⚠️ **20 位不是 16 位**。写 = 立即发 1 拍 set_in 脉冲
                           #        (dac_1220 沿触发 ⇒ 连写同一个值不会丢)
-    "RANGE_SEL":  0x18,   # RW
-    "RELAY_CFG":  0x1C,   # RW
+    "RANGE_SEL":  0x18,   # RW  [3:0] 挡位**独热码** ★ 2026-10-10 已实现
+                          #     bit0=A(10 Ω) bit1=B(100 Ω) bit2=C(1 kΩ) bit3=D(10 kΩ)
+                          #     复位值 = 0x2(B 档)。**必须独热**:0x0 或多位置 1
+                          #     一律拒绝(置 err_code=0x02)**且不改变已有输出**
+                          # 🔴 **读回的是"已生效"值,不是刚写进去的请求值**(同 0x60)
+                          #     ⇒ 写完要**回读确认**,不能假定成功
+                          # ⚠️ 见 GEAR_* 常量
+    "RELAY_CFG":  0x1C,   # RW  [6:0] = K1..K7 ★ 2026-10-10 已实现
+                          #     **bit7 保留且恒判非法**(物理上只有 7 只继电器)
+                          #     合法值只有 7 个 —— 见 RELAY_LEGAL 白名单
+                          #     (白名单不是黑名单:黑名单判据要治具原理图,本队没有;
+                          #      白名单出处 = 前序硬件已验证的 relay_matrix.c)
+                          # 🔴 **读回"已生效"值**(同 0x18)
+                          # ⚠️ 拒绝时**保持现状**,不做自动 AllOff —— 硬件不会在软件
+                          #     没要求的时候动继电器;故**必须读 STATUS.err_code 确认**
     "CIC_DECIM":  0x20,   # RW
-    "SETTLE_CFG": 0x24,   # RW
+    "SETTLE_CFG": 0x24,   # RW  [31:16] = 继电器稳定时间,单位 **ms** ★ 2026-10-10 已实现
+                          #     复位值 40(= 前序 RELAY_CONTROLLER_SWITCH_SETTLE_MS)
+                          #     ⚠️ **单位是 ms,不是文档早先写的"周期数"** ——
+                          #        40 ms @ 50 MHz = 2×10⁶ 拍 > 16 位上限 65535,装不下
+                          #     写 0 = 不等,立即 done
+                          # ⚠️ [15:0] bias_settle **未消费**(meas_fsm 不存在)
     "I_A":        0x28,   # RO  有符号
     "Q_A":        0x2C,   # RO  有符号
     "I_B":        0x30,   # RO  有符号
@@ -197,8 +219,65 @@ STATUS_BIT = {
     "done":      1,
     "fault":     2,
     "err_code":  (8, 15),    # (msb, lsb)
-    "meas_cnt":  (16, 31),
+    "meas_cnt":  (16, 31),   # ⚠️ **未实现** —— meas_fsm 不在位流里,恒 0
 }
+
+# ---------------------------------------------------------------------------
+# 继电器组合 / 挡位(2026-10-10 起 PL 侧实现,源 = `relay_ctrl.v`)
+#
+# ⚠️ 白名单与挡位码**逐字抄自 RTL 的 `legal_relay` / `legal_gear` 函数**,
+#    不是从夹具原理图推的 —— 手头没有原理图。RTL 里那 7 个值的出处是
+#    前序 STM32 工程**硬件已验证**的 `relay_matrix.c`。
+# ---------------------------------------------------------------------------
+RELAY_BIT = {                 # 0x1C[6:0] = K1..K7,bit N-1 ↔ KN
+    "K1": 0, "K2": 1, "K3": 2, "K4": 3, "K5": 4, "K6": 5, "K7": 6,
+}
+#: 白名单(0x1C[7]=1 的一切值、以及不在表内的组合,一律判非法 err_code=0x01)
+RELAY_STATE = {
+    0x00: "COSS_DISCHARGE",    # 全断(放电态)
+    0x10: "ALL_OFF",           # = K5   ← **复位值**;前序称其「安全状态」
+    0x1E: "CISS_DISCHARGE",    # = K2 K3 K4 K5
+    0x3C: "RG",                # = K3 K4 K5 K6
+    0x51: "CRSS",              # = K1 K5 K7
+    0x61: "COSS",              # = K1 K6 K7
+    0x7F: "CISS",              # = K1..K7 全合
+}
+RELAY_LEGAL = tuple(sorted(RELAY_STATE))
+RELAY_RESET = 0x10             # ALL_OFF;与 relay_ctrl.v 的 RELAY_RESET 对齐
+
+#: 0x18[3:0] —— **必须独热**,非独热判非法 err_code=0x02
+GEAR_BIT = {
+    "A": 0, "B": 1, "C": 2, "D": 3,
+}
+GEAR_OHM = {"A": 10, "B": 100, "C": 1_000, "D": 10_000}
+GEAR_RESET = 0b0010            # B 档 = 100 Ω;与 relay_ctrl.v 的 GEAR_RESET 对齐
+GEAR_LEGAL = (0b0001, 0b0010, 0b0100, 0b1000)
+
+#: STATUS[15:8] —— 拒绝时**保持当前状态不变**(不自动 AllOff)
+RELAY_ERR = {
+    0x00: "NONE",
+    0x01: "RELAY",   # 0x1C 组合不在白名单
+    0x02: "GEAR",    # 0x18 非独热
+    0x03: "BUSY",    # 上一次切换未完成时又写
+}
+
+#: 0x24 SETTLE_CFG —— 复位值与两个半字的**物理含义**
+#    [31:16] 继电器稳定时间,单位 ms。复位 40 = 前序 relay_controller.c 的
+#            `RELAY_CONTROLLER_SWITCH_SETTLE_MS`,且 relay_ctrl.v 用它折 1 ms 拍数
+#            (⚠️ 折的是 clk_axi 的**设计值** 50 MHz,不是真值 —— FCLK0 没修时实际更久,
+#             方向安全,见 relay_ctrl.v §稳定延时)
+#    [15:0]  偏压稳定时间,单位 ms。复位 **1500** —— 不是随手占位:出处是前序
+#            交接文档 §3.9 的「偏压请求最低实际值 0.10 V → 等待 1500 ms」。
+#            ⚠️ PL 侧**尚无消费者**(meas_fsm 不存在),PS 侧暂时自己 sleep。
+SETTLE_RESET    = 0x0028_05DC
+RELAY_SETTLE_MS = 40            # ms,= SETTLE_RESET 高半字
+BIAS_SETTLE_MS  = 1500          # ms,= SETTLE_RESET 低半字(未消费)
+
+#: 挡位切换的稳定时间(ms)—— **前序交接文档 §3.9「挡位切换稳定:150 ms」**。
+#  ⚠️ 这个值**不在 PL 里**:`relay_ctrl.v` 的挡位通路刻意不进 busy(理由见该文件
+#     §④:挡位是模拟开关,ns 级建立,用 40 ms 那把尺子量它是量错尺度)。
+#     ⇒ 等它的是 **PS 侧**,见 `drivers/relay.py`。
+GEAR_SETTLE_MS  = 150
 
 # ⚠️ 位定义出自 RTL:`cv_axi_lite_slave.v` 的 sts_lcd_status 注释块 + `lcd_vblank_ctrl.v`
 FB_STATUS_BIT = {
@@ -468,9 +547,13 @@ PCLK_WINDOW_MHZ    = (40.8, 67.2)  # 屏手册允许窗口 —— FCLK0 落在�
 #    🆕 2026-10-06 追加 **ADC_CFG(0x88)/ADC_CTRL(0x8C)/ADC_STS(0x90)/
 #       ADC_BUF_IDX(0x94)/ADC_BUF_DATA(0x98)** —— AD9238 采集通路。
 #       该版已实测:采出周期正好 10 点的 1 MHz 正弦(10 MSPS),D0/D11 位序正确。
+#    🆕 2026-10-10 第 52 次位流追加 **STATUS(0x04)/RANGE_SEL(0x18)/
+#       RELAY_CFG(0x1C)/SETTLE_CFG(0x24)** —— 继电器矩阵 + 挡位选择(relay_ctrl)。
+#       写 = 请求,读 = **已生效**值;非法请求被拒并置 STATUS.err_code,状态不变。
 PL_IMPLEMENTED_REGS = (
-    "VERSION", "SCRATCH",
+    "VERSION", "SCRATCH", "STATUS",
     "BIAS_CODE", "DDS_FREQ", "CV_CTRL",
+    "RANGE_SEL", "RELAY_CFG", "SETTLE_CFG",
     "ADC_CFG", "ADC_CTRL", "ADC_STS", "ADC_BUF_IDX", "ADC_BUF_DATA",
     "LCD_CTRL", "LCD_FILL", "FB_BASE0", "FB_BASE1", "LCD_SWAP", "FB_STATUS",
     "TOUCH_STATUS", "TOUCH_PT0", "TOUCH_PT1",
@@ -481,8 +564,10 @@ PL_HAS_TOUCH = True      # i2c_master / gt911_ctrl 已进位流
 PL_HAS_DAC   = True      # dac_1220(偏压)已进位流 —— 2026-10-05
 PL_HAS_DDS   = True      # adc_9833(激励)已进位流 —— 2026-10-05
 PL_HAS_ADC   = True      # AD9238 采集(adc_capture)已进位流 —— 2026-10-06
-# ⚠️ 但**测量主链仍不在**:DLIA / CORDIC / 继电器 / 扫压编排都还没有,
-#    所以"设置偏压"能改硬件输出,"开始扫压"目前只能改变偏压(测不到 C 值)。
+PL_HAS_RELAY = True      # relay_ctrl(K1-K7 + A-D 挡)已进位流 —— 2026-10-10
+# ⚠️ 但**测量主链仍不在**:DLIA / CORDIC / 扫压编排都还没有。
+#    继电器的**动作**已经能做了(写 0x1C/0x18,等 0x04.busy 落),但换了组合之后
+#    仍然只能靠 ADC 采波形,**测不到 C 值** —— 反演那一段(含 OPEN/SHORT 校准)在 PS 侧。
 
 # ---------------------------------------------------------------------------
 # 板上路径与运行约束

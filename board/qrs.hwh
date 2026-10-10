@@ -1,5 +1,5 @@
 ﻿<?xml version="1.0" encoding="UTF-8" standalone="no" ?>
-<EDKSYSTEM EDWVERSION="1.2" TIMESTAMP="Tue Oct  6 17:54:27 2026" VIVADOVERSION="2025.2">
+<EDKSYSTEM EDWVERSION="1.2" TIMESTAMP="Sat Oct 10 15:40:47 2026" VIVADOVERSION="2025.2">
 
   <SYSTEMINFO ARCH="zynq" DEVICE="7z020" NAME="system" PACKAGE="clg400" SPEEDGRADE="-2"/>
 
@@ -164,6 +164,11 @@
         <CONNECTION INSTANCE="cv_sys_0" PORT="dds_sync"/>
       </CONNECTIONS>
     </PORT>
+    <PORT DIR="O" LEFT="3" NAME="gear" RIGHT="0" SIGIS="undef" SIGNAME="cv_sys_0_gear">
+      <CONNECTIONS>
+        <CONNECTION INSTANCE="cv_sys_0" PORT="gear"/>
+      </CONNECTIONS>
+    </PORT>
     <PORT DIR="O" NAME="lcd_bl" SIGIS="undef" SIGNAME="cv_sys_0_lcd_bl">
       <CONNECTIONS>
         <CONNECTION INSTANCE="cv_sys_0" PORT="lcd_bl"/>
@@ -197,6 +202,11 @@
     <PORT DIR="O" NAME="lcd_vs" SIGIS="undef" SIGNAME="cv_sys_0_lcd_vs">
       <CONNECTIONS>
         <CONNECTION INSTANCE="cv_sys_0" PORT="lcd_vs"/>
+      </CONNECTIONS>
+    </PORT>
+    <PORT DIR="O" LEFT="6" NAME="relay" RIGHT="0" SIGIS="undef" SIGNAME="cv_sys_0_relay">
+      <CONNECTIONS>
+        <CONNECTION INSTANCE="cv_sys_0" PORT="relay"/>
       </CONNECTIONS>
     </PORT>
     <PORT DIR="IO" NAME="touch_int" SIGIS="undef" SIGNAME="External_Ports_touch_int">
@@ -722,7 +732,7 @@
         <PARAMETER NAME="C_S_AXI_DATA_WIDTH" VALUE="32"/>
         <PARAMETER NAME="LCD_ID" VALUE="0x7016"/>
         <PARAMETER NAME="VERSION_CONST" VALUE="0x00010000"/>
-        <PARAMETER NAME="Component_Name" VALUE="system_cv_sys_0_4"/>
+        <PARAMETER NAME="Component_Name" VALUE="system_cv_sys_0_5"/>
         <PARAMETER NAME="EDK_IPTYPE" VALUE="PERIPHERAL"/>
         <PARAMETER NAME="C_BASEADDR" VALUE="0x43C00000"/>
         <PARAMETER NAME="C_HIGHADDR" VALUE="0x43C00FFF"/>
@@ -781,6 +791,11 @@
         <PORT DIR="O" NAME="dds_sync" SIGIS="undef" SIGNAME="cv_sys_0_dds_sync">
           <CONNECTIONS>
             <CONNECTION INSTANCE="External_Ports" PORT="dds_sync"/>
+          </CONNECTIONS>
+        </PORT>
+        <PORT DIR="O" LEFT="3" NAME="gear" RIGHT="0" SIGIS="undef" SIGNAME="cv_sys_0_gear">
+          <CONNECTIONS>
+            <CONNECTION INSTANCE="External_Ports" PORT="gear"/>
           </CONNECTIONS>
         </PORT>
         <PORT DIR="O" NAME="lcd_bl" SIGIS="undef" SIGNAME="cv_sys_0_lcd_bl">
@@ -881,6 +896,11 @@
         <PORT DIR="I" NAME="m_axi_rvalid" SIGIS="undef" SIGNAME="cv_sys_0_m_axi_rvalid">
           <CONNECTIONS>
             <CONNECTION INSTANCE="processing_system7_0" PORT="S_AXI_HP0_RVALID"/>
+          </CONNECTIONS>
+        </PORT>
+        <PORT DIR="O" LEFT="6" NAME="relay" RIGHT="0" SIGIS="undef" SIGNAME="cv_sys_0_relay">
+          <CONNECTIONS>
+            <CONNECTION INSTANCE="External_Ports" PORT="relay"/>
           </CONNECTIONS>
         </PORT>
         <PORT CLKFREQUENCY="50000000" DIR="I" NAME="s_axi_aclk" SIGIS="clk" SIGNAME="processing_system7_0_FCLK_CLK0">

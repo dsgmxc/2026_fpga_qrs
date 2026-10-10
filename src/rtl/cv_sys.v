@@ -246,7 +246,38 @@ module cv_sys #(
     output wire        adc_oe_n,    // → AD9238 OEB   (V5  / J4-1),低有效
     output wire        adc_pdn,     // → AD9238 PDWN  (Y9  / J4-17),高有效
     input  wire [11:0] adc_d,       // ← AD9238 D0..D11 (V7 U7 W8 V8 U9 U8 U10 T9 W6 V6 Y7 Y6)
-    input  wire        adc_otr      // ← AD9238 OTR   (Y8  / J4-18)
+    input  wire        adc_otr,     // ← AD9238 OTR   (Y8  / J4-18)
+
+    //-------------------------------------------------------------------------
+    //  继电器矩阵 + 量程挡位(2026-10-10 加)—— 11 根,全部 J4 扩展口
+    //
+    //  【为什么是 11 根而不是规格写的 relay[7:0] + range[3:0] = 12 根】
+    //    用户 2026-10-10 报出的【实际接线】是 7 个继电器 + 4 个挡位。
+    //    ⇒ 端口写 7 位,不写 8 位 —— 多出来的那一位在板上【没有引脚】,
+    //      引出它会让 PS 以为自己控制了一个不存在的继电器。
+    //    ⚠️ 连带:0x1C 的 bit7 因此成为"必然非法"值,由 relay_ctrl 拒收。
+    //      见 relay_ctrl.v §位宽。
+    //
+    //  【球号来源】用户 2026-10-10 在板上按顺序报出,未与原理图交叉核对:
+    //    继电器 K1..K7 = U15 U14 U13 V13 W11 Y11 Y12   (J4-30/29/28/27/26/25/24)
+    //    挡位   A B C D = Y13 V10 V11 W10              (J4-23/22/21/19)
+    //  ⚠️ **这两组是"接线先于约束"的第三处**(前两处:DAC/DDS、AD9238)。
+    //     报的是球号不是脚号,而 U15..Y12 这一段正好是 **BANK34**
+    //     (J4 第 24~30 脚,底板上网络名 CMOS_D1..D4 —— 与已点亮的
+    //      DAC/DDS 的 CMOS_D5/D6/D7/PCLK 同一族),Y13/V10/V11/W10 是 **BANK13**。
+    //     ⇒ 跨 bank,功能无影响(两 bank 同 3.3 V),但约束要分两段写。
+    //  ⚠️ J4-24~30 与板载摄像头接口复用(见 docs/board_pins.md 陷阱 4):
+    //     本项目没插摄像头模块,不冲突;若将来要同时用摄像头必须换脚。
+    //
+    //  【⚠️ 极性/初值我无法从原理图核实】
+    //    本层直连 relay_ctrl 的输出,极性由 relay_ctrl 的 ACTIVE_LOW 参数定
+    //    (默认 0 = 引脚高 = 继电器闭合,沿用前序 STM32 的约定)。
+    //    若实际驱动板是低有效,改那【一个】参数即可,**不要在这里取反** ——
+    //    在这里取反会让 sts_relay_applied 与物理状态相反,两份文档立刻对不上。
+    //    **上电第一件事:听继电器咔哒声,核对接线顺序。**
+    //-------------------------------------------------------------------------
+    output wire [6:0]  relay,       // K1..K7,bit0=K1 (U15 U14 U13 V13 W11 Y11 Y12)
+    output wire [3:0]  gear         // A B C D, bit0=A (Y13 V10 V11 W10) = 10Ω/100Ω/1kΩ/10kΩ
 );
 
     //=========================================================================
@@ -295,6 +326,22 @@ module cv_sys #(
     wire [31:0] cfg_adc_buf_idx;    // 0x94 [12:0] 缓冲读索引(2026-10-08 12→13 位)
     wire [31:0] sts_adc_sts;        // 0x90 [0]locked [1]done [2]busy [3]otr
     wire [31:0] sts_adc_buf_data;   // 0x98 [11:0]采样 [12]OTR
+
+    // 继电器 / 挡位 / 稳定延时(2026-10-10 加)—— 同样必须在从机例化【之前】声明
+    wire [31:0] cfg_range_sel;      // 0x18 [3:0] 挡位请求
+    wire        cfg_range_set;      // 0x18 写脉冲
+    wire [31:0] cfg_relay_cfg;      // 0x1C [7:0] 组合请求(bit7 保留 ⇒ 可被拒收)
+    wire        cfg_relay_set;      // 0x1C 写脉冲
+    wire [31:0] cfg_settle_cfg;     // 0x24 [31:16] 稳定 ms
+    wire [3:0]  sts_gear_applied;   // 0x18 读(已生效值)
+    wire [7:0]  sts_relay_applied;  // 0x1C 读(已生效值)
+    wire [31:0] sts_status;         // 0x04 STATUS
+    // relay_ctrl 的散状态 —— 由本层打包成 sts_status(见 §9)。
+    //   ⚠️ 它们【不直接进从机】:从机只收整字 sts_status。
+    //      与 sts_adc_sts 的处置一致(那边也是在本层拼好后整字送出)。
+    wire [7:0]  io_err_code;        // → sts_status[15:8]
+    wire        io_busy;            // → sts_status[0]
+    wire        io_done;            // → sts_status[1]
     // dac_1220 的 init_done —— 【回送给从机】给上电脉冲开门。
     //   ⚠️ 方向是从机收、DAC 发,所以它在从机端口表里是 input。
     //      dac_1220 的 set_in 只在 NORMAL_WAIT 状态里才锁存,不等 init_done
@@ -361,7 +408,19 @@ module cv_sys #(
         .cfg_adc_go       (cfg_adc_go      ),
         .cfg_adc_buf_idx  (cfg_adc_buf_idx ),
         .sts_adc_sts      (sts_adc_sts     ),
-        .sts_adc_buf_data (sts_adc_buf_data)
+        .sts_adc_buf_data (sts_adc_buf_data),
+
+        // 继电器 / 挡位 / 稳定延时(2026-10-10)
+        //   ★ 这一组与上面所有 cfg_* 的区别:**写入不保证生效**。
+        //     本层只把请求与写脉冲送出去,回读走 sts_*_applied。
+        .cfg_range_sel    (cfg_range_sel   ),
+        .cfg_range_set    (cfg_range_set   ),
+        .cfg_relay_cfg    (cfg_relay_cfg   ),
+        .cfg_relay_set    (cfg_relay_set   ),
+        .cfg_settle_cfg   (cfg_settle_cfg  ),
+        .sts_gear_applied (sts_gear_applied),
+        .sts_relay_applied(sts_relay_applied),
+        .sts_status       (sts_status      )
     );
 
     //=========================================================================
@@ -660,6 +719,81 @@ module cv_sys #(
         .set_in    (cfg_dds_set         ),   // 0x80 写脉冲(上电不发,见从机注释)
         .init_done ()                        // 未引出,见上
     );
+
+    //=========================================================================
+    //  7b. 继电器矩阵 + 量程挡位(2026-10-10 加)
+    //
+    //  【为什么放 clk_axi 域】与 §7 的 DAC/DDS 同域 ⇒ 与 cfg_* 之间零 CDC。
+    //    稳定计时是"毫秒"量级,对时钟精度不敏感(见下 ⚠️)。
+    //
+    //  ⚠️ 【计时精度】本模块按 **设计值 50 MHz** 折 1 ms。
+    //     板上 BOOT.BIN 把 FCLK0 留在 27.78 MHz ⇒ PS 调 apply_fclk0() 之前
+    //     "40 ms"实际约 72 ms。**方向安全(只会更久)**,而且 PS 本来就应该
+    //     先修 FCLK0 再动模拟前端(DAC 的复位图案是双向窗口,比这里敏感得多)。
+    //     ⛔ 报告里不得把 50 MHz 写成实测量。
+    //
+    //  ⚠️ 【rst_n 为什么【不】像 dac_1220 那样挂 cfg_clk_release】
+    //     dac_1220 / MMCM 必须等 FCLK0 正确,是因为它们的时序常数落在
+    //     【双向窗口】里 —— 频率不对就完全失效(甚至会锁不住)。
+    //     本模块的计时是【下限型】:慢一点只是稳定时间变长,不会失效。
+    //     ⇒ 挂上去只会让 "PS 忘了写 0x84 ⇒ 继电器完全不动" 多出一个故障模式,
+    //       换不来任何安全性。**这是一处刻意的不同,不是漏了。**
+    //
+    //  ⚠️ 【ACTIVE_LOW 默认 0】(引脚高 = 继电器闭合),沿用前序 STM32
+    //     RelayMatrix_WritePort 的约定。**若实际驱动板是低有效,改这一个
+    //     参数即可**,不要在本层对 relay/gear 取反 ——
+    //     取反会让 0x1C/0x18 的读回值与物理状态相反。
+    //     ⚠️ 且低有效时,F P G A 配置期间引脚全低 ⇒ **7 个继电器全吸合**。
+    //        若确认是低有效,先查驱动板有没有上拉。
+    //=========================================================================
+    relay_ctrl #(
+        .CLK_FREQ_HZ (50_000_000),      // ★ 设计值,不是实测量
+        .ACTIVE_LOW  (0)                // 0 = 引脚高 = 闭合(前序约定)
+    ) u_relay_ctrl (
+        .clk               (s_axi_aclk           ),
+        .rst_n             (s_axi_aresetn        ),
+
+        // cfg_* —— 位域在这【里】切,与上面 adc_capture 的 .cfg_div(...) 同例:
+        //   端口边界自带契约,读代码的人不用回头查寄存器表。
+        //   ⚠️ cfg_relay 取 [7:0]【保留 bit7】—— 板上只有 7 个继电器,
+        //      bit7 = 1 必然非法,必须让它活着走到 relay_ctrl 被判掉。
+        //      若在这里切成 [6:0],写 0x80 会静默变成 0x00(= 合法组合!)
+        //      —— 那是个会**真的动继电器**的静默错误。
+        .cfg_relay         (cfg_relay_cfg[7:0]   ),
+        .cfg_relay_set     (cfg_relay_set        ),
+        .cfg_gear          (cfg_range_sel[3:0]   ),
+        .cfg_gear_set      (cfg_range_set        ),
+        .cfg_settle_ms     (cfg_settle_cfg[31:16]),
+
+        // 物理引脚 —— 直连顶层输出
+        .relay             (relay                ),
+        .gear              (gear                 ),
+
+        // 状态回送
+        .sts_relay_applied (sts_relay_applied    ),
+        .sts_gear_applied  (sts_gear_applied     ),
+        .sts_err_code      (io_err_code          ),
+        .sts_busy          (io_busy              ),
+        .sts_done          (io_done              )
+    );
+
+    //=========================================================================
+    //  7c. STATUS(0x04)打包
+    //    位定义(与 relay_ctrl.v、寄存器表 §3 三处必须一致):
+    //      [ 0]     busy       继电器正在稳定倒计时中
+    //      [ 1]     done       最近一次继电器请求【已生效】
+    //      [ 2]     fault      = (err_code != 0)
+    //      [ 7: 3]  保留,恒 0
+    //      [15: 8]  err_code   0=无错 1=非法组合 2=挡位非独热 3=稳定中写入被拒
+    //      [31:16]  保留,恒 0   ← 规格原写 meas_cnt(16 位测量计数),
+    //                             测量主链(meas_fsm)尚未存在 ⇒ 先恒 0
+    //   ⚠️ 恒 0 而不是留空:留空会综合出 warning 且读回不确定,
+    //      而"未实现位读 0"是本文件对 0x64~0x7C 立下的既有约定(见 §9 末)。
+    //=========================================================================
+    assign sts_status = {16'h0, io_err_code, 5'h0,
+                         (io_err_code != 8'h0),   // [2] fault
+                         io_done,                 // [1]
+                         io_busy};                // [0]
 
     //=========================================================================
     //  8. ADC 采集通路(2026-10-06 新增)

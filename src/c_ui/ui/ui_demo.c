@@ -128,6 +128,7 @@ static lv_obj_t *g_header_title_label;
 static lv_obj_t *g_header_connection_label;
 static lv_obj_t *g_header_bias_label;
 static lv_obj_t *g_header_path_label;
+static lv_obj_t *g_header_gear_label;        /* 🆕 2026-10-10 顶栏「档位:」栏 */
 static lv_obj_t *g_header_operation_label;
 static lv_obj_t *g_page_containers[5];
 static uint8_t g_page_built[5];
@@ -197,6 +198,7 @@ static UI_BiasTarget g_keypad_target;
 static char g_keypad_buffer[8];
 static char g_ui_actual_bias[16];
 static char g_ui_actual_path[16];
+static char g_ui_actual_gear[16];            /* 🆕 顶栏「档位:」栏的文字 */
 static float g_sweep_voltage[3][UI_SWEEP_MAX_POINTS];
 static float g_sweep_capacitance[3][UI_SWEEP_MAX_POINTS];
 static float g_sweep_parallel_capacitance[3][UI_SWEEP_MAX_POINTS];
@@ -470,6 +472,13 @@ static void UI_UpdateCommonStatus(void)
         lv_label_set_text_fmt(g_header_path_label,
                               "回路:%s",
                               g_ui_actual_path);
+    }
+
+    if (g_header_gear_label != NULL)
+    {
+        lv_label_set_text_fmt(g_header_gear_label,
+                              "档位:%s",
+                              g_ui_actual_gear);
     }
 }
 
@@ -2555,26 +2564,49 @@ static void UI_CreateCommonStatusHeader(lv_obj_t *screen)
                         38,
                         UI_BackEvent,
                         NULL);
+    /* 🔴 2026-10-10:7 栏 → **8 栏**(插入「档位:」)。原本 7 栏已经排满到
+     *    右边界 1014,没有空位,所以右边六栏统统重新分配了宽度。
+     *    新宽度是按 `ui_font_cn_20` 的**实测字宽**算的(汉字 20.0 px、
+     *    数字约 11.1 px、':' 约 5.6 px),并用帧缓存量过实际占用,不是估的:
+     *
+     *      栏       x    width   右端   实测占用
+     *      返回      8     68      76     —
+     *      标题     84    110     194    最多 4 汉字 = 80
+     *      后端    198    110     308    「后端:未连接」= 84
+     *      偏压    312    116     428    「偏压:-10.00V」= 96
+     *      回路    432    140     572    最长「回路:COSS_DIS」≈ 130
+     *      档位    576    116     692    最长「档位:10kΩ」≈ 100
+     *      状态    696    318    1014    「状态:就绪(…)」= 274
+     *
+     *    ⚠️ **连带**:首页的标题会被移到 x=16 并加宽(见 `UI_ActivatePage`
+     *       的 `UI_PAGE_HOME` 分支),那个宽度**必须**跟着改,否则标题会压上
+     *       「后端」栏(`x=198`)。那处是 `16 + 178 = 194`。 */
     g_header_title_label =
         UI_CreateText(g_common_header, "首页", &ui_font_cn_20,
-                      UI_COLOR_TEXT, 84, 12, 146, 28,
+                      UI_COLOR_TEXT, 84, 12, 110, 28,
                       LV_TEXT_ALIGN_LEFT);
     g_header_connection_label =
         UI_CreateText(g_common_header, "后端:未连接", &ui_font_cn_20,
-                      UI_COLOR_ORANGE, 234, 12, 158, 28,
+                      UI_COLOR_ORANGE, 198, 12, 110, 28,
                       LV_TEXT_ALIGN_CENTER);
     g_header_bias_label =
         UI_CreateText(g_common_header, "", &ui_font_cn_20,
-                      UI_COLOR_STATUS, 396, 12, 150, 28,
+                      UI_COLOR_STATUS, 312, 12, 116, 28,
                       LV_TEXT_ALIGN_CENTER);
     g_header_path_label =
         UI_CreateText(g_common_header, "", &ui_font_cn_20,
-                      UI_COLOR_STATUS, 550, 12, 150, 28,
+                      UI_COLOR_STATUS, 432, 12, 140, 28,
+                      LV_TEXT_ALIGN_CENTER);
+    /* 🆕 2026-10-10 档位栏。内容是 **PL 回读的已生效值**(`app/relay_view.c`),
+     *    不是界面请求值 —— 与「回路」「偏压」两栏同一个口径。 */
+    g_header_gear_label =
+        UI_CreateText(g_common_header, "", &ui_font_cn_20,
+                      UI_COLOR_STATUS, 576, 12, 116, 28,
                       LV_TEXT_ALIGN_CENTER);
     g_header_operation_label =
         UI_CreateText(g_common_header, "系统就绪", &ui_font_cn_20,
-                      UI_COLOR_TEXT_MUTED, 704, 12,
-                      (lv_coord_t)LCD_PIXEL_WIDTH - 714, 28,
+                      UI_COLOR_TEXT_MUTED, 696, 12,
+                      (lv_coord_t)LCD_PIXEL_WIDTH - 706, 28,
                       LV_TEXT_ALIGN_RIGHT);
     g_status_label = g_header_operation_label;
     UI_UpdateCommonStatus();
@@ -2604,6 +2636,7 @@ static lv_obj_t *UI_PrepareRootScreen(void)
     g_header_connection_label = NULL;
     g_header_bias_label = NULL;
     g_header_path_label = NULL;
+    g_header_gear_label = NULL;
     g_header_operation_label = NULL;
     g_keypad_overlay = NULL;
     g_keypad_title_label = NULL;
@@ -2700,12 +2733,15 @@ static void UI_ActivatePage(UI_Page page)
         if (page == UI_PAGE_HOME)
         {
             lv_obj_set_pos(g_header_title_label, 16, 12);
-            lv_obj_set_width(g_header_title_label, 214);
+            /* ⚠️ 这个宽度与 `UI_CreateCommonStatusHeader()` 的「标题」栏右端
+             *    对齐(16 + 178 = 194),**必须联动改** —— 首页没有返回键,
+             *    标题左移并加宽,超了就会压上 x=198 的「后端」栏。 */
+            lv_obj_set_width(g_header_title_label, 178);
         }
         else
         {
             lv_obj_set_pos(g_header_title_label, 84, 12);
-            lv_obj_set_width(g_header_title_label, 146);
+            lv_obj_set_width(g_header_title_label, 110);
         }
     }
     if (g_header_back_button != NULL)
@@ -3101,6 +3137,103 @@ static void UI_InitResetEvent(lv_event_t *event)
                     (dialog_width - 110) / 2,
                     50,
                     UI_InitModalConfirmEvent,
+                    NULL);
+}
+
+/**
+ * @brief 提示框的「知道了」回调。
+ *
+ * ⚠️ **不复用 `UI_InitModalCancelEvent`** —— 那个会把状态行改写成
+ *    「状态:复位操作取消」,对一条硬件提示是错文案。
+ */
+static void UI_NoticeCloseEvent(lv_event_t *event)
+{
+    if ((event == NULL) ||
+        (lv_event_get_code(event) != LV_EVENT_CLICKED))
+    {
+        return;
+    }
+    if (g_modal_overlay != NULL)
+    {
+        lv_obj_del(g_modal_overlay);
+        g_modal_overlay = NULL;
+    }
+}
+
+/**
+ * @brief 只读提示框:标题 + 正文 + 一个「知道了」。
+ *
+ * 🆕 2026-10-10,给 `app/relay_view.c` 报"继电器/档位读回异常"用。
+ *
+ * 🔴 **不用 `lv_msgbox`** —— `app/lv_conf.h` 里 `LV_USE_MSGBOX` 是 **0**,
+ *    而且本工程从头到尾没人用过它。这里照抄上面「系统复位」确认框那套
+ *    自建写法(`UI_CreatePanel` + `UI_CreateText` + `UI_CreateButton`)。
+ *
+ * ⚠️ **与确认框共用 `g_modal_overlay`** ⇒ 已经有一层弹框时**直接返回**,
+ *    免得把用户正在等的确认框冲掉。也正因如此,调用方(relay_view.c)
+ *    必须自己按值去重,否则异常持续存在时会每轮都来敲一次门。
+ *
+ * ⚠️ **文案要过字库**:`ui_font_cn_20` / `ui_font_cn_28` 都是按 `--symbols`
+ *    生成的**子集**(588 个符号),缺字只会静默显示成空白,编译器不报。
+ */
+void UI_Demo_ShowAlert(const char *title, const char *body)
+{
+    lv_obj_t *dialog;
+    lv_coord_t dialog_width;
+
+    if ((title == NULL) || (body == NULL) || (g_modal_overlay != NULL))
+    {
+        return;
+    }
+
+    g_modal_overlay = UI_CreatePanel(lv_scr_act(),
+                                     0,
+                                     0,
+                                     (lv_coord_t)LCD_PIXEL_WIDTH,
+                                     (lv_coord_t)LCD_PIXEL_HEIGHT,
+                                     0x020617u,
+                                     0);
+    lv_obj_set_style_bg_opa(g_modal_overlay, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_border_width(g_modal_overlay, 0, LV_PART_MAIN);
+
+    dialog_width = (lv_coord_t)LCD_PIXEL_WIDTH - 220;
+    if (dialog_width > 520)
+    {
+        dialog_width = 520;
+    }
+    dialog = UI_CreatePanel(g_modal_overlay,
+                            ((lv_coord_t)LCD_PIXEL_WIDTH - dialog_width) / 2,
+                            ((lv_coord_t)LCD_PIXEL_HEIGHT - 210) / 2,
+                            dialog_width,
+                            210,
+                            UI_COLOR_SURFACE_LIGHT,
+                            18);
+    UI_CreateText(dialog,
+                  title,
+                  &ui_font_cn_28,
+                  UI_COLOR_TEXT,
+                  20,
+                  26,
+                  dialog_width - 40,
+                  40,
+                  LV_TEXT_ALIGN_CENTER);
+    UI_CreateText(dialog,
+                  body,
+                  &ui_font_cn_20,
+                  UI_COLOR_STATUS,
+                  28,
+                  82,
+                  dialog_width - 56,
+                  56,
+                  LV_TEXT_ALIGN_CENTER);
+    UI_CreateButton(dialog,
+                    "知道了",
+                    UI_COLOR_BLUE,
+                    (dialog_width - 120) / 2,
+                    150,
+                    120,
+                    48,
+                    UI_NoticeCloseEvent,
                     NULL);
 }
 
@@ -5792,6 +5925,7 @@ uint32_t UI_Demo_Init(void)
     g_header_connection_label = NULL;
     g_header_bias_label = NULL;
     g_header_path_label = NULL;
+    g_header_gear_label = NULL;
     g_header_operation_label = NULL;
     g_keypad_overlay = NULL;
     g_keypad_title_label = NULL;
@@ -6168,6 +6302,21 @@ void UI_Demo_SetActualPath(const char *path_text)
     (void)strncpy(g_ui_actual_path, path_text,
                   sizeof(g_ui_actual_path) - 1u);
     g_ui_actual_path[sizeof(g_ui_actual_path) - 1u] = '\0';
+    UI_UpdateCommonStatus();
+}
+
+/* 🆕 2026-10-10:顶栏「档位:」栏。与上面 `SetActualPath` 逐行同构 ——
+ * 同一条数据通路(存缓冲 → UI_UpdateCommonStatus → 刷标签),
+ * 内容同样是 **PL 回读的已生效值**。调用方 = `app/relay_view.c`。 */
+void UI_Demo_SetActualGear(const char *gear_text)
+{
+    if (gear_text == NULL)
+    {
+        return;
+    }
+    (void)strncpy(g_ui_actual_gear, gear_text,
+                  sizeof(g_ui_actual_gear) - 1u);
+    g_ui_actual_gear[sizeof(g_ui_actual_gear) - 1u] = '\0';
     UI_UpdateCommonStatus();
 }
 

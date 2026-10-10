@@ -51,7 +51,7 @@ STM32 上都做了双帧。**当时选曲线缓存的真实理由是回避 DDR/V
 
 > 🔴 **阻塞期根因(2026-10-03 已结案)**:`S_AXI_HP0` 全量 `DECERR` ⇒ 帧缓存全黑。
 > 根因 = **`ARPROT[1]`(NS,非安全位)置 1**,`ARCACHE` 无关。修法 `assign m_axi_arprot = 3'h0;`。
-> 📄 `board/measurements/20261003_hp0_decerr_rootcause_arprot.md`
+> 📄 `report/measurements/20261003_hp0_decerr_rootcause_arprot.md`
 
 | 模块 | 规格 | RTL | 仿真 | 综合/实现 | **上板** |
 |---|---|---|---|---|---|
@@ -153,7 +153,7 @@ STM32 上都做了双帧。**当时选曲线缓存的真实理由是回避 DDR/V
 > 与要测的效应**同量级** ⇒ **这套量具没有分辨力,数字不能当结论用。**
 > (绿色那条 y=285,其余四条 294~304 —— 它本身就是瞄歪的,连进拟合都不该。)
 > 📌 **教训:给人做"测一下"的测试之前,先算清它能分辨多小的量。分辨力不够就换量具,不要解读数字。**
-> 📄 `llm-log/LLM-037.md`
+> 📄 `report/llm-log/LLM-037.md`
 
 ### 上电那一下的画面漂移(🟡 领先假设,未证实)
 
@@ -237,9 +237,9 @@ STM32 上都做了双帧。**当时选曲线缓存的真实理由是回避 DDR/V
 
 🔴 **本子系统唯一没有任何证据的一步是"上板"** —— 而风险 **D1(cache 一致性)**、
 `arcache`/`arprot` 取值、16 次串行突发的真实带宽、**I2C 外部上拉是否真的存在**,
-**四项都只有上板才能验**。详见 `llm-log/LLM-031.md` 与 `LLM-032.md`。
+**四项都只有上板才能验**。详见 `report/llm-log/LLM-031.md` 与 `LLM-032.md`。
 
-🔴 **PS 侧另有四项同样只有上板才能验**(第 32 次,详见 `llm-log/LLM-033.md`):
+🔴 **PS 侧另有四项同样只有上板才能验**(第 32 次,详见 `report/llm-log/LLM-033.md`):
 
 | # | 待验 | 不通过的后果 | 备选 |
 |---|---|---|---|
@@ -403,7 +403,7 @@ touch_scl R19   touch_sda P20   touch_int U19   touch_rst_n M19
 > **该值已被推翻**。41.6667 是 PYNQ 按**假定的** IO PLL 1500 做的除法(`1500/6/6`),
 > **从来不是任何仪表的读数**。2026-10-03 用时基独立实测(帧率法)得
 > **IO PLL = 1000 MHz、`apply_fclk0()` 后 FCLK0 = 50.000 MHz**。
-> 证据:`board/measurements/20261003_fclk0_real_measured.md`。
+> 证据:`report/measurements/20261003_fclk0_real_measured.md`。
 >
 > ⚠️ **但有一个真实的前置条件**(不能省):板上 `BOOT.BIN` 把 FCLK0 留在 **27.78 MHz**,
 > 且 `Overlay()` 会把 `FPGA0_CLK_CTRL` **整个复位**回该值 ⇒ **50 MHz 只在 `main.py`
@@ -820,7 +820,7 @@ src/c_ui/                           ← 界面进程(独立可执行文件)
 ⚠️ **口径(2026-10-03 实测,已更正)**:`BOOT.BIN` 留 **27.78 MHz**,`Overlay()` 会把它复位回该值,
 `F2` 因此规定**设定必须在 `Overlay()` 之后**;**`apply_fclk0()` 之后真值 = 50.000 MHz**。
 ⛔ **不得再写「41.6667 MHz(实测)」** —— 那是 PYNQ 按假定 IO PLL 做的除法,不是仪表读数。
-📄 `board/measurements/20261003_fclk0_real_measured.md`
+📄 `report/measurements/20261003_fclk0_real_measured.md`
 
 ## 9. 风险
 

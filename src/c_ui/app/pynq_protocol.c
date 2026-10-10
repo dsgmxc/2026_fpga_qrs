@@ -16,7 +16,8 @@
  *        · C 进程**本来就已经** mmap 了 AXI 窗口(`--axi-base`),
  *          `pynq_disp.c` 写 LCD 寄存器走的就是这条路。写偏压只是同一套。
  *        · 走 socket 的对端(`ui_process.py`)现在**没有测量数据可发** ——
- *          DLIA / CORDIC / 继电器在 PL 里都还没有。建 IPC 只增加两进程
+ *          DLIA / CORDIC 在 PL 里都还没有(继电器/档位寄存器 2026-10-10
+ *          已上板,但界面只**读回显**,不产生"测量数据")。建 IPC 只增加两进程
  *          故障面,不增加能力。
  *        · 文档里 pipe/socket 的定位是「接**测量数据**」,那件事属于 P3–P4。
  *          到那时换掉的是**本文件**,`ui_demo.c` 仍然一行不动。
@@ -36,10 +37,15 @@
  *    归 `measure_config.c` 单写。「系统复位」页新增了五档激励频率、
  *    五档采样率、三档相位微调;前序其余四页逐字未动。
  *
- * 【还没有硬件、因此只在界面上生效的】
- *   · 回路切换(「当前选择:CISS/COSS/CRSS/RG」)—— **本位流里没有
- *     `relay_ctrl`**,`cv_regs.py` 的寄存器表里也没有继电器寄存器。
- *     本文件只把它回显到界面,并照实打印一行。
+ * 【继电器 / 档位(2026-10-10 起有硬件)】
+ *   · `0x18 RANGE_SEL` / `0x1C RELAY_CFG` / `0x04 STATUS` 已在位流里,
+ *     上板验证通过(见 `docs/project_state.md` 2026-10-10 那一条)。
+ *     ⛔ 旧写法「本位流里没有 `relay_ctrl`,`cv_regs.py` 里也没有继电器
+ *        寄存器」**作废** —— 那是本次接线之前的实况。
+ *   · 🔴 **C 界面本轮只读** —— 这三个寄存器一个都不写,只把**回读的已生效
+ *     值**显示到顶栏「回路:」「档位:」两栏(`app/relay_view.c`)。
+ *     写入权归 Python 侧(`tools/relay_hold.py` 那类脚本),避免第二个写入方。
+ *   · 所以「回路」按钮点下去**不再假装切换**,只是重新读一次真值。
  * 🆕 2026-10-06:**Cs 读数有了,但不是 DLIA 算的。** 走的是
  *    `adc_sample.c` —— 采 AD9238 缓冲(0x8C/0x90/0x94/0x98)+ C 侧正交解调。
  *    结果页的「单点波形 / 扫压波形」两张图和扫压曲线上的 Cs 都由此来。
@@ -55,8 +61,10 @@
  *      不是画错了。判据:`dump_stats` 的 `ADC 采集 成功/失败` 计数。
  *
  * 🔴 **状态行有字数上限,写长了会被截掉右半边。**
- *    `g_header_operation_label`(`ui_demo.c:2565`)在 x=704、宽
- *    `LCD_PIXEL_WIDTH − 714` = **310 px**、**右对齐**、`ui_font_cn_20`。
+ *    `g_header_operation_label` 在 x=696、宽 `LCD_PIXEL_WIDTH − 706`
+ *    = **318 px**、**右对齐**、`ui_font_cn_20`。
+ *    🆕 2026-10-10 顶栏由 7 栏加到 8 栏(插了「档位:」),右边六栏的宽度
+ *    一起重算过 —— 完整表在 `ui_demo.c::UI_CreateCommonStatusHeader()`。
  *    20 px 字体 ⇒ 一个汉字 20 px、一个半角字符约 10 px。
  *    ⇒ 大约 **15 个汉字**,或"8 汉字 + 10 半角"。**超了从左边开始被吃掉**
  *    (右对齐),用户看到的正好是「状态:…」被啃掉的那种别扭样子。
@@ -91,6 +99,9 @@
  *    此前 `UI_Demo_*Waveform*` 没有任何活调用者,扫压的 Cs 是 `demo_capacitance()`
  *    编的模型。现在默认走真实采集,模型只剩 `CV_UI_DEMO=1` 一条退路。 */
 #include "adc_sample.h"
+/* 🆕 2026-10-10:继电器 / 档位的**只读**回显。本文件一个继电器寄存器都不写,
+ *    只把回读值喂给顶栏;写入权归 Python 侧。见 relay_view.c 文件头。 */
+#include "relay_view.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -143,7 +154,7 @@ static uint32_t s_demo_auto_stage;
 /* 统计(排障用;不在 display_protocol.h 里 —— 那是前序的接口) */
 static uint32_t s_cmd_total;            /* 收到的指令总数             */
 static uint32_t s_readback_pending;     /* 要读数、但读不到的指令数   */
-static uint32_t s_path_cmds;            /* 回路切换指令数(无继电器)  */
+static uint32_t s_path_cmds;            /* 回路按钮点击次数(只读)  */
 static uint32_t s_bias_writes;          /* 写 0x14 的次数             */
 static uint32_t s_bias_verify_fail;     /* 回读与写入不一致的次数     */
 static int      s_verify_notice;        /* 回读失败提示只打一次       */
@@ -535,7 +546,8 @@ static void point_measure(void)
     }
 
     if (s_point_all) {
-        /* 「一键测量页」:三条回路共用同一份读数 —— 没有继电器,物理上就是同一个回路 */
+        /* 「一键测量页」:三条回路共用同一份读数 —— C 界面不切继电器组合,
+         *  这三条"回路"在硬件上就是同一个回路 */
         uint32_t p;
 
         for (p = 0u; p < 3u; ++p) {
@@ -544,9 +556,9 @@ static void point_measure(void)
     } else if (path < 3u) {
         UI_Demo_UpdateSingleCapacitance(path, cs_text, cp_text, d_text, valid);
     } else {
-        /* RG 回路要继电器切到栅极电阻那条路,本位流里没有 `relay_ctrl`
-         * ⇒ **没有可测的量**。卡片照实留 `--`,不编一个电阻值出来。 */
-        printf("[proto] 点测 RG:继电器未实现,无读数可填(卡片保持 --)\n");
+        /* RG 回路要继电器切到栅极电阻那条路,而 C 界面**不写**继电器寄存器
+         * ⇒ 切不过去,**没有可测的量**。卡片照实留 `--`,不编一个电阻值出来。 */
+        printf("[proto] 点测 RG:界面不切继电器组合,无读数可填(卡片保持 --)\n");
     }
 
     UI_Demo_SetStatusText(valid ?
@@ -870,7 +882,9 @@ void DisplayProtocol_Init(void)
     bias_apply(0.0f);
 
     UI_Demo_SetConnection(1u);              /* 寄存器通了,后端算"在线" */
-    UI_Demo_SetActualPath("CISS");
+    /* 🔴 上电**读回真值**,不再写死字符串 —— 原先这里是 `"CISS"`,
+     *    而硬件复位态其实是 `ALL_OFF(0x10)`:顶栏从开机第一秒就在说谎。 */
+    (void)RelayView_Refresh(1);
 
     if (s_demo_enabled) {
         UI_Demo_SetStatusText("状态:演示模式(偏压真下发,读数由模型生成)");
@@ -889,7 +903,8 @@ void DisplayProtocol_Init(void)
            "        激励 = %u Hz(0x80 = 0x%05X);采样率/相位明细见上面 [mc] 那几行\n"
            "        偏压 = 0.0 V(0x14 = 0x%05X)\n"
            "        扫压驻留 = %u ms(可用 CV_SWEEP_DWELL_MS 覆盖)\n"
-           "        ⚠️ 回路切换仍无硬件(本位流里没有 relay_ctrl),只回显到界面;\n"
+           "        回路/档位:0x18/0x1C/0x04 **只读回显**,C 界面不写"
+           "(写入权归 Python 侧);\n"
            "           Cs 走真实 ADC 采样(adc_sample.c),未标定,Cp/D 因无相位不填\n",
            (unsigned)MeasureConfig_GetDdsHz(),
            (unsigned)cv_dds_hz_to_code(MeasureConfig_GetDdsHz()),
@@ -899,6 +914,11 @@ void DisplayProtocol_Init(void)
 
 void DisplayProtocol_Process(void)
 {
+    /* 🔴 每圈都调(函数内部自带 200 ms 节流)—— 这是顶栏「回路:」「档位:」
+     *    两栏的**轮询点**。放在最前面:它跟测量状态无关,扫压停着的时候
+     *    也要跟着硬件走(比如另一个进程用 relay_hold.py 改了组合)。 */
+    (void)RelayView_Refresh(0);
+
     demo_auto_run();
 
     /* ---- 单点测量:偏压稳定了再采 ----
@@ -1003,14 +1023,16 @@ bool DisplayProtocol_RequestPath(uint32_t path)
     s_cmd_total++;
     s_path_cmds++;
 
-    if (path < 4u) {
-        UI_Demo_SetActualPath(path_name(path));
-    }
+    /* 🔴 **不再假装切换。** 这里以前调 `UI_Demo_SetActualPath(path_name(path))`,
+     *    把顶栏写成用户点的那一路 —— 而硬件根本没动,顶栏于是从"回显"变成
+     *    "许诺"。现在顶栏那一栏归 `RelayView_Refresh()` 管,显示的永远是
+     *    **硬件现在在哪路**(回读 0x1C);按钮高亮(`g_ui_single_path`)仍旧表示
+     *    「我**要**测哪路」—— 两者本来就是两件事,分开才诚实。
+     *
+     *    继电器寄存器的写入权在 Python 侧(0x1C/0x18),C 界面只读。 */
+    (void)RelayView_Refresh(1);             /* force:立刻读一次,别等节流 */
 
-    /* 🔴 本位流里**没有 relay_ctrl**,寄存器表里也没有继电器寄存器
-     *    (见 cv_regs.py)——所以这里没有硬件可写,只有界面状态。
-     *    照实打印,别让日志看起来像"切了回路"。 */
-    printf("[proto] 回路 → %s(仅界面状态;继电器模块不在本位流)\n",
+    printf("[proto] 回路按钮 → %s:只读回读,未改硬件(0x1C/0x18 写入权归 Python 侧)\n",
            path_name(path));
     return true;
 }
@@ -1036,9 +1058,10 @@ bool DisplayProtocol_RequestPoint(uint32_t path, uint32_t bias_tenths)
     s_cmd_total++;
     s_readback_pending++;
 
-    if (path < 4u) {
-        UI_Demo_SetActualPath(path_name(path));
-    }
+    /* ⚠️ 这里**不**把顶栏写成请求的那一路 —— 顶栏显示硬件真值(见 RequestPath
+     *    的说明)。本次点的是哪个回路,下面的 printf 会说清楚。 */
+    (void)RelayView_Refresh(1);
+
     if (bias_tenths < CV_BIAS_TENTHS_MIN) { bias_tenths = CV_BIAS_TENTHS_MIN; }
     if (bias_tenths > CV_BIAS_TENTHS_MAX) { bias_tenths = CV_BIAS_TENTHS_MAX; }
 
@@ -1073,7 +1096,8 @@ bool DisplayProtocol_RequestPointAll(uint32_t bias_tenths)
     s_point_due_ms    = cv_millis() + s_dwell_ms;
     s_point_pending   = 1u;
 
-    /* 三条回路共用同一个偏压 —— 没有继电器,挨着写三次同一个码没有意义 */
+    /* 三条回路共用同一个偏压 —— C 界面不切继电器组合,
+     * 挨着写三次同一个码没有意义 */
     printf("[proto] 点测 CISS+COSS+CRSS @ %.2f V:偏压已下发,"
            "%u ms 后采一次(三条卡片共用同一份真实读数)\n",
            (double)s_bias_volts, (unsigned)s_dwell_ms);
@@ -1089,7 +1113,7 @@ bool DisplayProtocol_RequestSweep(uint32_t path, uint32_t stop_tenths)
         /* 扫压页把「全部」派发到 RequestRgThenSweepAll,走不到这里;
          * 真到了就是个越界参数,收敛到 CISS 而不是崩掉。 */
         path = 0u;
-        UI_Demo_SetActualPath(path_name(path));
+        (void)RelayView_Refresh(1);     /* 顶栏显示硬件真值,不写请求值 */
     }
     sweep_start(1u << path, stop_tenths);
     return true;
@@ -1100,9 +1124,10 @@ bool DisplayProtocol_RequestRgThenSweepAll(uint32_t stop_tenths)
     s_cmd_total++;
     s_readback_pending++;
 
-    /* 「先测 RG,再三路扫压」—— RG 要用继电器切到栅极电阻那条路,本位流没有。
+    /* 「先测 RG,再三路扫压」—— RG 要继电器切到栅极电阻那条路,而 C 界面
+     * **不写**继电器寄存器(只读)⇒ 这条路切不过去。
      * 照实说,然后照常把三路扫压跑起来。 */
-    printf("[proto] 先测 RG:继电器未实现,跳过;**只跑三路扫压**\n");
+    printf("[proto] 先测 RG:界面不切继电器组合,跳过;**只跑三路扫压**\n");
     sweep_start(0x07u, stop_tenths);
     return true;
 }

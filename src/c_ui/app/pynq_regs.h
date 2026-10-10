@@ -52,6 +52,52 @@ extern "C" {
 #define CV_CTRL_DAC_RST_N    0x1u    /* [0] 1 = 已放行 / 0 = 仍按在复位     */
 
 /* ------------------------------------------------------------------ */
+/* 继电器矩阵 + 档位选择(2026-10-10;源 = `src/python/cv_regs.py`)      */
+/*   ⚠️ 写 = 请求,读 = **已生效**值;非法请求被拒且状态不变,原因看      */
+/*      STATUS.err_code。                                              */
+/*   🔴 **C 界面本轮只读** —— 下面 4 个寄存器一个都不写,只读回显示。   */
+/*      写入权归 Python 侧,避免两个写入方。                            */
+/* ------------------------------------------------------------------ */
+#define CV_REG_RELAY_STATUS  0x04u   /* RO [0]busy [1]done [2]fault
+                                        [15:8]err_code                      */
+#define CV_REG_RANGE_SEL     0x18u   /* RW [3:0] 档位独热码,读回已生效      */
+#define CV_REG_RELAY_CFG     0x1Cu   /* RW [6:0] = K1..K7;[7] 保留,恒判非法 */
+#define CV_REG_SETTLE_CFG    0x24u   /* RW [31:16] 稳定 ms(复位 40)        */
+
+/* 0x04 位域 */
+#define CV_RELAY_STS_BUSY(s)  ((uint32_t)((s) & 0x1u))
+#define CV_RELAY_STS_DONE(s)  ((uint32_t)(((s) >> 1) & 0x1u))
+#define CV_RELAY_STS_FAULT(s) ((uint32_t)(((s) >> 2) & 0x1u))
+#define CV_RELAY_STS_ERR(s)   ((uint32_t)(((s) >> 8) & 0xFFu))
+
+/* STATUS[15:8] err_code(逐字镜像 cv_regs.py 的 RELAY_ERR) */
+#define CV_RELAY_ERR_NONE    0x00u   /* 正常                                 */
+#define CV_RELAY_ERR_RELAY   0x01u   /* 0x1C 组合不在白名单                   */
+#define CV_RELAY_ERR_GEAR    0x02u   /* 0x18 非独热                           */
+#define CV_RELAY_ERR_BUSY    0x03u   /* 上一次切换未完成时又写                */
+
+/* 0x18 [3:0] 档位独热码:bit0=A(10Ω) bit1=B(100Ω) bit2=C(1kΩ) bit3=D(10kΩ) */
+#define CV_RANGE_A           0x1u
+#define CV_RANGE_B           0x2u
+#define CV_RANGE_C           0x4u
+#define CV_RANGE_D           0x8u
+#define CV_RANGE_RESET       0x2u    /* B = 100 Ω(RTL 复位值)               */
+#define CV_RANGE_MASK        0xFu
+
+/* 0x1C [6:0] 继电器白名单(镜像 cv_regs.py 的 RELAY_STATE / RELAY_LEGAL)。
+ * 🔴 **是白名单,不是黑名单** —— 只有这 7 个值合法,其余(含 [7]=1)一律
+ *    err_code=0x01。出处 = 前序 STM32 工程 `relay_matrix.c` 的宏定义与
+ *    `BSRR` 写法(高电平吸合),不是从原理图推的。 */
+#define CV_RELAY_MASK        0x7Fu
+#define CV_RELAY_COSS_DISCH  0x00u   /* COSS_DISCHARGE(全断/放电态)         */
+#define CV_RELAY_ALL_OFF     0x10u   /* ALL_OFF = K5 ← **复位值**           */
+#define CV_RELAY_CISS_DISCH  0x1Eu   /* CISS_DISCHARGE = K2 K3 K4 K5        */
+#define CV_RELAY_RG          0x3Cu   /* RG       = K3 K4 K5 K6              */
+#define CV_RELAY_CRSS        0x51u   /* CRSS     = K1 K5 K7                 */
+#define CV_RELAY_COSS        0x61u   /* COSS     = K1 K6 K7                 */
+#define CV_RELAY_CISS        0x7Fu   /* CISS     = K1..K7 全合              */
+
+/* ------------------------------------------------------------------ */
 /* AD9238 采集通路(2026-10-06 进位流)                                  */
 /* ------------------------------------------------------------------ */
 #define CV_REG_ADC_CFG       0x88u   /* RW [7:0]DIV [15:8]PH_OFF(s) [16]CONT

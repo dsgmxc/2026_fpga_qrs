@@ -50,6 +50,17 @@ void UI_Demo_SetStatusText(const char *text);
 void UI_Demo_SetInitStatusText(const char *text);
 void UI_Demo_SetActualBias(const char *bias_text);
 void UI_Demo_SetActualPath(const char *path_text);
+/* 🆕 2026-10-10:顶栏「档位:」栏(感应电阻挡位 10Ω/100Ω/1kΩ/10kΩ)。
+   与上面两个同一个口径 —— 灌进来的是 **PL 回读的已生效值**,不是请求值。
+   调用方 = `app/relay_view.c`。 */
+void UI_Demo_SetActualGear(const char *gear_text);
+
+/* 🆕 2026-10-10:只读的系统提示框(标题 + 正文 + 「知道了」)。
+   给 `app/relay_view.c` 报继电器/档位读回异常用。
+   ⚠️ 与「系统复位」确认框**共用** `g_modal_overlay` —— 已经有一层弹框时
+   直接返回,不叠加。所以调用方要自己按值去重,别每轮都来敲门。
+   ⚠️ 文案必须落在 `ui_font_cn_20` / `ui_font_cn_28` 的子集内(缺字不报错)。 */
+void UI_Demo_ShowAlert(const char *title, const char *body);
 void UI_Demo_UpdateSingleCapacitance(uint32_t path,
                                       const char *cs_text,
                                       const char *cp_text,

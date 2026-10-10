@@ -141,6 +141,46 @@ set_property -dict {PACKAGE_PIN V6  IOSTANDARD LVCMOS33} [get_ports {adc_d[9]}]
 set_property -dict {PACKAGE_PIN Y7  IOSTANDARD LVCMOS33} [get_ports {adc_d[10]}]
 set_property -dict {PACKAGE_PIN Y6  IOSTANDARD LVCMOS33} [get_ports {adc_d[11]}]
 
+# ---- 继电器矩阵 + 量程挡位(11 根,2026-10-10 加)------------------------------
+# 球号【由用户在板上按顺序报出】,未与原理图逐脚交叉核对 ——
+#   这是本项目第三处"接线先于约束"的信号组(前两处:DAC/DDS、AD9238)。
+#
+#   继电器 K1..K7 (relay[0..6]) = U15 U14 U13 V13 W11 Y11 Y12
+#              = J4 第 30 / 29 / 28 / 27 / 26 / 25 / 24 脚(连续,逆序)
+#   挡位   A B C D (gear[0..3]) = Y13 V10 V11 W10
+#              = J4 第 23 / 22 / 21 / 19 脚  ← ⚠️ **不连续:第 20 脚(W9)空着**
+#      A = 10 Ω / B = 100 Ω / C = 1 kΩ / D = 10 kΩ
+#      (映射顺序 = 用户报出的顺序,与 acquisition_gain.c 的 GEAR_1..GEAR_4
+#       逐位对齐,已确认)
+#
+# ⚠️ 挡位那 4 根【不连续】是用户报出的实际接线,不是抄错。
+#    若上板后挡位换挡不响应,先怀疑这里 —— 但也别"顺手改成连续",
+#    要以板上丝印为准(见 docs/board_pins.md 陷阱 3「相邻脚差一位」)。
+#
+# 电平 LVCMOS33:
+#   · U15/U14/U13/V13(BANK34)—— 本文件上面 LCD/DAC/DDS 已在此 bank 跑通;
+#   · Y13/V10/V11/W10(BANK13)—— 依据同 AD9238 段:厂商例程
+#     30_digital_voltmeter 把这几个球号也用 LVCMOS33 且综合通过
+#     (见本文件 AD9238 段 line 106 的同一句)。
+#
+# ⚠️ V13 = CMOS_D2 / U13 = CMOS_D1 / U14 = CMOS_D4 / U15 = CMOS_D3
+#    —— 与板载摄像头接口复用(见 docs/board_pins.md 陷阱 4)。
+#    本项目没插摄像头模块、也没约束 cam_*,不冲突。
+#    换线前的 adc_clk 就曾是 V13(2026-10-07 换走),同一族已用过。
+#
+# ⚠️ 与既有的 56 根【已逐球号比对,无重复】。
+set_property -dict {PACKAGE_PIN U15 IOSTANDARD LVCMOS33} [get_ports {relay[0]}]  ;# K1
+set_property -dict {PACKAGE_PIN U14 IOSTANDARD LVCMOS33} [get_ports {relay[1]}]  ;# K2
+set_property -dict {PACKAGE_PIN U13 IOSTANDARD LVCMOS33} [get_ports {relay[2]}]  ;# K3
+set_property -dict {PACKAGE_PIN V13 IOSTANDARD LVCMOS33} [get_ports {relay[3]}]  ;# K4
+set_property -dict {PACKAGE_PIN W11 IOSTANDARD LVCMOS33} [get_ports {relay[4]}]  ;# K5
+set_property -dict {PACKAGE_PIN Y11 IOSTANDARD LVCMOS33} [get_ports {relay[5]}]  ;# K6
+set_property -dict {PACKAGE_PIN Y12 IOSTANDARD LVCMOS33} [get_ports {relay[6]}]  ;# K7
+set_property -dict {PACKAGE_PIN Y13 IOSTANDARD LVCMOS33} [get_ports {gear[0]}]   ;# A 10 Ω
+set_property -dict {PACKAGE_PIN V10 IOSTANDARD LVCMOS33} [get_ports {gear[1]}]   ;# B 100 Ω
+set_property -dict {PACKAGE_PIN V11 IOSTANDARD LVCMOS33} [get_ports {gear[2]}]   ;# C 1 kΩ
+set_property -dict {PACKAGE_PIN W10 IOSTANDARD LVCMOS33} [get_ports {gear[3]}]   ;# D 10 kΩ
+
 # ---- 跨时钟域约束(2026-10-06 加)---------------------------------------------
 # 时钟名出处:**不是猜的**,是读 `report_clocks` 得到的
 #   (vivado -mode batch → open_run synth_1 → get_clocks *)。当时的输出:

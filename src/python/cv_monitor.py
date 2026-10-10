@@ -251,6 +251,70 @@ class CVMonitor(DefaultIP):
         self._write("BIAS_CODE", code)
 
     # -----------------------------------------------------------------------
+    # 继电器矩阵 / 量程挡位(2026-10-10 落地)
+    #   ⚠️ 本层只做【裸寄存器访问】。组合语义、`0x1C` 缺陷的绕法、挡位的
+    #      PS 侧稳定延时,全部在 `drivers/relay.py` —— 别在这里加。
+    # -----------------------------------------------------------------------
+    def relay_read(self):
+        """读 0x1C,返回**已生效**的继电器组合位图([6:0] = K1..K7)。
+
+        🔴 是「已生效」不是「刚请求」—— 真值由 `relay_ctrl.v` 的 `relay_reg` 持有,
+           本层锁存的请求值不参与读出(见 `cv_axi_lite_slave.v` IDX_RELAY_CFG 读分支)。
+        """
+        self._require("RELAY_CFG")
+        return self._read("RELAY_CFG") & 0xFF
+
+    def relay_write_raw(self, value):
+        """裸写 0x1C。
+
+        ⚠️ **正常业务代码请用 `drivers/relay.py`** —— 它有组合白名单校验、挡位
+           处理与读回确认,本层只有裸寄存器。
+
+        ✅ **本层这条路是安全的。** 2026-10-10 曾观察到"一次写 0x1C 会让继电器停在
+           0x00",当晚已定位:**根因是 PS 侧写通路用 `struct.pack_into` 时会发两笔
+           AXI 事务**(先写一个 `0x00000000`,再写载荷),PL 侧完全正常。
+           本层走 `pynq.MMIO`(numpy `uint32` 整字存)= **一笔**,不受影响。
+           证据与修法:`report/measurements/20261010_relay_cfg_write_anomaly.md` §10。
+        """
+        self._require("RELAY_CFG")
+        self._write("RELAY_CFG", value & 0xFF)
+
+    def gear_read(self):
+        """读 0x18,返回**已生效**的挡位独热码。"""
+        self._require("RANGE_SEL")
+        return self._read("RANGE_SEL") & 0xF
+
+    def gear_write_raw(self, value):
+        """裸写 0x18。⚠️ 语义同 `relay_write_raw`:挡位也没有稳定延时,
+        PS 侧要自己等(见 `drivers/relay.py`)。"""
+        self._require("RANGE_SEL")
+        self._write("RANGE_SEL", value & 0xF)
+
+    def settle_get(self):
+        """读 0x24 整字。高 16 位是继电器稳定 ms,低 16 位是偏压稳定 ms(未消费)。"""
+        self._require("SETTLE_CFG")
+        return self._read("SETTLE_CFG")
+
+    def settle_set(self, relay_ms=None, bias_ms=None, raw=None):
+        """写 0x24。**读-改-写**:只动你指定的那一半,另一半原样保留。
+
+        ⚠️ 必须读-改-写,不能整字写 —— 偏压那半([15:0],复位 0x05DC = 1500)
+           虽然在 PL 侧还没人消费,但整字覆盖会把它抹成 0,等 `meas_fsm` 落地时
+           会变成"为什么偏压稳定时间突然是 0"这种查不出源头的坏账。
+        """
+        self._require("SETTLE_CFG")
+        if raw is not None:
+            self._write("SETTLE_CFG", raw)
+            return raw & 0xFFFFFFFF
+        v = self._read("SETTLE_CFG")
+        if relay_ms is not None:
+            v = (v & 0x0000FFFF) | ((int(relay_ms) & 0xFFFF) << 16)
+        if bias_ms is not None:
+            v = (v & 0xFFFF0000) | (int(bias_ms) & 0xFFFF)
+        self._write("SETTLE_CFG", v)
+        return v
+
+    # -----------------------------------------------------------------------
     # DAC1220 初始化放行(0x84 CV_CTRL)—— 2026-10-05
     #   ⚠️ 本层只做【裸寄存器访问 + 读回校验】。
     #      「FCLK0 在不在窗口内」那一层判断在 `drivers/board.py::release_dac()`

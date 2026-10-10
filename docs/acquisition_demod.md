@@ -7,7 +7,7 @@
 > 相关:RTL `adc_capture.v` / `cv_axi_lite_slave.v` / `cv_sys.v`;
 > C 侧 `src/c_ui/app/adc_sample.c` / `measure_config.c` / `pynq_protocol.c`;
 > PS 侧 `src/python/cv_regs.py`。
-> 实测:`board/measurements/20261008_65msps_window_board_acceptance.md`。
+> 实测:`report/measurements/20261008_65msps_window_board_acceptance.md`。
 
 ---
 
@@ -176,7 +176,7 @@ Vivado 2025.2,同一工程同一综合/实现策略,唯一变量是上述改动�
 
 ## 7. 板上验证(实测结论)
 
-完整记录见 `board/measurements/20261008_65msps_window_board_acceptance.md`。
+完整记录见 `report/measurements/20261008_65msps_window_board_acceptance.md`。
 概要:
 
 | 验证项 | 方法 | 结果 |

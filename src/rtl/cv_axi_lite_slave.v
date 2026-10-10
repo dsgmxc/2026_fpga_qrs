@@ -4,7 +4,21 @@
 //
 //  归属:Claude 代写(2026-09-29,用户明确要求,CLAUDE.md §6.0 显式例外)
 //
-//  【本次范围】共实现 11 个寄存器:
+//  【2026-10-10 本次范围】新落地 4 个 —— 继电器矩阵 / 量程挡位:
+//      0x04  STATUS     RO   [0]busy [1]done [2]fault [15:8]err_code
+//      0x18  RANGE_SEL  RW   [3:0] 量程挡位(必须独热)   ← 规格占位,终于落地
+//      0x1C  RELAY_CFG  RW   [6:0] 继电器组合(白名单互锁)← 规格占位,终于落地
+//      0x24  SETTLE_CFG RW   [31:16]稳定时间 **ms** [15:0]偏压建立(仍未用)
+//    ★ 0x18 / 0x1C / 0x24 是 **report/source_design_checklist.md §3 表里早就写着**
+//      的三个地址,此前一直"规格已定、RTL 未实现"(见本文件原有的两处 note)。
+//      本次把它们实现掉,**地址一个都没挪** —— 这正是当初坚持不复用 0x18
+//      的回报(见下面 IDX_CV_CTRL 那段"为什么不放 0x18")。
+//    ★ 读回语义:0x18 / 0x1C 读回来的是【已生效】值,由 relay_ctrl 的
+//      sts_*_applied 回送,不是本层锁存的请求值 —— 与 0x60 同一条原则。
+//      ⇒ 写入被互锁拒收时,PS 读回的是**旧值**,不是它刚写的那个坏值。
+//      设计正文见 relay_ctrl.v 文件头。
+//
+//  【P2 stub 版】实现 11 个寄存器:
 //      0x48  VERSION   RO   常数 —— 读通路 + 地址译码的独立证据
 //      0x4C  SCRATCH   RW   —— P2 判据「SCRATCH 读写回环自检」本体
 //      0x50  LCD_CTRL  RW   [1:0]src_sel 0=彩条/1=PS填充/2=DDR帧缓存 <-- 2026-10-01 加
@@ -50,15 +64,15 @@
 //  寄存器映射(基址 0x43C0_0000,字节偏移 → 字索引 a[7:2])
 //
 //    0x00 6'h00 CTRL        0x28 6'h0A I_A
-//    0x04 6'h01 STATUS      0x2C 6'h0B Q_A
+//    0x04 6'h01 STATUS      0x2C 6'h0B Q_A        <-- 2026-10-10 实现
 //    0x08 6'h02 NCO_FREQ    0x30 6'h0C I_B
 //    0x0C 6'h03 NCO_PHASE   0x34 6'h0D Q_B
 //    0x10 6'h04 EXC_AMP     0x38 6'h0E MAG_A
 //    0x14 6'h05 BIAS_CODE   0x3C 6'h0F PHASE_A  <-- 2026-10-05 实现
-//    0x18 6'h06 RANGE_SEL   0x40 6'h10 MAG_B
-//    0x1C 6'h07 RELAY_CFG   0x44 6'h11 PHASE_B
+//    0x18 6'h06 RANGE_SEL   0x40 6'h10 MAG_B    <-- 2026-10-10 实现
+//    0x1C 6'h07 RELAY_CFG   0x44 6'h11 PHASE_B  <-- 2026-10-10 实现
 //    0x20 6'h08 CIC_DECIM   0x48 6'h12 VERSION    <-- 已实现
-//    0x24 6'h09 SETTLE_CFG  0x4C 6'h13 SCRATCH    <-- 已实现
+//    0x24 6'h09 SETTLE_CFG  0x4C 6'h13 SCRATCH    <-- 2026-10-10 实现
 //                           0x50 6'h14 LCD_CTRL   <-- 2026-10-01 新增
 //                           0x54 6'h15 LCD_FILL   <-- 2026-10-01 新增
 //                           0x58 6'h16 LCD_FB_BASE0    <-- 2026-10-02 新增
@@ -254,6 +268,37 @@ module cv_axi_lite_slave #(
     // 再多开几个端口只会让 cv_sys 的引线变噪音。将来若要单独用 done 去触发
     // 别的逻辑,再加端口。
 
+    //-------------------------------------------------------------------------
+    // 继电器矩阵 + 量程挡位(2026-10-10 加)—— 消费者是 relay_ctrl.v
+    //   ★ 这一组【与其它 cfg_* 都不同】:那三个寄存器(0x18/0x1C/0x24)的
+    //     **写入不是照单全收**,要过互锁校验;被拒时旧值不动并置 err_code。
+    //     ⇒ 所以本层出的是「请求」+「写脉冲」,回读走 sts_*_applied(已生效值)。
+    //     ★ 这就是文件尾那条 note 说的:
+    //       「RELAY_REQUEST / RELAY_APPLIED 必须分开」—— 本次照抄落地。
+    //
+    //   ⚠️ 为什么写脉冲要**单独开口**,而不是让 relay_ctrl 自己去比较
+    //      cfg_relay_cfg 的变化沿:
+    //      PS 连写两次同一个组合(很常见:重试)时电平不变 ⇒ 采不到沿
+    //      ⇒ 第二次请求被静默丢掉。与 0x60 LCD_SWAP 需要 cfg_lcd_swap_req
+    //      是**同一条理由**(见文件尾「为什么要 tgt 与 req 两个信号」)。
+    //
+    //   ⚠️ 0x24 SETTLE_CFG 不需要写脉冲:它是纯参数(延时多少),不是事件。
+    //      与 ADC_CFG(0x88)同例 —— 那边也没有脉冲,只有电平。
+    //-------------------------------------------------------------------------
+    output wire [C_S_AXI_DATA_WIDTH-1:0]        cfg_range_sel,    // 0x18 [3:0] 挡位请求
+    output wire                                 cfg_range_set,    // 0x18 写 → 1 拍脉冲
+    output wire [C_S_AXI_DATA_WIDTH-1:0]        cfg_relay_cfg,    // 0x1C [6:0] 组合请求
+    output wire                                 cfg_relay_set,    // 0x1C 写 → 1 拍脉冲
+    output wire [C_S_AXI_DATA_WIDTH-1:0]        cfg_settle_cfg,   // 0x24 [31:16]稳定ms
+    input  wire [3:0]                           sts_gear_applied, // ← 0x18 读(已生效)
+    input  wire [7:0]                           sts_relay_applied,// ← 0x1C 读(已生效)
+    // 0x04 STATUS —— 32 位整字由 cv_sys 从 relay_ctrl 的散信号打包。
+    //   ⚠️ 打包放 cv_sys 不放本层,理由与本文件对 sts_adc_sts 的处理一致:
+    //      cv_sys 已经有一句 `assign sts_adc_sts[31:4] = 28'h0;` —— 同一个套路。
+    //      ★ 位布局(std/done/busy/err_code)的定义在 relay_ctrl.v 里,
+    //        本层只负责把它原样送到读通路,不解释。
+    input  wire [C_S_AXI_DATA_WIDTH-1:0]        sts_status,       // 0x04
+
     // ⚠️ 输入(不是输出):dac_1220 的 init_done,给上面的上电脉冲【开门】用。
     //    没有它那个脉冲就是空放 —— 逐状态核对见下面 §set 脉冲 的说明。
     //    同为普通线网,不是 AXI 端口,不要加 X_INTERFACE_INFO。
@@ -301,6 +346,15 @@ module cv_axi_lite_slave #(
     //    ⚠️ 2026-10-05 由 [6:2]/5 位扩到 [7:2]/6 位(决策 Q27,ADDR_WIDTH 7→8)。
     //       原 32 个槽位在 DBG0/1/2 加入后已满,DDS_FREQ 只能落在 0x80。
     //=========================================================================
+    //-------------------------------------------------------------------------
+    //  继电器矩阵 / 量程挡位(2026-10-10 实现)
+    //    ★ 这四个索引值【原封不动】取自 report/source_design_checklist.md §3 表。
+    //      0x18 尤其值得一提:2026-10-05 加 CV_CTRL 时本可以顺手占了它,
+    //      但当时判断"规格是 M9 接口设计的正文,不能图方便挪用",
+    //      于是 CV_CTRL 落到 0x84。**今天这次落地就是那个判断的回报** ——
+    //      规格地址与 RTL 逐字对得上,PS 侧 / 报告 / 清单三处不用改。
+    //-------------------------------------------------------------------------
+    localparam [5:0] IDX_STATUS     = 6'h01;  // 0x04 <-- 2026-10-10 实现
     localparam [5:0] IDX_BIAS_CODE = 6'h05;  // 0x14 <-- 2026-10-05 实现
     localparam [5:0] IDX_VERSION  = 6'h12;  // 0x48
     localparam [5:0] IDX_SCRATCH  = 6'h13;  // 0x4C
@@ -344,6 +398,12 @@ module cv_axi_lite_slave #(
     localparam [5:0] IDX_ADC_STS      = 6'h24;  // 0x90
     localparam [5:0] IDX_ADC_BUF_IDX  = 6'h25;  // 0x94
     localparam [5:0] IDX_ADC_BUF_DATA = 6'h26;  // 0x98
+
+    // 继电器矩阵 / 量程挡位(2026-10-10 加)—— 见上面 IDX_STATUS 那段的说明,
+    //   四个索引全部取自原规格表,一个都没挪。
+    localparam [5:0] IDX_RANGE_SEL  = 6'h06;  // 0x18
+    localparam [5:0] IDX_RELAY_CFG  = 6'h07;  // 0x1C
+    localparam [5:0] IDX_SETTLE_CFG = 6'h09;  // 0x24
 
     //=========================================================================
     //  写通道
@@ -415,6 +475,15 @@ module cv_axi_lite_slave #(
     reg [C_S_AXI_DATA_WIDTH-1:0] dds_freq;    // 0x80  2026-10-05 加
     reg [C_S_AXI_DATA_WIDTH-1:0] adc_cfg;     // 0x88  2026-10-06 加
     reg [C_S_AXI_DATA_WIDTH-1:0] adc_buf_idx; // 0x94  2026-10-06 加
+    reg [C_S_AXI_DATA_WIDTH-1:0] range_sel;   // 0x18  2026-10-10 加(挡位请求)
+    reg [C_S_AXI_DATA_WIDTH-1:0] relay_cfg;   // 0x1C  2026-10-10 加(组合请求)
+    reg [C_S_AXI_DATA_WIDTH-1:0] settle_cfg;  // 0x24  2026-10-10 加(稳定延时)
+    // ⚠️ 这三个寄存器是【请求】的最后一站,不是真值。
+    //    真值在 relay_ctrl 里(它可能拒收),所以 0x18/0x1C 的【读】不走这里,
+    //    走 sts_gear_applied / sts_relay_applied。
+    //    ⇒ 本层的 range_sel / relay_cfg 只用两个地方:① 喂给 relay_ctrl;
+    //      ② 本文件的复位值。**没有第三条读路径** —— 这是刻意的,
+    //      多一条读路径就多一处"两份真值"的机会。
 
     // ⚠️ 2026-10-01 由 if-else 链改为 case —— 与读通道写法一致,便于继续扩表。
     always @(posedge s_axi_aclk) begin
@@ -470,6 +539,33 @@ module cv_axi_lite_slave #(
             //-----------------------------------------------------------------
             adc_cfg     <= 32'h0000_0002;   // [7:0]=2,其余 0
             adc_buf_idx <= 32'h0000_0000;
+            //-----------------------------------------------------------------
+            // 继电器 / 挡位 / 稳定延时(2026-10-10)
+            //
+            //   🔴 复位值【必须与 relay_ctrl.v 里的 localparam 一致】——
+            //      从机的寄存器是 relay_ctrl 的【输入】,relay_ctrl 内部的
+            //      relay_reg / gear_reg 才是引脚真值。两者若不一致:
+            //      上电后 PS 读 0x1C 拿到的是 sts_relay_applied(relay_ctrl 的值),
+            //      而 relay_ctrl 的输入却是另一个值 —— 直到 PS 第一次写它才同步。
+            //      ⇒ 症状是"上电读到的和硬件实际跑的对得上,但和本文件写的对不上",
+            //        极难查。**改一处必须改两处。**
+            //      ⚠️ 更好的做法是把这三个初值作为 parameter 从 relay_ctrl 传上来,
+            //         但那要多两个 module_ref 参数 + 刷一次 BD 边界。
+            //         当前只有 3 个数,重复风险可控 —— 但**记在这里**:
+            //         若将来这些初值开始动,就去改成 parameter,别再靠自觉。
+            //-----------------------------------------------------------------
+            range_sel  <= 32'h0000_0002;   // = B 档 100 Ω(与前序默认一致)
+            relay_cfg  <= 32'h0000_0010;   // = ALL_OFF(K5 闭),前序的"安全状态"
+            // 0x24 SETTLE_CFG:[31:16] = 40 ⇒ 40 ms,逐字等于前序
+            //   RELAY_CONTROLLER_SWITCH_SETTLE_MS = 40。
+            //   ★ 单位是 **ms 不是周期数**,理由见 relay_ctrl.v §稳定延时
+            //     (40 ms @ 50 MHz = 2e6 拍,16 位放不下)。
+            //   [15:0] = 1500 是**偏压建立延时**,目前**无人消费** ——
+            //     规格里这个字段是给"改偏压后等模拟建立"用的,而当前
+            //     PS 侧的偏压建立是自己在 Python 里 sleep 的。
+            //     ⚠️ 留一个非零的默认值而不是 0,是为了让"这个字段还没接"
+            //        能被人看出来(读回 0 会让人以为"延时确实是 0",那是在说谎)。
+            settle_cfg <= 32'h0028_05DC;   // [31:16]=40ms, [15:0]=1500(未消费)
         end else if (do_write) begin        //    PS 必须先写基址再切源,顺序错就是黑屏。
             case (awaddr_r[7:2])
                 IDX_SCRATCH  : scratch  <= wdata_r;   // 未实现 WSTRB:整字写
@@ -490,6 +586,29 @@ module cv_axi_lite_slave #(
                 //    写 5000 会被静默截成 904,读回的是**另一个点的数据**,
                 //    不报错、不复位、不复位 done —— 与"按钮守卫停在旧档位"同形。
                 IDX_ADC_BUF_IDX : adc_buf_idx <= wdata_r & 32'h0000_1FFF;
+                //-------------------------------------------------------------
+                // 0x18 / 0x1C / 0x24(2026-10-10)
+                //
+                // 🔴 这三个【刻意不掩码】,与上面 ADC_CFG / ADC_BUF_IDX 的
+                //    "掩到有效位"是**相反**的处置。理由是掩码在这里**有害**:
+                //      PS 写 0x1C = 0x0000_0180,若掩到 [6:0] 就变成 0x00,
+                //      而 0x00 是白名单里的**合法**组合(COSS_DISCHARGE)
+                //      ⇒ 一个本该被拒收的越界写,被静默转成了另一个合法动作。
+                //      这与 ADC_BUF_IDX 掩码(截断成另一个地址)是同一类错误,
+                //      但后果更重:那边是读错数据,这边是**动了继电器**。
+                //    ⇒ 原样存,让 relay_ctrl 看到 bit7 = 1 并**拒收**。
+                //      (relay_ctrl.v §位宽 已写明:bit7 无对应引脚 ⇒ 必然非法。)
+                //  ⚠️ 同理 0x18 也不掩:4 位全 0 与两位同时为 1 都必须能被
+                //     relay_ctrl 看见并拒收,不能被掩成别的合法组合。
+                //  ⚠️ 0x24 本来就没有"越界"概念(整个 32 位都有意义),
+                //     原样存即可。
+                //  ⚠️ 高位的垃圾值【不会泄漏到 PS】:0x18/0x1C 的读走
+                //     sts_*_applied,不读这三个寄存器。0x24 读回原值 ——
+                //     那正是它该有的语义(参数,不是状态)。
+                //-------------------------------------------------------------
+                IDX_RANGE_SEL  : range_sel  <= wdata_r;   // 0x18 挡位请求
+                IDX_RELAY_CFG  : relay_cfg  <= wdata_r;   // 0x1C 组合请求
+                IDX_SETTLE_CFG : settle_cfg <= wdata_r;   // 0x24 稳定延时参数
                 // ⚠️ 这里同样【没有】IDX_ADC_CTRL —— 0x8C 是命令,见下面的脉冲块。
                 IDX_LCD_CTRL : lcd_ctrl <= wdata_r;
                 IDX_LCD_FILL : lcd_fill <= wdata_r;
@@ -567,6 +686,37 @@ module cv_axi_lite_slave #(
     end
 
     //=========================================================================
+    //  RANGE_SEL(0x18)/ RELAY_CFG(0x1C)写 —— 命令语义,1 拍脉冲
+    //    (2026-10-10 加,第四个/第五个"命令寄存器",照 0x60/0x64/0x8C 同一个套路)
+    //
+    //  ★ 为什么【必须】是脉冲,而不是像它俩的邻居那样只出电平:
+    //    「写了一次 0x1C」是一个**事件**(要触发一次稳定计时),不是一个**状态**。
+    //    只给电平的话 relay_ctrl 得自己采沿,还会踩到"PS 重试写同一个组合、
+    //    电平不变 ⇒ 采不到沿 ⇒ 请求丢失"这个坑 —— 与 0x60 同一条理由。
+    //
+    //  ⚠️ 与 0x8C ADC_CTRL 有一点【不同】:那边的脉冲要 `wdata_r[0]`,
+    //     写 0 不发脉冲;这里**写什么值都发脉冲**(包括写 0x00 = 合法组合)。
+    //     理由:0x00 是白名单里的合法组合(COSS_DISCHARGE),是一个真动作;
+    //     而 GO 的 bit0 写 0 就是"不下命令",没有对应的物理动作。
+    //     ⚠️ 因此这两个脉冲【无条件取 wdata_r 全部位】送往 relay_ctrl,
+    //        由它做合法性判断 —— 本层不预先筛,否则 err_code 永远置不起来。
+    //=========================================================================
+    reg range_set_r;
+    reg relay_set_r;
+
+    always @(posedge s_axi_aclk) begin
+        if (!s_axi_aresetn) begin
+            range_set_r <= 1'b0;
+            relay_set_r <= 1'b0;
+        end else begin
+            range_set_r <= 1'b0;                     // 默认清 ⇒ 只在写当拍为高
+            relay_set_r <= 1'b0;
+            if (do_write && (awaddr_r[7:2] == IDX_RANGE_SEL)) range_set_r <= 1'b1;
+            if (do_write && (awaddr_r[7:2] == IDX_RELAY_CFG)) relay_set_r <= 1'b1;
+        end
+    end
+
+    //=========================================================================
     //  BIAS_CODE(0x14)/ DDS_FREQ(0x80)写 —— 命令语义,1 拍脉冲
     //
     //  【为什么不能只靠上面的电平寄存器块】下游 dac_1220 / adc_9833 的
@@ -640,6 +790,18 @@ module cv_axi_lite_slave #(
     assign cfg_adc_go      = adc_go_r;
     assign cfg_adc_buf_idx = adc_buf_idx;
 
+    // 继电器 / 挡位 / 稳定延时(2026-10-10)
+    //   ⚠️ 这三个是**寄存器原值直出**(位域 mask 交给消费侧做)——
+    //      与上面 cfg_adc_cfg 同一条约定。消费侧 cv_sys 在例化处切位宽:
+    //         .cfg_relay (cfg_relay_cfg[7:0])   ← 保留 bit7,好让非法值能被拒
+    //         .cfg_gear  (cfg_range_sel[3:0])
+    //         .cfg_settle_ms (cfg_settle_cfg[31:16])
+    assign cfg_range_sel  = range_sel;
+    assign cfg_range_set  = range_set_r;
+    assign cfg_relay_cfg  = relay_cfg;
+    assign cfg_relay_set  = relay_set_r;
+    assign cfg_settle_cfg = settle_cfg;
+
     //=========================================================================
     //  读通道
     //=========================================================================
@@ -699,6 +861,23 @@ module cv_axi_lite_slave #(
             case (s_axi_araddr[7:2])
                 IDX_VERSION  : rdata_r <= VERSION_CONST;
                 IDX_SCRATCH  : rdata_r <= scratch;
+                // 0x04 STATUS(2026-10-10)—— 整字由 cv_sys 从 relay_ctrl 打包,
+                //   本层不解释位含义(见端口区那句"布局定义在 relay_ctrl.v")。
+                IDX_STATUS   : rdata_r <= sts_status;
+                // 0x18 / 0x1C(2026-10-10)—— ★★★ 读【已生效】值,不是【已请求】值。
+                //   ⚠️ 这里是整个 0x18/0x1C 实现里【最容易写错的一行】:
+                //      直觉写法是 `rdata_r <= relay_cfg;`(本层锁存的请求值),
+                //      那样写的话,PS 写一个被互锁拒收的坏组合之后**读回来是坏值**,
+                //      而硬件其实一动不动 ⇒ PS 会以为设置成功了。
+                //      ⇒ 必须回送 sts_*_applied(relay_ctrl 持有的真值)。
+                //   ★ 与下面 0x60 取 sts_lcd_status[1:0] 是**同一条原则**
+                //     (文件尾 §LCD_SWAP 读为什么…):单一事实源归消费者。
+                //   ⚠️ 越界位由 relay_ctrl 保证不会出现在 applied 里
+                //      (它只可能装着白名单值),所以这里不用再掩。
+                IDX_RANGE_SEL: rdata_r <= {28'h0, sts_gear_applied};
+                IDX_RELAY_CFG: rdata_r <= {24'h0, sts_relay_applied};
+                // 0x24 读原值 —— 它是参数不是状态,没有"已生效/已请求"之分。
+                IDX_SETTLE_CFG: rdata_r <= settle_cfg;
                 IDX_BIAS_CODE: rdata_r <= bias_code;   // 0x14 2026-10-05
                 IDX_CV_CTRL  : rdata_r <= cv_ctrl;     // 0x84 2026-10-05 (bit0 = dac_rst_n)
                 IDX_DDS_FREQ : rdata_r <= dds_freq;    // 0x80 2026-10-05
@@ -749,11 +928,17 @@ module cv_axi_lite_slave #(
     //  · 未实现地址   → 读返回 32'h0,写静默忽略(不返回 SLVERR)
     //  · WSTRB 未实现 —— 已知限制,不是 bug
     //
-    //  【扩成完整 20 寄存器时要补的两条硬性约束,见设计清单 §3】
+    //  【扩成完整 20 寄存器时要补的硬性约束,见设计清单 §3】
     //   ① NCO_FREQ(0x08)/ CIC_DECIM(0x20) 的写入必须在测量间隙生效:
     //      测量中写入 → 挂起到下一次 SET_BIAS 才生效,并置 pending 标志。
+    //      ⚠️ **仍待实现** —— 它们的消费者(nco / CIC)目前还不存在。
     //   ② RELAY_CFG(0x1C) 写入要过互锁校验,非法组合拒绝写入并置
     //      err_code(STATUS[15:8]),而不是执行。
+    //      ✅ **2026-10-10 已实现** —— 落在 relay_ctrl.v,不在本层。
+    //         本层只做「出请求 + 回送已生效值」,这是刻意的分层:
+    //         互锁判据(白名单)属于被控对象的知识,不属于总线接口。
+    //      ⚠️ 连带:0x04 STATUS 也因此实现了 —— err_code 要有地方放。
+    //         位定义 [0]busy [1]done [2]fault [15:8]err_code,见 relay_ctrl.v。
     //
     //  【cfg_ / sts_ 端口】R2 规格是 S_AXI ↔ cfg_* / sts_*。
     //    2026-10-01 起有 cfg_lcd_ctrl / cfg_lcd_fill;
@@ -761,6 +946,9 @@ module cv_axi_lite_slave #(
     //    sts_lcd_status、sts_touch_status/pt0/pt1 —— 共 11 个寄存器对上号。
     //    2026-10-05 起再加 cfg_bias_code/set、cfg_dds_freq/set(模拟前端),
     //    并把 C_S_AXI_ADDR_WIDTH 由 7 扩到 8(见文件头寄存器映射的说明)。
+    //    2026-10-06 起再加 cfg_clk_release、cfg_adc_*、sts_adc_*(ADC 采集)。
+    //    2026-10-10 起再加 cfg_range_sel/set、cfg_relay_cfg/set、cfg_settle_cfg、
+    //    sts_gear_applied、sts_relay_applied、sts_status(继电器/挡位)。
     //    扩表时按寄存器逐个加即可,地址不变。
     //
     //  【为什么要 cfg_lcd_swap_tgt 与 cfg_lcd_swap_req 两个信号】
@@ -774,8 +962,9 @@ module cv_axi_lite_slave #(
     //    从机若自己锁一个 pending 并自行清除,就出现【两个事实源】:
     //    PS 读到 pending=0 只说明"从机认了",不说明"扫描真的换过地址了"。
     //    ⇒ 从机只发请求,状态一律从 sts_* 透传。
-    //    ★ 这条与「RELAY_REQUEST / RELAY_APPLIED 必须分开」是同一条原则,
-    //      将来写继电器时照抄。
+    //    ★ 这条与「RELAY_REQUEST / RELAY_APPLIED 必须分开」是同一条原则。
+    //      ✅ 2026-10-10 **已照抄落地**:0x18 / 0x1C 读 sts_*_applied,
+    //         本层的 range_sel / relay_cfg 只喂给 relay_ctrl、不给读通路。
     //
     //  ⚠️ 【未决】TOUCH_STATUS[15:8] 的 seq 语义在 display_subsystem.md §5.2 里
     //      写的是「读一次递增 seq」。但 seq 又是 gt911_ctrl 产出的状态字的一部分,

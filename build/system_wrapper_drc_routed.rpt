@@ -1,7 +1,7 @@
 Copyright 1986-2022 Xilinx, Inc. All Rights Reserved. Copyright 2022-2025 Advanced Micro Devices, Inc. All Rights Reserved.
 ---------------------------------------------------------------------------------------------------------------------------------------------
 | Tool Version : Vivado v.2025.2 (lin64) Build 6299465 Fri Nov 14 12:34:56 MST 2025
-| Date         : Thu Oct  8 22:12:35 2026
+| Date         : Sat Oct 10 15:43:07 2026
 | Host         : hyp-GTR running 64-bit Ubuntu 22.04.5 LTS
 | Command      : report_drc -file system_wrapper_drc_routed.rpt -pb system_wrapper_drc_routed.pb -rpx system_wrapper_drc_routed.rpx
 | Design       : system_wrapper
@@ -20,7 +20,7 @@ Table of Contents
 1. REPORT SUMMARY
 -----------------
             Netlist: netlist
-          Floorplan: checkpoint_system_wrapper
+          Floorplan: design_1
       Design limits: <entire design considered>
            Ruledeck: default
              Max checks: <unlimited>
@@ -96,22 +96,22 @@ Related violations: <none>
 
 REQP-1839#12 Warning
 RAMB36 async control check  
-The RAMB36E1 system_i/cv_sys_0/inst/u_lcd_fb_reader/lbuf_reg has an input control pin system_i/cv_sys_0/inst/u_lcd_fb_reader/lbuf_reg/ADDRBWRADDR[10] (net: system_i/cv_sys_0/inst/u_lcd_fb_reader/sts_dbg_state[24]) which is driven by a register (system_i/cv_sys_0/inst/u_lcd_fb_reader/burst_idx_reg[0]) that has an active asychronous set or reset. This may cause corruption of the memory contents and/or read values when the set/reset is asserted and is not analyzed by the default static timing analysis. It is suggested to eliminate the use of a set/reset to registers driving this RAMB pin or else use a synchronous reset in which the assertion of the reset is timed by default.
+The RAMB36E1 system_i/cv_sys_0/inst/u_lcd_fb_reader/lbuf_reg has an input control pin system_i/cv_sys_0/inst/u_lcd_fb_reader/lbuf_reg/ADDRBWRADDR[10] (net: system_i/cv_sys_0/inst/u_lcd_fb_reader/beat_cnt_reg[3]_0[16]) which is driven by a register (system_i/cv_sys_0/inst/u_lcd_fb_reader/burst_idx_reg[0]) that has an active asychronous set or reset. This may cause corruption of the memory contents and/or read values when the set/reset is asserted and is not analyzed by the default static timing analysis. It is suggested to eliminate the use of a set/reset to registers driving this RAMB pin or else use a synchronous reset in which the assertion of the reset is timed by default.
 Related violations: <none>
 
 REQP-1839#13 Warning
 RAMB36 async control check  
-The RAMB36E1 system_i/cv_sys_0/inst/u_lcd_fb_reader/lbuf_reg has an input control pin system_i/cv_sys_0/inst/u_lcd_fb_reader/lbuf_reg/ADDRBWRADDR[11] (net: system_i/cv_sys_0/inst/u_lcd_fb_reader/sts_dbg_state[25]) which is driven by a register (system_i/cv_sys_0/inst/u_lcd_fb_reader/burst_idx_reg[1]) that has an active asychronous set or reset. This may cause corruption of the memory contents and/or read values when the set/reset is asserted and is not analyzed by the default static timing analysis. It is suggested to eliminate the use of a set/reset to registers driving this RAMB pin or else use a synchronous reset in which the assertion of the reset is timed by default.
+The RAMB36E1 system_i/cv_sys_0/inst/u_lcd_fb_reader/lbuf_reg has an input control pin system_i/cv_sys_0/inst/u_lcd_fb_reader/lbuf_reg/ADDRBWRADDR[11] (net: system_i/cv_sys_0/inst/u_lcd_fb_reader/beat_cnt_reg[3]_0[17]) which is driven by a register (system_i/cv_sys_0/inst/u_lcd_fb_reader/burst_idx_reg[1]) that has an active asychronous set or reset. This may cause corruption of the memory contents and/or read values when the set/reset is asserted and is not analyzed by the default static timing analysis. It is suggested to eliminate the use of a set/reset to registers driving this RAMB pin or else use a synchronous reset in which the assertion of the reset is timed by default.
 Related violations: <none>
 
 REQP-1839#14 Warning
 RAMB36 async control check  
-The RAMB36E1 system_i/cv_sys_0/inst/u_lcd_fb_reader/lbuf_reg has an input control pin system_i/cv_sys_0/inst/u_lcd_fb_reader/lbuf_reg/ADDRBWRADDR[12] (net: system_i/cv_sys_0/inst/u_lcd_fb_reader/sts_dbg_state[26]) which is driven by a register (system_i/cv_sys_0/inst/u_lcd_fb_reader/burst_idx_reg[2]) that has an active asychronous set or reset. This may cause corruption of the memory contents and/or read values when the set/reset is asserted and is not analyzed by the default static timing analysis. It is suggested to eliminate the use of a set/reset to registers driving this RAMB pin or else use a synchronous reset in which the assertion of the reset is timed by default.
+The RAMB36E1 system_i/cv_sys_0/inst/u_lcd_fb_reader/lbuf_reg has an input control pin system_i/cv_sys_0/inst/u_lcd_fb_reader/lbuf_reg/ADDRBWRADDR[12] (net: system_i/cv_sys_0/inst/u_lcd_fb_reader/beat_cnt_reg[3]_0[18]) which is driven by a register (system_i/cv_sys_0/inst/u_lcd_fb_reader/burst_idx_reg[2]) that has an active asychronous set or reset. This may cause corruption of the memory contents and/or read values when the set/reset is asserted and is not analyzed by the default static timing analysis. It is suggested to eliminate the use of a set/reset to registers driving this RAMB pin or else use a synchronous reset in which the assertion of the reset is timed by default.
 Related violations: <none>
 
 REQP-1839#15 Warning
 RAMB36 async control check  
-The RAMB36E1 system_i/cv_sys_0/inst/u_lcd_fb_reader/lbuf_reg has an input control pin system_i/cv_sys_0/inst/u_lcd_fb_reader/lbuf_reg/ADDRBWRADDR[13] (net: system_i/cv_sys_0/inst/u_lcd_fb_reader/sts_dbg_state[27]) which is driven by a register (system_i/cv_sys_0/inst/u_lcd_fb_reader/burst_idx_reg[3]) that has an active asychronous set or reset. This may cause corruption of the memory contents and/or read values when the set/reset is asserted and is not analyzed by the default static timing analysis. It is suggested to eliminate the use of a set/reset to registers driving this RAMB pin or else use a synchronous reset in which the assertion of the reset is timed by default.
+The RAMB36E1 system_i/cv_sys_0/inst/u_lcd_fb_reader/lbuf_reg has an input control pin system_i/cv_sys_0/inst/u_lcd_fb_reader/lbuf_reg/ADDRBWRADDR[13] (net: system_i/cv_sys_0/inst/u_lcd_fb_reader/beat_cnt_reg[3]_0[19]) which is driven by a register (system_i/cv_sys_0/inst/u_lcd_fb_reader/burst_idx_reg[3]) that has an active asychronous set or reset. This may cause corruption of the memory contents and/or read values when the set/reset is asserted and is not analyzed by the default static timing analysis. It is suggested to eliminate the use of a set/reset to registers driving this RAMB pin or else use a synchronous reset in which the assertion of the reset is timed by default.
 Related violations: <none>
 
 REQP-1839#16 Warning
@@ -121,22 +121,22 @@ Related violations: <none>
 
 REQP-1839#17 Warning
 RAMB36 async control check  
-The RAMB36E1 system_i/cv_sys_0/inst/u_lcd_fb_reader/lbuf_reg has an input control pin system_i/cv_sys_0/inst/u_lcd_fb_reader/lbuf_reg/ADDRBWRADDR[6] (net: system_i/cv_sys_0/inst/u_lcd_fb_reader/sts_dbg_state[28]) which is driven by a register (system_i/cv_sys_0/inst/u_lcd_fb_reader/beat_cnt_reg[0]) that has an active asychronous set or reset. This may cause corruption of the memory contents and/or read values when the set/reset is asserted and is not analyzed by the default static timing analysis. It is suggested to eliminate the use of a set/reset to registers driving this RAMB pin or else use a synchronous reset in which the assertion of the reset is timed by default.
+The RAMB36E1 system_i/cv_sys_0/inst/u_lcd_fb_reader/lbuf_reg has an input control pin system_i/cv_sys_0/inst/u_lcd_fb_reader/lbuf_reg/ADDRBWRADDR[6] (net: system_i/cv_sys_0/inst/u_lcd_fb_reader/beat_cnt_reg[3]_0[20]) which is driven by a register (system_i/cv_sys_0/inst/u_lcd_fb_reader/beat_cnt_reg[0]) that has an active asychronous set or reset. This may cause corruption of the memory contents and/or read values when the set/reset is asserted and is not analyzed by the default static timing analysis. It is suggested to eliminate the use of a set/reset to registers driving this RAMB pin or else use a synchronous reset in which the assertion of the reset is timed by default.
 Related violations: <none>
 
 REQP-1839#18 Warning
 RAMB36 async control check  
-The RAMB36E1 system_i/cv_sys_0/inst/u_lcd_fb_reader/lbuf_reg has an input control pin system_i/cv_sys_0/inst/u_lcd_fb_reader/lbuf_reg/ADDRBWRADDR[7] (net: system_i/cv_sys_0/inst/u_lcd_fb_reader/sts_dbg_state[29]) which is driven by a register (system_i/cv_sys_0/inst/u_lcd_fb_reader/beat_cnt_reg[1]) that has an active asychronous set or reset. This may cause corruption of the memory contents and/or read values when the set/reset is asserted and is not analyzed by the default static timing analysis. It is suggested to eliminate the use of a set/reset to registers driving this RAMB pin or else use a synchronous reset in which the assertion of the reset is timed by default.
+The RAMB36E1 system_i/cv_sys_0/inst/u_lcd_fb_reader/lbuf_reg has an input control pin system_i/cv_sys_0/inst/u_lcd_fb_reader/lbuf_reg/ADDRBWRADDR[7] (net: system_i/cv_sys_0/inst/u_lcd_fb_reader/beat_cnt_reg[3]_0[21]) which is driven by a register (system_i/cv_sys_0/inst/u_lcd_fb_reader/beat_cnt_reg[1]) that has an active asychronous set or reset. This may cause corruption of the memory contents and/or read values when the set/reset is asserted and is not analyzed by the default static timing analysis. It is suggested to eliminate the use of a set/reset to registers driving this RAMB pin or else use a synchronous reset in which the assertion of the reset is timed by default.
 Related violations: <none>
 
 REQP-1839#19 Warning
 RAMB36 async control check  
-The RAMB36E1 system_i/cv_sys_0/inst/u_lcd_fb_reader/lbuf_reg has an input control pin system_i/cv_sys_0/inst/u_lcd_fb_reader/lbuf_reg/ADDRBWRADDR[8] (net: system_i/cv_sys_0/inst/u_lcd_fb_reader/sts_dbg_state[30]) which is driven by a register (system_i/cv_sys_0/inst/u_lcd_fb_reader/beat_cnt_reg[2]) that has an active asychronous set or reset. This may cause corruption of the memory contents and/or read values when the set/reset is asserted and is not analyzed by the default static timing analysis. It is suggested to eliminate the use of a set/reset to registers driving this RAMB pin or else use a synchronous reset in which the assertion of the reset is timed by default.
+The RAMB36E1 system_i/cv_sys_0/inst/u_lcd_fb_reader/lbuf_reg has an input control pin system_i/cv_sys_0/inst/u_lcd_fb_reader/lbuf_reg/ADDRBWRADDR[8] (net: system_i/cv_sys_0/inst/u_lcd_fb_reader/beat_cnt_reg[3]_0[22]) which is driven by a register (system_i/cv_sys_0/inst/u_lcd_fb_reader/beat_cnt_reg[2]) that has an active asychronous set or reset. This may cause corruption of the memory contents and/or read values when the set/reset is asserted and is not analyzed by the default static timing analysis. It is suggested to eliminate the use of a set/reset to registers driving this RAMB pin or else use a synchronous reset in which the assertion of the reset is timed by default.
 Related violations: <none>
 
 REQP-1839#20 Warning
 RAMB36 async control check  
-The RAMB36E1 system_i/cv_sys_0/inst/u_lcd_fb_reader/lbuf_reg has an input control pin system_i/cv_sys_0/inst/u_lcd_fb_reader/lbuf_reg/ADDRBWRADDR[9] (net: system_i/cv_sys_0/inst/u_lcd_fb_reader/sts_dbg_state[31]) which is driven by a register (system_i/cv_sys_0/inst/u_lcd_fb_reader/beat_cnt_reg[3]) that has an active asychronous set or reset. This may cause corruption of the memory contents and/or read values when the set/reset is asserted and is not analyzed by the default static timing analysis. It is suggested to eliminate the use of a set/reset to registers driving this RAMB pin or else use a synchronous reset in which the assertion of the reset is timed by default.
+The RAMB36E1 system_i/cv_sys_0/inst/u_lcd_fb_reader/lbuf_reg has an input control pin system_i/cv_sys_0/inst/u_lcd_fb_reader/lbuf_reg/ADDRBWRADDR[9] (net: system_i/cv_sys_0/inst/u_lcd_fb_reader/beat_cnt_reg[3]_0[23]) which is driven by a register (system_i/cv_sys_0/inst/u_lcd_fb_reader/beat_cnt_reg[3]) that has an active asychronous set or reset. This may cause corruption of the memory contents and/or read values when the set/reset is asserted and is not analyzed by the default static timing analysis. It is suggested to eliminate the use of a set/reset to registers driving this RAMB pin or else use a synchronous reset in which the assertion of the reset is timed by default.
 Related violations: <none>
 
 
