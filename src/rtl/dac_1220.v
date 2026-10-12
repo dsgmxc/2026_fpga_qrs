@@ -134,15 +134,33 @@ function [31:0] cal_delay_f;
 	endcase
 endfunction
 
-// 校准序列的命令/数据字节
+// 校准序列的命令/数据字节 —— CMR 最终值 = 0x2081
+//   bit13 Reserved = 1   手册 Table 13 要求写 1
+//   bit7  RES      = 1   → 20 位分辨率(DIR 是按 20 位左对齐发的,见 NORMAL_WAIT)
+//   bit5  DF       = 0   → 偏移二进制补码
+//   bit1:0 MD      = 01  → 自校准
+//
+// 🔴 2026-10-12 修正(原值 0x20A1:RES=0 十六位 / DF=1 直通二进制)
+//   板上四点实测 0x7FFFF→+9.72V、0x80000→−10.0V、0x99999→−8.0V、0xA6666→−7.0V,
+//   全部吻合**偏移二进制补码**(手册 Table 9:20 位补码 0 V 对应码 80000h),
+//   而直通二进制下 0x7FFFF 应给 0 V。⇒ 芯片实际跑在 DF=0。
+//   同时 PS 侧 `cv_bias_volts_to_code()` 现在也按补码走(旋转 0x80000),
+//   **两边必须是同一个 DF**。改成 0 之后:
+//     · 若这次 CMR 写落进了芯片 → 显式设为补码,与 PS 一致;
+//     · 若仍没落进(见下方待查项)→ DF 上电默认就是 0,行为不变。
+//   ⇒ **两种情况下都正确,零回归风险。**
+//
+// ⚠️ 待查(未结案):CMR 到底有没有写进去存疑 —— 若没写进去,则 MD=01 的自校准
+//   也从未执行过,芯片一直跑在未校准状态。RES 改 1 后建立时间按手册是 15ms
+//   (20 位),SETTLE_WAIT = 30ms 仍覆盖得住。
 function [7:0] cal_byte_f;
 	input [3:0] idx;
 	case(idx)
-		4'd0: cal_byte_f = 8'h24;
-		4'd1: cal_byte_f = 8'h20;
-		4'd2: cal_byte_f = 8'hA0;
-		4'd3: cal_byte_f = 8'h05;
-		4'd4: cal_byte_f = 8'hA1;
+		4'd0: cal_byte_f = 8'h24;   // 写 CMR,2 字节,ADR=4
+		4'd1: cal_byte_f = 8'h20;   // CMR 高字节:bit13 = 1
+		4'd2: cal_byte_f = 8'h80;   // CMR 低字节:RES=1 / DF=0 / MD=00
+		4'd3: cal_byte_f = 8'h05;   // 写 CMR 低字节,1 字节,ADR=5
+		4'd4: cal_byte_f = 8'h81;   // CMR = 0x2081,MD=01 → 进自校准
 		default: cal_byte_f = 8'h00;
 	endcase
 endfunction
@@ -313,7 +331,12 @@ always@(posedge clk_50m or negedge rst_n)begin
 							// 手册 p14:DIR 24 位、码值「左对齐」(left justified)
 							//   → DIR[23:0] = code20 << 4
 							//   三个数据字节依次 = code[19:12] / code[11:4] / {code[3:0],4'b0}
-							//   (Table 9 算例:20 位 straight binary,code=80000h → DIR=80000xh)
+							//   (Table 9 算例,以 0x80000 为例对比两行:
+							//      补码行   code=80000h → **芯片 VOUT = 0 V** → 模块 −10 V
+							//      直通行   code=80000h → **芯片 VOUT = 2.5 V** → 模块  0 V
+							//    ⇒ 同一个码,两种格式差**整个负半量程(10 V 模块级)**。
+							//    本项目走补码(CMR.DF=0),故 0x80000 = −100 V 偏压,0x00000 才是 0 V。
+							//    这里只做左对齐,格式由 CMR 定,见 cal_byte_f)
 							code_in_d[1] <= code[19:12];
 							code_in_d[2] <= code[11:4];
 							code_in_d[3] <= {code[3:0], 4'b0000};

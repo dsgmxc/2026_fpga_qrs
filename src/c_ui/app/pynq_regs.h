@@ -283,17 +283,28 @@ static inline uint32_t cv_adc_cfg_word(uint32_t div, int32_t ph_off)
 /* 模拟前端:偏压(DAC1220)/ 激励(AD9833)                              */
 /* ------------------------------------------------------------------ */
 /* 0x14 [19:0] → dac_1220.code。DAC 是**模块级 ±10 V**:
- *     V_module = −10 + 20 × code / 1048575
+ *     V_module = −10 + 20 × ((code − 0x80000) mod 2^20) / 1048575
  * 再到被栅极看到的偏压,还要乘【外部高压级的 10:1】——
  *     V_bias = V_module × 10        ⇒ 量程 −100 V … +100 V
  *
  * 🔴 **那个 10:1 是硬件接线,不是寄存器。** 换一块高压板就得改这个常量,
  *    而 RTL / 寄存器映射一个字都不用动 —— 这正是换算放在 PS 侧的理由。
  *
- * ⚠️ `code = 0` 是 **−100 V**,不是 0 V。空闲态用中位码(见 CV_BIAS_CODE_MID)。
- *    界面的偏压范围是 0.1–100.0 V(只走正向半轴),下限对应 code ≈ 0x8020C。 */
+ * 🔴🔴 **2026-10-12 实测:芯片跑在「偏移二进制补码」,不是直通二进制。**
+ *     SBAS082G Table 13,CMR bit5 `DF`:0 = 偏移二进制补码(**上电默认**)、
+ *     1 = 直通二进制;Table 9:20 位下 0 V 对应码 `80000h`(补码)/ `00000h`(直通)。
+ *     RTL 写 `CMR = 0x20A1` 本意是 DF=1(直通),**但板上行为是补码
+ *     ⇒ 这次 CMR 写没落进芯片**(附带:该值 bit7 `RES`=0 是 16 位分辨率,
+ *     与 20 位 DIR 左对齐不符 —— 这两条都归 PL 侧待修,不阻塞软件)。
+ *     **两种格式只差半个量程,故 PS 侧旋转 `0x80000` 即可修好,不必重新综合。**
+ *     实测四点(模块级万用表):`0x7FFFF→+9.72`、`0x80000→−10.0`、
+ *     `0x99999→−8.0`、`0xA6666→−7.0`,与上面这个补码式全部吻合。
+ *
+ * ⚠️ 因此 **`code = 0x00000` 才是 0 V**;`code = 0x80000` 实际是 **−100 V**
+ *    (它是 RTL 复位值,对栅极是个安全的"全关"默认,但**别当 0 V 用**)。
+ *    界面的偏压范围是 0.1–100.0 V(只走正向半轴),下限 0.1 V 对应 code = 0x0020C。 */
 #define CV_BIAS_CODE_MAX     0xFFFFFu      /* 20 位满量程 = 1048575 */
-#define CV_BIAS_CODE_MID     0x80000u      /* 中位码 = 0 V 偏压(RTL 复位值) */
+#define CV_BIAS_CODE_MID     0x80000u      /* ⚠️ 只是 RTL 复位值;补码下它 = −100 V,不是 0 V */
 #define CV_BIAS_HV_RATIO     10.0f         /* 外部高压级倍数(硬件,非寄存器) */
 #define CV_BIAS_TENTHS_MIN   1u            /* 0.1 V —— 界面下限 */
 #define CV_BIAS_TENTHS_MAX   1000u         /* 100.0 V —— 界面上限 */
@@ -314,23 +325,27 @@ static inline uint32_t cv_bias_volts_to_code(float volts)
 
     if (raw < 0.0f)       { raw = 0.0f; }
     if (raw > 1048575.0f) { raw = 1048575.0f; }
-    return (uint32_t)(raw + 0.5f);
+    /* 直通二进制 → 偏移二进制补码 = 旋转半个量程(2026-10-12 实测补上)。
+       删掉这个 ^ 就复现"设多少都读出 −10 V 偏置"的老毛病。 */
+    return ((uint32_t)(raw + 0.5f)) ^ 0x80000u;
 }
 
 /**
  * @brief 0.1 V 计数 → 偏压码。界面的 0.1 V 栅格用这个。
- * @note  `tenths = 0` → `0x80000`(0 V);`1000` → `0xFFFFF`(+100 V)。
+ * @note  `tenths = 0` → `0x00000`(0 V);`1000` → `0x7FFFF`(+100 V)。
  */
 static inline uint32_t cv_bias_tenths_to_code(uint32_t tenths)
 {
     return cv_bias_volts_to_code((float)tenths / 10.0f);
 }
 
-/** @brief 偏压码 → 偏压(V),全精度。 */
+/** @brief 偏压码 → 偏压(V),全精度。@ref cv_bias_volts_to_code 的逆。 */
 static inline float cv_bias_code_to_volts(uint32_t code)
 {
-    float module_v = -10.0f +
-        (20.0f * (float)(code & CV_BIAS_CODE_MAX) / 1048575.0f);
+    /* 补码 → 直通二进制(转回来才能套那个 −10…+10 的线性式) */
+    uint32_t straight = (code & CV_BIAS_CODE_MAX) ^ 0x80000u;
+    float    module_v = -10.0f +
+        (20.0f * (float)straight / 1048575.0f);
 
     return module_v * CV_BIAS_HV_RATIO;
 }
