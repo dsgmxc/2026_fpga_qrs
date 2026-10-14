@@ -1,14 +1,14 @@
 == QRS build summary(doc: build/build_bitstream.tcl / report_summary.tcl)==
-WNS = +0.354 ns
-WHS = +0.094 ns
+WNS = +0.316 ns
+WHS = +0.065 ns
 -- 时序(report_timing_summary,筛过的正文行)--
-  0.354 0.000 0 5469 0.094 0.000 0 5469 3.346 0.000 0 2046
+  0.316 0.000 0 5472 0.065 0.000 0 5472 3.346 0.000 0 2047
   All user specified timing constraints are met.
   clk_fpga_0 {0.000 10.000} 20.000 50.000
   clk_adc_raw {0.000 3.846} 7.692 130.000
   clk_fb_raw {0.000 10.000} 20.000 50.000
-  clk_fpga_0 11.540 0.000 0 4453 0.094 0.000 0 4453 7.000 0.000 0 1944
-  clk_adc_raw 0.354 0.000 0 216 0.120 0.000 0 216 3.346 0.000 0 99
+  clk_fpga_0 9.440 0.000 0 4453 0.065 0.000 0 4453 7.000 0.000 0 1944
+  clk_adc_raw 0.316 0.000 0 218 0.121 0.000 0 218 3.346 0.000 0 100
   clk_fb_raw 18.408 0.000 0 3
 -- 时钟(report_clocks)--
   clk_fpga_0 20.000 {0.000 10.000} P {system_i/processing_system7_0/inst/PS7_i/FCLKCLK[0]}
@@ -16,8 +16,8 @@ WHS = +0.094 ns
   clk_fb_raw 20.000 {0.000 10.000} P,G,A {system_i/cv_sys_0/inst/u_adc_mmcm/CLKFBOUT}
   clk_fpga_0 0.600
 -- 资源(report_utilization)--
-  | Slice LUTs | 1789 | 0 | 0 | 53200 | 3.36 |
-  | Slice Registers | 2021 | 0 | 0 | 106400 | 1.90 |
+  | Slice LUTs | 1790 | 0 | 0 | 53200 | 3.36 |
+  | Slice Registers | 2022 | 0 | 0 | 106400 | 1.90 |
   | Block RAM Tile | 7.5 | 0 | 0 | 140 | 5.36 |
   | RAMB36/FIFO* | 7 | 0 | 0 | 140 | 5.00 |
   | RAMB36E1 only | 7 | | | | |
