@@ -335,14 +335,15 @@ bool AdcSample_CapturePair(uint32_t *out_code_a, uint32_t *out_code_b,
      *    落在寄存器合法范围外的刻度**永不命中**:现象是 `done` 不置位(超时),
      *    很容易被误判成"位流不对"。所以提前给出可执行的判断。
      *    ⚠️ 原文案是"换更大的 DIV(1/2/5/10/13 MSPS 里挑)"—— 2026-10-08 起
-     *       那是**做不到的建议**:采样率已固定 65 MSPS、界面上没有换档入口。
+     *       那是**做不到的建议**:采样率由 `CV_ADC_DIV_DEFAULT` 一个地方定死、
+     *       界面上没有换档入口(2026-10-15 起 = DIV=4 / 32.5 MSPS)。
      *       真遇到它,说明 `cv_adc_phase_center()` 的折回与当前
      *       `CV_ADC_DIV_DEFAULT` 不一致 —— 那是**代码缺陷**,不是"挑一档"。 */
     div    = MeasureConfig_GetSampleDiv();
     tick_a = AdcSample_PortATick(div);
     if (!AdcSample_TickLegal(div, tick_a)) {
         AdcSample_SetErrorf("DIV=%u 下窗口中心越出寄存器合法范围(A tick %+d)。"
-                            "采样率已固定 65 MSPS(DIV=2),没有别的档可换 ⇒ 这是"
+                            "采样率由 CV_ADC_DIV_DEFAULT 定死,界面上没有别的档可换 ⇒ 这是"
                             "cv_adc_phase_center() 的折回与 DIV 不一致,属代码缺陷。",
                             (unsigned)div, (int)tick_a);
         return false;

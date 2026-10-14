@@ -162,7 +162,9 @@ void MeasureConfig_FormatLine(char *buf, size_t cap)
     if ((buf == NULL) || (cap == 0u)) {
         return;
     }
-    /* 采样率用两位小数:2026-10-08 起固定 65.00(DIV=2)。
+    /* 采样率用两位小数:2026-10-15 起默认 32.50(DIV=4)。
+     * ⚠️ 这里的值是 `cv_adc_sample_hz(s_div)` **现算**的、不是常量 ——
+     *    `CV_ADC_DIV_DEFAULT` 一改这行自己就跟着变,不必回来改字符串。
      * (原注是"10.00 / 13.00 一眼看出是哪一档" —— 采样率不可调后已失去前提,
      *  但**两位小数保留**:它对将来任何档位都成立,且这行是屏上唯一显示
      *  采样率的地方,见 measure_config.h 的说明。)
