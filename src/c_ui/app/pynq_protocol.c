@@ -42,10 +42,14 @@
  *     上板验证通过(见 `docs/project_state.md` 2026-10-10 那一条)。
  *     ⛔ 旧写法「本位流里没有 `relay_ctrl`,`cv_regs.py` 里也没有继电器
  *        寄存器」**作废** —— 那是本次接线之前的实况。
- *   · 🔴 **C 界面本轮只读** —— 这三个寄存器一个都不写,只把**回读的已生效
- *     值**显示到顶栏「回路:」「档位:」两栏(`app/relay_view.c`)。
- *     写入权归 Python 侧(`tools/relay_hold.py` 那类脚本),避免第二个写入方。
- *   · 所以「回路」按钮点下去**不再假装切换**,只是重新读一次真值。
+ *   · 🟢 **2026-10-14 起 C 界面是 `0x1C` 的唯一写入方**(用户 2026-10-14 拍板)。
+ *     原文是「C 界面本轮只读,写入权归 Python 侧,避免第二个写入方」——
+ *     **那条约定没有兑现**:Python 侧根本没有调用方(`main.py` 只 import
+ *     `drivers.board`),于是硬件永远停在复位值 `ALL_OFF`。根因与证据表见
+ *     `app/relay_view.c` 文件头。
+ *   · 现在点「回路」按钮**真的切继电器**(`RelayView_ApplyPath()`);
+ *     顶栏那两栏仍然只显示**回读的已生效值**,不显示"用户点了什么"。
+ *   · `0x18 RANGE_SEL` **本轮仍然只读** —— 挡位不在本次范围内(见 §四)。
  * 🆕 2026-10-06:**Cs 读数有了,但不是 DLIA 算的。** 走的是
  *    `adc_sample.c` —— 采 AD9238 缓冲(0x8C/0x90/0x94/0x98)+ C 侧正交解调。
  *    结果页的「单点波形 / 扫压波形」两张图和扫压曲线上的 Cs 都由此来。
@@ -53,10 +57,15 @@
  *    替代路径,不是终点。差别在于:软件解调在 PS 上跑,受 `cv_millis()`
  *    调度和 AXI 事务开销限制;**PL 侧 DLIA 才是评分对象**(见 CLAUDE.md §二)。
  *
- * ⚠️ **Cs 只是"能出数",不是"测得准"**:
- *    · `R_tia` 是原理图标称值,**未标定**;
- *    · 两路(INA/INB 两个时间槽)是**两次独立采集**,相位不相关 ⇒ 只能比幅值,
- *      **Cp 与 D 一律显示 `--`**(算出来是噪声,不如不显示);
+ * 🆕 **2026-10-14:一次 GO 同时收 INA/INB 两路,相位通了。**
+ *    `adc_capture.v` 改成 A 窗、B 窗各写一次(偶地址 A、奇地址 B),
+ *    两路来自**同一个 ADC 转换周期** ⇒ 相位相关 ⇒ 能算复数阻抗。
+ *
+ * ⚠️ **但读数仍然只是"能出数",不是"测得准"**:
+ *    · 两路 A/B 通路的**增益与相位失配未标定** —— `Z = R0·(VH−VL)/VL` 的
+ *      正确性依赖两路一致,那是 OPEN/SHORT 校准(B8)的活,本轮没做;
+ *    · `(A − B)` 相减前**没有相位微调**,两路各按自己的 `PH_OFF` 取点时,
+ *      残余的时基偏移会**直接进 Z 的相位**;
  *    · 模拟输入现在**没接**,采到的可能是贴顶的平线 —— 那是**真数据**,
  *      不是画错了。判据:`dump_stats` 的 `ADC 采集 成功/失败` 计数。
  *
@@ -99,8 +108,9 @@
  *    此前 `UI_Demo_*Waveform*` 没有任何活调用者,扫压的 Cs 是 `demo_capacitance()`
  *    编的模型。现在默认走真实采集,模型只剩 `CV_UI_DEMO=1` 一条退路。 */
 #include "adc_sample.h"
-/* 🆕 2026-10-10:继电器 / 档位的**只读**回显。本文件一个继电器寄存器都不写,
- *    只把回读值喂给顶栏;写入权归 Python 侧。见 relay_view.c 文件头。 */
+/* 🆕 2026-10-10:继电器 / 档位的回显。🔄 2026-10-14:本文件**会写** `0x1C`
+ *    (经 `RelayView_ApplyPath()` / `RelayView_ApplyCode()`),不再是只读。
+ *    顶栏仍只显示回读真值。见 `relay_view.c` 文件头。 */
 #include "relay_view.h"
 
 #include <math.h>
@@ -141,7 +151,8 @@ static int      s_demo_enabled;         /* CV_UI_DEMO=1:叠加模型读数 */
 static uint32_t s_dwell_ms;
 
 static uint32_t s_sweep_active;
-static uint32_t s_sweep_mask;           /* bit0..2 = CISS/COSS/CRSS */
+static uint32_t s_sweep_mask;           /* bit0..2 = CISS/COSS/CRSS,【要跑哪几条腿】 */
+static uint32_t s_sweep_leg;            /* 🆕 【当前正在跑的那条腿】(0..2);mask 里可能有多条 */
 static float    s_sweep_stop_volts;
 static uint32_t s_sweep_total;
 static uint32_t s_sweep_index;          /* 已下发的点数(1 起) */
@@ -168,13 +179,15 @@ static int      s_dac_rst_notice;       /* "DAC 还没放行"提示只打一次 
  *   ⇒ **两路不是一个"眼"的两端,是两个时间槽**:port A = INA 窗 `[2−P/2,+1]`
  *      (中心 `1.5−P/4`)、port B = INB 窗 `[+2,P/2+1]`(中心 `1.5+P/4`)。
  *      ⚠️ 用户口径的「上升沿=通道 a / 下降沿=通道 b」**正好是反的**,见 `adc_capture_pair()`。
- *   ⛔ 一次 GO 只锁一个刻度 ⇒ 两路靠**两次采集**,不需要改 RTL、不需要重下位流。
  *
- * 🔴 **两路的相位不相关** —— 两次采集的 GO 时刻任意,所以 A、B 之间差一个
- *    **随机相位**。⇒ 只能比**幅值**,不能算阻抗相位。因此 Cs 按"纯电容"算
- *    (`AdcSample_CsPf` 的说明),**不出 Cp / D** —— 那两个要相位,现在算出来是噪声。
- *    要真正同时采,得给 `adc_capture` 加第二组缓冲 + 重综合 + 重下位流,见
- *    `docs/display_subsystem.md` 的后续项。
+ * 🟢 **2026-10-14 起:一次 GO 同时收下 A 和 B**(RTL 已改,见 `adc_capture.v` ④):
+ *    同一个 ADC 转换沿产生的那一对字,现在各写各的缓冲 —— 偶地址给 A、奇地址给 B,
+ *    **同一次 GO、同一个转换周期** ⇒ **两路相位相关**,可以算阻抗。
+ *
+ * 🔴 **原稿这一段是反的,保留一句以免旧结论被当成现状**:原文写
+ *    「一次 GO 只锁一个刻度 ⇒ 两路靠两次采集」「两路的相位不相关,只能比幅值」,
+ *    那是 2026-10-14 之前的形态。相位原点不同 ⇒ Cp / D 只能填 `--`。
+ *    **本轮把这条路打通了**,现在 `Cs / Cp / D / Rg` 都从同一个复数 Z 出。
  * ========================================================================== */
 
 /** 单点测量:bias_apply 之后等多久再采。复用扫压的驻留时间 —— 那是本项目
@@ -183,30 +196,38 @@ static int      s_dac_rst_notice;       /* "DAC 还没放行"提示只打一次 
 
 typedef struct
 {
-    float mag_a_v;      /* 通道 A(port A = INA 时间槽)解调幅值,伏 */
-    float mag_b_v;      /* 通道 B(port B = INB 时间槽)解调幅值,伏 */
-    float cs_pf;        /* 幅值比算出的 Cs,pF —— **未标定** */
-    float cur_ma;       /* 通道 B 折算成电流,mA */
-    float pp_a;         /* 通道 A 峰峰值,ADC 码(排障用:判断输入有没有信号) */
-    float pp_b;         /* 通道 B 峰峰值,ADC 码 */
-    uint32_t otr;       /* 两路 OTR 置起的点数合计 */
+    float      mag_a_v;     /* 通道 A(INA = VH)解调幅值,伏 —— 未标定 */
+    float      mag_b_v;     /* 通道 B(INB = VL)解调幅值,伏 —— 未标定 */
+    AdcSampleZ z;           /* 🆕 复数阻抗及其派生量(Cs / Cp / D / 电流)   */
+    uint32_t   gear;        /* 🆕 本次读到的 0x18 原始码(挡位是谁说了算)   */
+    double     r0_ohm;      /* 🆕 本次用的参考电阻 = 挡位电阻(回读换算)     */
+    float      pp_a;        /* 通道 A 峰峰值,ADC 码(排障:输入有没有信号)  */
+    float      pp_b;        /* 通道 B 峰峰值,ADC 码 */
+    uint32_t   otr;         /* 两路 OTR 置起的字数合计 */
+    uint32_t   z_valid;     /* 🆕 1 = `z` 是本次算出来的;0 = 保留上一次的值 */
 } AdcPair;
 
 static uint32_t s_code_a[ADC_SAMPLE_POINTS];
 static uint32_t s_code_b[ADC_SAMPLE_POINTS];
 static AdcPair  s_pair;
 
+/** 本次采集**是在哪条腿上**做的(0/1/2/3 = CISS/COSS/CRSS/RG)。
+ *  只用于日志 —— 出问题时第一句话是"这是在哪一路采的"。
+ *  由 `sweep_start()` / 单点排程在切完继电器之后设置。 */
+static uint32_t s_pair_path;
+
 static uint32_t s_adc_points;       /* 一轮总共采了多少次(统计) */
 static uint32_t s_adc_fail;         /* 采集/解调失败次数       */
 static int      s_adc_notice;       /* 失败提示只打一次        */
-static int      s_cpd_notice;       /* "Cp/D 为什么是 --" 只解释一次 */
 
 /* 单点测量:请求 → 等偏压稳定 → 采 → 报结果 */
 static uint32_t s_point_pending;
 static uint32_t s_point_due_ms;
 static uint32_t s_point_path;
 static uint32_t s_point_volts_x10;
-static uint32_t s_point_all;        /* 1 = 「CISS+COSS+CRSS」,三条卡片一起填 */
+static uint32_t s_point_all;        /* 1 = 「CISS+COSS+CRSS」→ **三腿序列** */
+static uint32_t s_point_leg;        /* 🆕 当前腿(0..3);`all=1` 时 0→1→2 依次走 */
+static uint32_t s_point_leg_n;      /* 🆕 总腿数:1(单路)或 3(「全部」) */
 
 /* ==========================================================================
  * 小工具
@@ -334,7 +355,18 @@ static void adc_report_failure(const char *where)
             where, AdcSample_LastError(), (unsigned)ADC_SAMPLE_DEMOD_MIN_N);
 }
 
-/** @brief 采一对(通道 A = port A/INA 槽 / 通道 B = port B/INB 槽)并解调。结果进 `s_pair` / `s_code_*`。 */
+/** @brief 采**一对**(A = INA = VH / B = INB = VL)并解调。结果进 `s_pair` / `s_code_*`。
+ *
+ *  🔴 **一次 GO 收齐两路(2026-10-14 改)。** 原文是"先 PushPhase(A 窗中心)采 INA,
+ *     再 PushPhase(B 窗中心)采 INB"—— 两次 GO 之间隔着一万多个转换周期,而解调
+ *     基准锚在**各次采集的第 0 点**,⇒ 两路相位差**随机**,只能比幅值。
+ *     现在 `adc_capture.v` 在 A 窗、B 窗各命中一次(RTL 按 B = A + P/2 自推),
+ *     两路来自**同一个转换周期** ⇒ 同一个相位参考系,复数除法成立。
+ *     **软件侧一个时间改正都不加** —— 硬件上本来就没有时间差。
+ *
+ *  ⚠️ `tick_a` 只是"软件以为 A 在哪";B 的刻度是**硬件**算的,这里用
+ *     `AdcSample_PortBTickHw()` 把它复算一遍**只为日志**(排障时判断
+ *     "硬件那一版是不是还在数据窗里")。⛔ 不要拿它去修正相位。 */
 static bool adc_capture_pair(void)
 {
     uint32_t div    = MeasureConfig_GetSampleDiv();
@@ -344,43 +376,32 @@ static bool adc_capture_pair(void)
      *    双端口时分复用:port A = INA 窗 `[2−P/2,+1]`(中心 `1.5−P/4`)、
      *    port B = INB 窗 `[+2,P/2+1]`(中心 `1.5+P/4`)。用户口径说的
      *    「上升沿=通道 a、下降沿=通道 b」**正好是反的**(tick −P/2 落在 B 窗、
-     *    tick 0 落在 A 窗),而且都贴窗沿。见 `adc_sample.h` 文件头与 `LLM-045` §G。 */
-    int32_t  tick_a = AdcSample_PortATick(div);      /* 通道 A = INA */
-    int32_t  tick_b = AdcSample_PortBTick(div);      /* 通道 B = INB */
+     *    tick 0 落在 A 窗),而且都贴窗沿。见 `adc_sample.h` 文件头与 `LLM-045` §G。
+     *
+     * 🆕 **两个刻度现在都在 `AdcSample_CapturePair()` 内部算**(A 由
+     *    `AdcSample_PortATick()`、B 由 RTL 同款折叠规则),这里不再自己算一份 ——
+     *    算两份等于留一个"哪天改了忘记同步"的口子。日志里要打的那份由
+     *    `adc_log_pair()` 现算,同样是查表式的纯函数,不会漂。 */
     float    ia, qa, ib, qb;
     float    mag_a_codes, mag_b_codes;
-    uint32_t otr_a = 0u;
-    uint32_t otr_b = 0u;
+    uint32_t otr_n = 0u;
     uint32_t i;
     uint32_t min_a, max_a, min_b, max_b;
+    uint32_t path = s_pair_path;                     /* 本次测的是哪条腿 */
 
-    /* ⛔ 先查刻度是否可达。落在寄存器合法范围外的刻度**永不命中** ——
-     *    现象是 `done` 不置位(超时),很容易被误判成"位流不对"。
-     *    这里提前给出"换哪个档位"这种可执行的提示。 */
-    if (!AdcSample_TickLegal(div, tick_a) || !AdcSample_TickLegal(div, tick_b)) {
-        /* ⚠️ 原文案是"换更大的 DIV(1/2/5/10/13 MSPS 里挑)"——
-         *    2026-10-08 起那是**做不到的建议**:采样率已固定 65 MSPS、
-         *    界面上没有换档的入口。所以这里改说实质:刻度算错了。
-         *    真遇到它,说明 `cv_adc_phase_center()` / `_b()` 的折回与当前
-         *    `CV_ADC_DIV_DEFAULT` 不一致 —— 那是个代码缺陷,不是"挑一档"。 */
-        AdcSample_SetErrorf("DIV=%u 下窗口中心越出寄存器合法范围"
-                            "(A tick %+d / B tick %+d)。采样率已固定 65 MSPS"
-                            "(DIV=2),没有别的档可换 ⇒ 这是"
-                            "cv_adc_phase_center() 的折回与 DIV 不一致,属代码缺陷。",
-                            (unsigned)div, (int)tick_a, (int)tick_b);
+    /* 🔴 **参考电阻 R0 每次现读 0x18**,不硬编码、不缓存 ——
+     *    挡位一变,Rg / Cs / Cp / 电流会**同时**错。见 `cv_range_ohms()`。
+     *    ⚠️ 本项目本轮不写 0x18(复位值 = B 挡 100 Ω),但**读它**是必须的:
+     *       写死等于假设"挡位永远不会变"。 */
+    s_pair.gear   = cv_reg_read(CV_REG_RANGE_SEL) & CV_RANGE_MASK;
+    s_pair.r0_ohm = cv_range_ohms(s_pair.gear);
+
+    /* ① 采一对。刻度合法性检查在 `AdcSample_CapturePair()` 内部(它才知道 DIV)。 */
+    if (!AdcSample_CapturePair(s_code_a, s_code_b, &otr_n)) {
         return false;
     }
 
-    if (!AdcSample_Capture(tick_a, ADC_SAMPLE_POINTS, s_code_a, NULL, &otr_a)) {
-        return false;
-    }
-    if (!AdcSample_Capture(tick_b, ADC_SAMPLE_POINTS, s_code_b, NULL, &otr_b)) {
-        return false;
-    }
-
-    /* 🔴 **幅值必须一路一路算。** 两路是两次独立采集,GO 时刻任意 ⇒ 它们之间的
-     *    相位差是**随机的**。所以这里不能做真双通道那种 V/I 复数除法,
-     *    只能各算各的幅值。要同时采得给 `adc_capture` 加第二组缓冲(后续项)。 */
+    /* ② 一路一路解调 —— 参考表是**同一条**(同一个 (m,l)),所以两路天然同相。 */
     if (!AdcSample_Demodulate(s_code_a, ADC_SAMPLE_POINTS, fs_hz, fe_hz,
                               &ia, &qa, &mag_a_codes)) {
         return false;
@@ -389,7 +410,6 @@ static bool adc_capture_pair(void)
                               &ib, &qb, &mag_b_codes)) {
         return false;
     }
-    (void)ia; (void)qa; (void)ib; (void)qb;   /* I/Q 本身当前没有用户;相位不可用 */
 
     /* 峰峰值只进日志 —— 它是"输入到底有没有信号"最快的判据 */
     min_a = max_a = s_code_a[0];
@@ -403,34 +423,65 @@ static bool adc_capture_pair(void)
 
     s_pair.mag_a_v = AdcSample_CodesToVolts(mag_a_codes);
     s_pair.mag_b_v = AdcSample_CodesToVolts(mag_b_codes);
-    s_pair.cs_pf   = AdcSample_CsPf(s_pair.mag_a_v, s_pair.mag_b_v, fe_hz);
-    s_pair.cur_ma  = (s_pair.mag_b_v / ADC_SAMPLE_R_TIA) * 1000.0f;
     s_pair.pp_a    = (float)(max_a - min_a);
     s_pair.pp_b    = (float)(max_b - min_b);
-    s_pair.otr     = otr_a + otr_b;
+    s_pair.otr     = otr_n;
+
+    /* ③ 复数阻抗 —— 这是本次改动的**目的**:Cs 不再靠"纯电容"近似,
+     *    Cp / D 也从"算不出来"变成算得出来。
+     *    ⚠️ 算不出来时**保留上一次的值**并把 `z_valid` 置 0,不写 0 ——
+     *       0 会一路画成一条贴着横轴的曲线,看着像"电容很小",那是假数据。 */
+    s_pair.z_valid = AdcSample_Impedance(ia, qa, ib, qb,
+                                         s_pair.r0_ohm, fe_hz, &s_pair.z) ? 1u : 0u;
+    if (!s_pair.z_valid) {
+        /* 阻抗算不出来**不等于采集失败** —— 两路的幅值、波形都是真的,
+         * 仍然要喂给波形页。所以这里不 return false,由调用方看 z_valid。 */
+        fprintf(stderr, "[adc] ⚠️ %s 这一点算不出阻抗:%s\n",
+                path_name(path), AdcSample_LastError());
+    }
 
     s_adc_points++;
     return true;
 }
 
-/** @brief 一行采集证据。扫压时每点一行 —— 出问题时第一眼看的就是它。 */
+/** @brief 一行采集证据。扫压时每点一行 —— 出问题时第一眼看的就是它。
+ *
+ *  🔴 **2026-10-14 改:加了 Z / Cs / Cp / D 与 R0。**
+ *     原文只打印两路幅值与 Cs(那会儿相位不可用,打印 Z 是没意义的)。
+ *     现在这几项是**要看的第一批数**:`Re Z` 与万用表量的栅极电阻对得上,
+ *     就说明整条相位通路是通的 —— 这是 §五 验证里最关键的一条自证。
+ *     `R0` 一并打出来,是为了让"挡位到底是多少"这件事**有出处**,不靠猜。 */
 static void adc_log_pair(const char *tag, float bias_v)
 {
     uint32_t div = MeasureConfig_GetSampleDiv();
 
-    printf("[adc] %-8s 偏压 %7.3f V | A/INA tick%+d 幅值 %7.4f V,峰峰 %5.0f 码 | "
-           "B/INB tick%+d 幅值 %7.4f V,峰峰 %5.0f 码 | Cs %9.3f pF(未标定) | OTR %u\n",
+    printf("[adc] %-8s 偏压 %7.3f V | A/INA tick%+d 幅值 %7.4f V 峰峰 %5.0f 码 | "
+           "B/INB tick%+d 幅值 %7.4f V 峰峰 %5.0f 码 | OTR %u\n",
            tag, (double)bias_v,
            (int)AdcSample_PortATick(div), (double)s_pair.mag_a_v, (double)s_pair.pp_a,
-           (int)AdcSample_PortBTick(div), (double)s_pair.mag_b_v, (double)s_pair.pp_b,
-           (double)s_pair.cs_pf, (unsigned)s_pair.otr);
+           (int)AdcSample_PortBTickHw(div, AdcSample_PortATick(div)),
+           (double)s_pair.mag_b_v, (double)s_pair.pp_b,
+           (unsigned)s_pair.otr);
+
+    if (s_pair.z_valid) {
+        printf("[adc] %-8s Z = %9.3f %+.3f j Ω (R0 = %.0f Ω,挡位 0x%X) | "
+               "Cs %9.3f pF | Cp %9.3f pF | D %.5f | I %8.4f mA  (均未标定)\n",
+               tag,
+               s_pair.z.z_re_ohm, s_pair.z.z_im_ohm,
+               s_pair.r0_ohm, (unsigned)s_pair.gear,
+               s_pair.z.cs_pf, s_pair.z.cp_pf, s_pair.z.d, s_pair.z.cur_ma);
+    } else {
+        printf("[adc] %-8s Z 无读数(原因见上面那一行 ⚠️);"
+               "两路幅值仍有效,波形照画\n", tag);
+    }
 }
 
 /**
  * @brief 把 `s_code_a` / `s_code_b` 灌进「单点波形」页(kind 0)。
  *
- * 用户口径:通道 A → 电压图,通道 B → 电流图(A = INA 槽,B = INB 槽)。
- * ⚠️ 通道 B 本身是跨阻放大器的**输出电压**,这里按 `ADC_SAMPLE_R_TIA` 折算成电流。
+ * 用户口径:通道 A → 电压图,通道 B → 电流图(A = INA = VH,B = INB = VL)。
+ * ⚠️ 通道 B 是**参考电阻 R0 两端的电压**,这里按 `I = VL / R0` 折算成电流,
+ *    而 R0 是**从 `0x18` 回读现算的挡位电阻**(不是常数,见 `cv_range_ohms()`)。
  *
  * 🔴 **2026-10-08:采集点数与显示点数在这里分开。**
  *    以前两者是同一个数(`ADC_SAMPLE_POINTS` = 250),所以"读多少画多少"是自洽的。
@@ -492,11 +543,18 @@ static void adc_feed_point_waveform(void)
      * `total_samples` 是"最终会有多少点",要一次给全,不能边喂边变。 */
     fed = (show + stride - 1u) / stride;
 
+    /* B 的瞬时值 → 电流:`I = VL / R0`(R0 = 挡位电阻,从 0x18 回读换算)。
+     * ⛔ **不要再用 `ADC_SAMPLE_R_TIA`** —— 那是 1 kΩ 的遗留常数,而硬件
+     *    复位挡位是 100 Ω,差 10 倍。理由见 `adc_sample.h` 的说明。 */
     UI_Demo_BeginWaveform(UI_DEMO_WAVE_POINT, fed);
     for (i = 0u; i < show; i += stride) {
-        float v = AdcSample_CodesToVolts((float)s_code_a[i]);
-        float cur = (AdcSample_CodesToVolts((float)s_code_b[i]) /
-                     ADC_SAMPLE_R_TIA) * 1000.0f;   /* A → mA */
+        float  v   = AdcSample_CodesToVolts((float)s_code_a[i]);
+        float  cur = 0.0f;
+
+        if (s_pair.r0_ohm > 0.0) {
+            cur = (float)(((double)AdcSample_CodesToVolts((float)s_code_b[i]) /
+                           s_pair.r0_ohm) * 1000.0);      /* A → mA */
+        }
 
         UI_Demo_UpdateWaveformPoint(UI_DEMO_WAVE_POINT, (i / stride) + 1u,
                                     fed, v, cur, NULL);
@@ -510,55 +568,80 @@ static void adc_feed_point_waveform(void)
 /**
  * @brief 单点测量:等偏压稳定 → 采 → 喂波形 + 填读数卡片。
  *
- * 🔴 **Cs / Cp / D 三项的填法**(这是本函数唯一需要判断的地方):
- *    · `Cs` 是真值 —— 由两路**幅值比**算出(见 `AdcSample_CsPf`)。未标定。
- *    · `Cp` / `D` 一律填 `--`。两者都需要 V 与 I 的**相位差**,而两路是分两次
- *      采的、相位不相关 ⇒ 算出来是噪声。**填上去等于编数据**,宁可显示占位符。
- */
+ * 🔴 **Cs / Cp / D 三项的填法(2026-10-14 改)** —— 这是本函数唯一要判断的地方:
+ *    · `Cs` = `−1/(ω·Im Z)`(串联等效),`Cp` = `−Im Z/(ω·|Z|²)`(并联等效),
+ *      `D` = `|Re Z / Im Z|`。三项**都由同一个复数 Z 出**(见 `AdcSample_Impedance`)。
+ *      原文这里是「Cs 用幅值比(纯电容近似)、Cp/D 一律 `--`」—— 那个限制
+ *      **随 §三 的实现一起消失了**:两路现在同相位,Z 算得出来。
+ *    · ⛔ **Z 算不出来时三项都留 `--`,不要填 0。** 0 会画成一条贴着横轴的
+ *      曲线,看起来像"电容很小",那是**假数据**。`z_valid` 就是这条闸。
+ *    · ⚠️ **RG 那一路填的不是电容卡**,走 `UI_Demo_UpdateResistance()`
+ *      (`Rg = Re Z + 0.7`,照抄前序 `periodic_measurement.c:549`)。 */
 static void point_measure(void)
 {
     char     cs_text[16];
     char     cp_text[16];
     char     d_text[16];
+    char     rg_text[24];
     uint32_t path  = s_point_path;
     float    volts = (float)s_point_volts_x10 / 10.0f;
     uint32_t valid = 0u;
 
+    s_pair_path = path;                     /* 日志要说明"这是在哪一路采的" */
+
     if (adc_capture_pair()) {
         valid = 1u;
         adc_feed_point_waveform();
-        (void)snprintf(cs_text, sizeof(cs_text), "%.3f", (double)s_pair.cs_pf);
         adc_log_pair("单点", volts);
     } else {
         adc_report_failure("单点测量");
+    }
+
+    if (valid && s_pair.z_valid) {
+        (void)snprintf(cs_text, sizeof(cs_text), "%.3f", s_pair.z.cs_pf);
+        (void)snprintf(cp_text, sizeof(cp_text), "%.3f", s_pair.z.cp_pf);
+        (void)snprintf(d_text,  sizeof(d_text),  "%.5f", s_pair.z.d);
+    } else {
         (void)snprintf(cs_text, sizeof(cs_text), "--");
-    }
-    (void)snprintf(cp_text, sizeof(cp_text), "--");
-    (void)snprintf(d_text,  sizeof(d_text),  "--");
-
-    /* 卡片上 Cp/D 是空的,屏幕上不解释原因 —— 这里补一次说明,免得以为是漏填。 */
-    if (!s_cpd_notice) {
-        s_cpd_notice = 1;
-        printf("[proto] Cp / D 卡片显示 `--` 是**故意的**:两者都要 V 与 I 的相位差,\n"
-               "        而 INA/INB 两个时间槽是**两次独立采集**、相位不相关 ⇒ 只能用幅值比\n"
-               "        出 Cs。要填上 Cp/D 得让 PL 同时采两路(给 adc_capture 加第二组\n"
-               "        缓冲 + 重下位流),本轮不做。见 adc_sample.h 文件头。\n");
+        (void)snprintf(cp_text, sizeof(cp_text), "--");
+        (void)snprintf(d_text,  sizeof(d_text),  "--");
     }
 
-    if (s_point_all) {
-        /* 「一键测量页」:三条回路共用同一份读数 —— C 界面不切继电器组合,
-         *  这三条"回路"在硬件上就是同一个回路 */
-        uint32_t p;
-
-        for (p = 0u; p < 3u; ++p) {
-            UI_Demo_UpdateAllCapacitance(p, cs_text, cp_text, d_text, valid);
-        }
-    } else if (path < 3u) {
+    /* 🔴 **不再有 `s_point_all` 分支**(2026-10-14 删)。
+     *    原文是「一份读数填三张卡」,因为那时继电器从不切换、三条"回路"
+     *    在硬件上本就是同一个回路。**这个前提现在没了** —— 三腿序列由
+     *    `Process()` 逐腿驱动,每进这里一次就是**一条腿**,`s_point_path`
+     *    已经指向它。⛔ 别把"三张卡一起填"加回来:那会让三条曲线重合,
+     *    而 L5 判据恰恰是**三条曲线形状必须不同**。 */
+    if (path < 3u) {
         UI_Demo_UpdateSingleCapacitance(path, cs_text, cp_text, d_text, valid);
     } else {
-        /* RG 回路要继电器切到栅极电阻那条路,而 C 界面**不写**继电器寄存器
-         * ⇒ 切不过去,**没有可测的量**。卡片照实留 `--`,不编一个电阻值出来。 */
-        printf("[proto] 点测 RG:界面不切继电器组合,无读数可填(卡片保持 --)\n");
+        /* ---- RG:栅极电阻 ------------------------------------------------
+         * `Rg = Re(Z) + 0.7` —— 前序 `periodic_measurement.c:549` 逐字如此,
+         * 那个 0.7 Ω 是前序的 `PERIODIC_MEASUREMENT_RG_CALIBRATION_OHM`
+         * (线阻/接触电阻的经验补偿,不是理论值)。**照抄,不自己另立一个数。**
+         *
+         * ⚠️ 前序为 RG **强制 A 挡(10 Ω)并锁换挡**(`pc_protocol.c:282-284`);
+         *    本项目本轮**不写 0x18**,所以 RG 跑在复位挡位 B(100 Ω)上。
+         *    这不影响公式正确性(R0 是回读来的),只影响对比度:
+         *    `VL/VH = R0/(R0+Rg)` —— B 挡下 Rg ≈ 12 Ω 只带来 ~11% 的差量。
+         *    记进文档作为后续可调项,**不擅自改挡位**。 */
+        uint32_t ok_rg = valid && s_pair.z_valid;
+
+        if (ok_rg) {
+            double rg = s_pair.z.z_re_ohm + 0.7;
+
+            /* 显示带单位,和扫压页的读数风格一致 */
+            (void)snprintf(rg_text, sizeof(rg_text), "%.2f Ω", rg);
+            UI_Demo_UpdateResistance(rg_text, 1u);
+            printf("[proto] 点测 RG:Rg = Re Z + 0.7 = %.4f + 0.7 = %.4f Ω"
+                   "(R0 = %.0f Ω,挡位 0x%X)\n",
+                   s_pair.z.z_re_ohm, rg, s_pair.r0_ohm, (unsigned)s_pair.gear);
+        } else {
+            /* 算不出来就**留空**,不编一个电阻值出来。 */
+            UI_Demo_UpdateResistance("--", 0u);
+            printf("[proto] 点测 RG:无 Z 读数,电阻卡保持 --(原因见上面 [adc] 那一行)\n");
+        }
     }
 
     UI_Demo_SetStatusText(valid ?
@@ -647,39 +730,75 @@ static void sweep_measure_point(uint32_t index)
     float volts = sweep_bias_volts_at(index, s_sweep_total, s_sweep_stop_volts);
     char  bias_text[16];
     char  cap_text[16];
-    uint32_t path;
+    uint32_t path = s_sweep_leg;            /* 🔴 只写**当前这条腿**,不再三路共用 */
     uint32_t valid;
 
     (void)snprintf(bias_text, sizeof(bias_text), "%.2f", (double)volts);
     (void)snprintf(cap_text,  sizeof(cap_text),  "--");
 
     valid = adc_capture_pair() ? 1u : 0u;
-    if (valid) {
-        (void)snprintf(cap_text, sizeof(cap_text), "%.3f", (double)s_pair.cs_pf);
+    if (valid && s_pair.z_valid) {
+        (void)snprintf(cap_text, sizeof(cap_text), "%.3f", s_pair.z.cs_pf);
         adc_log_pair("扫压", volts);
+    } else if (valid) {
+        adc_log_pair("扫压", volts);        /* 有波形、只是 Z 算不出来:照打日志 */
     } else {
         adc_report_failure("扫压");
     }
 
-    for (path = 0u; path < 3u; ++path) {
-        if ((s_sweep_mask & (1u << path)) == 0u) {
-            continue;
-        }
-        /* 🔴 `model_values_valid = 0` —— 告诉界面"Cp/D 不是模型值、也不是真值,
-         *    别拿去画"。Cs 是真的(幅值比),`valid` 由它是否 > 0 决定
-         *    (`UI_Demo_UpdateSweepPoint` 内部会判),所以曲线照画。 */
+    /* 🔴 **只填 `s_sweep_leg` 这一路。**
+     *    原文是 `for (path = 0..2)` 把**同一份读数**写进 mask 里每一条 ——
+     *    因为那时三条"回路"在硬件上根本是同一个回路(继电器从不切换)。
+     *    现在每条腿各切各的继电器、各采各的,Z 各不相同 ⇒ 再那么填就是编数据。
+     *
+     * `model_values_valid = z_valid` —— 这个标志位在 `ui_demo.c:944/949` 是
+     *    **Cp / D 两条曲线画不画的闸**,与"是不是模型值"无关。有真 Z 就画。 */
+    if (path < 3u) {
         UI_Demo_UpdateSweepPoint(path, index, s_sweep_total, volts,
-                                 valid ? s_pair.cs_pf : 0.0f,
-                                 0.0f, 0.0f, 0u,
+                                 (valid && s_pair.z_valid) ? (float)s_pair.z.cs_pf : 0.0f,
+                                 (valid && s_pair.z_valid) ? (float)s_pair.z.cp_pf : 0.0f,
+                                 (valid && s_pair.z_valid) ? (float)s_pair.z.d     : 0.0f,
+                                 s_pair.z_valid,
                                  bias_text, cap_text, valid);
     }
 
     /* 「扫压波形」页(kind 1)按既有设计是**每步一个点**的电压/电流包络,
      * 不是 250 点原始波形(那是「单点波形」页的形态)。 */
     UI_Demo_UpdateWaveformPoint(UI_DEMO_WAVE_SWEEP, index, s_sweep_total,
-                                volts, valid ? s_pair.cur_ma : 0.0f, bias_text);
+                                volts,
+                                (valid && s_pair.z_valid) ? (float)s_pair.z.cur_ma : 0.0f,
+                                bias_text);
 
     UI_Demo_RefreshResultViews();
+}
+
+/** @brief 起跑**一条腿**:切它的继电器 → 开它的曲线。
+ *
+ * 🔴 **切换点在这里而不是按键回调里** —— `RelayView_ApplyPath()` 最坏阻塞
+ *    ~400 ms(两次 200 ms 超时)。放进触摸回调会让整个界面卡住;
+ *    而这里本来就被 `AdcSample_CapturePair()` 阻塞(采集 + 两次解调),
+ *    多这一次不改变既有形态。单点测量的三腿序列同理,见 `DisplayProtocol_Process()`。
+ *
+ * ⚠️ **切失败不中止扫压** —— 继电器没切过去,那这条腿的曲线是**别条腿的数据**,
+ *    但它仍然是一条自洽的曲线,而中止会把前一条腿已经跑出来的结果也丢掉。
+ *    所以:打警告、继续跑。判据在 L1/L2(顶栏跟着变),不靠这里兜底。 */
+static void sweep_begin_leg(uint32_t leg)
+{
+    s_sweep_leg = leg;
+
+    printf("[proto] 扫压第 %u 腿:%s —— 先切继电器\n",
+           (unsigned)(leg + 1u), path_name(leg));
+    if (!RelayView_ApplyPath(leg)) {
+        printf("[proto] ⚠️ %s 回路切换未确认 —— 本腿曲线可能是上一条腿的数据。\n"
+               "        核实:另开一个 SSH 跑 `sudo -E python3 tools/relay_hold.py --watch`\n",
+               path_name(leg));
+    }
+
+    UI_Demo_BeginSweep(leg, s_sweep_total, (s_sweep_mask == 0x07u) ? 1u : 0u);
+    /* 🆕 「扫压波形」页要开一张新图 —— `UI_Demo_BeginSweep()` 只管扫压曲线,
+     *    不碰 `g_result_wave[]`(那是结果页那两页的缓存)。不调这句的话,
+     *    上一轮的点会留在图上,新曲线从中间接上去。 */
+    UI_Demo_BeginWaveform(UI_DEMO_WAVE_SWEEP, s_sweep_total);
 }
 
 /** @param stop_tenths 界面给的终止电压,单位 0.1 V(`g_ui_sweep_end_tenths`) */
@@ -706,33 +825,48 @@ static void sweep_start(uint32_t mask, uint32_t stop_tenths)
     s_sweep_next_ms    = cv_millis();       /* 第一点立刻发,不等一个驻留 */
 
     UI_Demo_ClearSweep(3u);                 /* 3 ≥ 3 = 清全部三路 */
-    UI_Demo_BeginSweep(first, s_sweep_total, (mask == 0x07u) ? 1u : 0u);
-    /* 🆕 「扫压波形」页要开一张新图 —— `UI_Demo_BeginSweep()` 只管扫压曲线,
-     *    不碰 `g_result_wave[]`(那是结果页那两页的缓存)。不调这句的话,
-     *    上一轮的点会留在图上,新曲线从中间接上去。 */
-    UI_Demo_BeginWaveform(UI_DEMO_WAVE_SWEEP, s_sweep_total);
+    sweep_begin_leg(first);                 /* ← 切继电器 + 开第一条腿的曲线 */
 
-    printf("[proto] 扫压开始:%s,%.2f V → %.2f V,%u 点,每点 %u ms\n"
-           "        Cs 取**真实 ADC 数据**的幅值比(未标定);Cp/D 无相位,不填\n",
+    printf("[proto] 扫压开始:%s,%.2f V → %.2f V,%u 点/腿,每点 %u ms\n"
+           "        %s**逐腿**切换继电器,每条腿各测各的。\n"
+           "        读数:Cs/Cp/D 由同一个复数 Z 出(未标定)\n",
            (mask == 0x07u) ? "CISS+COSS+CRSS" : path_name(first),
            (double)SWEEP_START_VOLTS, (double)stop_volts,
-           (unsigned)s_sweep_total, (unsigned)s_dwell_ms);
+           (unsigned)s_sweep_total, (unsigned)s_dwell_ms,
+           (mask == 0x07u) ? "三条腿" : "一条腿");
 }
 
 static void sweep_finish(void)
 {
+    uint32_t next = s_sweep_leg + 1u;
+
+    /* 🔴 **多腿:这一条跑完接着跑下一条,而不是收尾。**
+     *    正文里的"扫压"是三条曲线各扫各的,一次任务要跑三遍全电压范围。
+     *    原文在这里直接 `inspection_ready` 收尾 ⇒ 点了"全部"也只出一路。 */
+    while ((next < 3u) && ((s_sweep_mask & (1u << next)) == 0u)) {
+        next++;
+    }
+    if (next < 3u) {
+        printf("[proto] %s 腿跑完(%u 点),接着跑 %s\n",
+               path_name(s_sweep_leg), (unsigned)s_sweep_index, path_name(next));
+        s_sweep_index   = 0u;
+        s_sweep_next_ms = cv_millis();      /* 下一条腿第一点立刻发 */
+        sweep_begin_leg(next);
+        return;                             /* ⛔ 不置 inspection_ready —— 还没跑完 */
+    }
+
     s_sweep_active = 0u;
     UI_Demo_SetSweepInspectionReady();
     UI_Demo_SetStatusText(s_demo_enabled ?
         "状态:扫压结束(演示读数)" :
-        "状态:扫压结束(Cs 未标定)");
-    printf("[proto] 扫压结束:%u 点已下发到 DAC\n", (unsigned)s_sweep_index);
+        "状态:扫压结束(Cs/Cp/D 未标定)");
+    printf("[proto] 扫压结束:%s,共 %u 点已下发到 DAC\n",
+           path_name(s_sweep_leg), (unsigned)s_sweep_index);
 }
 
 /** @brief 下发一个扫压点。由 `DisplayProtocol_Process()` 按驻留时间调。 */
 static void sweep_step(void)
 {
-    uint32_t path;
     float    voltage;
     char     bias_text[16];
     char     cap_text[16];
@@ -762,17 +896,17 @@ static void sweep_step(void)
 
     (void)snprintf(bias_text, sizeof(bias_text), "%.2f", (double)voltage);
 
-    for (path = 0u; path < 3u; ++path) {
+    /* 🔴 **只推进 `s_sweep_leg` 这一路**(原文 `for (path = 0..2)` 给每条置位腿
+     *    都补一个点 —— 那是在"三条回路其实是同一个回路"的前提下成立的)。
+     *    现在腿与腿之间靠 `sweep_finish()` 串起来,同一时刻只有一条腿在跑。 */
+    {
+        uint32_t path = s_sweep_leg;
         float    cs = 0.0f;
         float    cp = 0.0f;
         float    d  = 0.0f;
         uint32_t model_valid = 0u;
         uint32_t valid       = 0u;
         const char *cap = "--";
-
-        if ((s_sweep_mask & (1u << path)) == 0u) {
-            continue;
-        }
 
         if (s_demo_enabled) {
             cs = demo_capacitance(path, voltage);
@@ -786,7 +920,9 @@ static void sweep_step(void)
 
         /* valid = 0 时 ui_demo.c 会把这个点记成无效:进度条照走、
            曲线不画、"Vd=" 那一栏显示真实偏压并缀上「无效」。
-           这就是"偏压真走了、电容还没测"的正确形态。 */
+           这就是"偏压真走了、电容还没测"的正确形态。
+           ⚠️ 这里**不填读数** —— 读数由 `sweep_measure_point()` 在**下一个点
+              开始之前**补上(偏压稳定了整整一个驻留时间才采,见该函数头)。 */
         UI_Demo_UpdateSweepPoint(path, s_sweep_index, s_sweep_total,
                                  voltage, cs, cp, d, model_valid,
                                  bias_text, cap, valid);
@@ -845,10 +981,13 @@ void DisplayProtocol_Init(void)
     s_point_path        = 0u;
     s_point_volts_x10   = 0u;
     s_point_all         = 0u;
+    s_point_leg         = 0u;
+    s_point_leg_n       = 1u;
+    s_sweep_leg         = 0u;
+    s_pair_path         = 0u;
     s_adc_points        = 0u;
     s_adc_fail          = 0u;
     s_adc_notice        = 0;
-    s_cpd_notice        = 0;
     (void)memset(&s_pair, 0, sizeof(s_pair));
 
     env = getenv("CV_UI_DEMO");
@@ -894,7 +1033,7 @@ void DisplayProtocol_Init(void)
                "        ⛔ 不得作为任何测量结论的依据。\n"
                "        关闭:不带 CV_UI_DEMO 重启。\n");
     } else {
-        UI_Demo_SetStatusText("状态:就绪(Cs 取自 ADC,未标定)");
+        UI_Demo_SetStatusText("状态:就绪(Cs/Cp/D 取自 ADC,未标定)");
     }
 
     /* ⚠️ 激励那一项**从 MeasureConfig 读回**,不照抄常量 ——
@@ -903,9 +1042,9 @@ void DisplayProtocol_Init(void)
            "        激励 = %u Hz(0x80 = 0x%05X);采样率/相位明细见上面 [mc] 那几行\n"
            "        偏压 = 0.0 V(0x14 = 0x%05X)\n"
            "        扫压驻留 = %u ms(可用 CV_SWEEP_DWELL_MS 覆盖)\n"
-           "        回路/档位:0x18/0x1C/0x04 **只读回显**,C 界面不写"
-           "(写入权归 Python 侧);\n"
-           "           Cs 走真实 ADC 采样(adc_sample.c),未标定,Cp/D 因无相位不填\n",
+           "        🟢 回路:0x1C **本进程是唯一写入方**(点测量项目才切,见 relay_view.c);\n"
+           "           档位:0x18 仍只读回显 —— 本轮不改挡位,由复位值决定(标称 B = 100 Ω)。\n"
+           "           Cs/Cp/D 由同一个复数 Z 出(Z = R0·(VH−VL)/VL,未标定)\n",
            (unsigned)MeasureConfig_GetDdsHz(),
            (unsigned)cv_dds_hz_to_code(MeasureConfig_GetDdsHz()),
            (unsigned)cv_bias_tenths_to_code(0u),
@@ -923,10 +1062,48 @@ void DisplayProtocol_Process(void)
 
     /* ---- 单点测量:偏压稳定了再采 ----
      * 🔴 必须挂在下面那句 `if (!s_sweep_active) return;` **之前** ——
-     *    非扫压期间才是单点测量的主场景,放到后面等于永远不执行。 */
+     *    非扫压期间才是单点测量的主场景,放到后面等于永远不执行。
+     *
+     * 🆕 **2026-10-14:继电器切换挪到这里,不放在按键回调。**
+     *    `RelayView_ApplyPath()` 最坏阻塞 ~400 ms(两次 200 ms 超时),
+     *    放进触摸回调会让界面卡住;而这一支本来就要被 `AdcSample_CapturePair()`
+     *    阻塞(采集 + 两次解调),多这一次不改变既有形态。
+     *
+     * 「全部」的三腿序列就在这里推进:每条腿到点 → 切它的继电器 → 采 + 填它那张卡
+     * → 还有下一腿就把 due 推后一个驻留、`pending` 重新置起。 */
     if (s_point_pending && ((int32_t)(cv_millis() - s_point_due_ms) >= 0)) {
         s_point_pending = 0u;
-        point_measure();
+
+        if (s_point_all) {
+            /* ① 切当前腿(幂等:已经是这一路就直接返回,见 `RelayView_ApplyCode()`) */
+            if (!RelayView_ApplyPath(s_point_leg)) {
+                printf("[proto] ⚠️ 三腿点测:第 %u 腿(%s)切换未确认 —— "
+                       "该卡填出来的可能是上一条腿的数据,请核对顶栏「回路:」\n",
+                       (unsigned)(s_point_leg + 1u), path_name(s_point_leg));
+            }
+            s_point_path = s_point_leg;
+
+            /* ② 采 + 只填第 `s_point_leg` 张卡(`point_measure()` 内按 s_point_path 分支) */
+            point_measure();
+
+            /* ③ 还有下一腿 → 推到下一个驻留后,不立刻采 */
+            s_point_leg++;
+            if (s_point_leg < s_point_leg_n) {
+                s_point_due_ms  = cv_millis() + s_dwell_ms;
+                s_point_pending = 1u;
+            } else {
+                printf("[proto] 三腿点测完成(%u 条腿,每条各切各的继电器)\n",
+                       (unsigned)s_point_leg_n);
+            }
+        } else {
+            /* 单路(含 RG):先切,再采 */
+            if (!RelayView_ApplyPath(s_point_leg)) {
+                printf("[proto] ⚠️ 点测 %s:切换未确认 —— 填入的读数可能是上一条腿的\n",
+                       path_name(s_point_leg));
+            }
+            s_point_path = s_point_leg;
+            point_measure();
+        }
     }
 
     if (!s_sweep_active) {
@@ -960,8 +1137,14 @@ void DisplayProtocol_Process(void)
  *      `0x80` 激励      → 1 MHz
  *      `0x88` 采样率    → DIV=2 → 65 MSPS(2026-10-08 统一固定)
  *      `0x88` 相位      → 该分频比的窗口中心(−2)
+ *      `0x1C` 回路      → **ALL_OFF(0x10)**(🆕 2026-10-14:回安全态)
  *      扫压状态 / 曲线  → 清空
  *      常驻状态行       → 刷新(由 MeasureConfig 自己推)
+ *
+ * 🔴 **`0x1C` 只在复位时写 `ALL_OFF`,不复位到别的组合。** `ALL_OFF` = K5 单合,
+ *    是 `relay_ctrl.v` 自己的复位值 —— 即"这颗芯片认为的安全态"。
+ *    ⚠️ 提醒:`relay_ctrl.v:183-186` 自认「这两个复位值**我没有独立复核过物理安全性**」,
+ *       上电第一次请按 L1(听咔哒声 + 不接 DUT 先量电位)验,别把复位当已验证。
  *
  * 🔴 **`0x84`(CV_CTRL)不在复位范围内,一个字都不许写。**
  *    `[0]` 是 `dac_rst_n`,**放行权由 Python 独占**(`drivers/board.py::release_dac()`,
@@ -995,6 +1178,16 @@ bool DisplayProtocol_RequestReset(void)
     ok = MeasureConfig_RestoreDefaults();
     ok = ok && (err == 0u);
 
+    /* 🆕 回路回安全态。⚠️ 放在 `ClearAllResults()` **之前** —— 它最坏阻塞
+     *    ~400 ms,而这期间顶栏会由 `RelayView_Refresh(1)` 自己刷成 ALL_OFF;
+     *    顺序反过来只是"先清界面再等继电器",观感一样,但万一卡住,先清完
+     *    至少界面是干净的。 */
+    if (!RelayView_ApplyCode(CV_RELAY_ALL_OFF)) {
+        printf("[proto] ⚠️ 复位:回路未能切回 ALL_OFF —— 硬件仍停在原组合。\n"
+               "        这不是「复位失败」:偏压/激励/采样率都回默认了,"
+               "只有继电器没确认。手动兜底:sudo -E python3 tools/relay_hold.py --code 0x10\n");
+    }
+
     UI_Demo_ClearSweep(3u);
     UI_Demo_ClearAllResults();
     /* 🆕 结果页那两张「调试曲线」也得清 —— `ClearAllResults()` 只管读数卡片
@@ -1018,22 +1211,43 @@ bool DisplayProtocol_RequestReset(void)
     return ok;
 }
 
+/**
+ * @brief 「测量项目」按钮 —— **这一支现在真的切继电器**(用户 2026-10-14 的问题就是它)。
+ *
+ * 🔴 **原文是「只读回读,未改硬件」**,根因见 `relay_view.c` 文件头那张表:
+ *    PL 的 `relay_ctrl.v` 早就写好了,`drivers/relay.py` 也实测过,但
+ *    **Python 侧零调用方、C 侧只读** ⇒ 硬件永远停在 `ALL_OFF`。按钮只换了高亮颜色。
+ *
+ * 顶栏那一栏仍然归 `RelayView_Refresh()` 管,显示的永远是**硬件现在在哪路**
+ * (回读 `0x1C`);按钮高亮(`g_ui_single_path`)表示「我**要**测哪路」——
+ * 两者本来是两件事,分开才诚实。切换**成功**时它们自然一致;失败时不一致,
+ * 那正是要看见的状态(见下面 printf)。
+ *
+ * @param path 0=CISS 1=COSS 2=CRSS 3=RG(**都真的切**)
+ *             4=「全部」→ 不在这里切,见 `RelayView_ApplyPath()` 的说明
+ * @return 切换是否确认成功;`path == 4` 恒 true(它本来就不该在这里切)
+ */
 bool DisplayProtocol_RequestPath(uint32_t path)
 {
     s_cmd_total++;
     s_path_cmds++;
 
-    /* 🔴 **不再假装切换。** 这里以前调 `UI_Demo_SetActualPath(path_name(path))`,
-     *    把顶栏写成用户点的那一路 —— 而硬件根本没动,顶栏于是从"回显"变成
-     *    "许诺"。现在顶栏那一栏归 `RelayView_Refresh()` 管,显示的永远是
-     *    **硬件现在在哪路**(回读 0x1C);按钮高亮(`g_ui_single_path`)仍旧表示
-     *    「我**要**测哪路」—— 两者本来就是两件事,分开才诚实。
-     *
-     *    继电器寄存器的写入权在 Python 侧(0x1C/0x18),C 界面只读。 */
-    (void)RelayView_Refresh(1);             /* force:立刻读一次,别等节流 */
+    (void)RelayView_Refresh(1);             /* force:先把真值读上来打底 */
 
-    printf("[proto] 回路按钮 → %s:只读回读,未改硬件(0x1C/0x18 写入权归 Python 侧)\n",
-           path_name(path));
+    if (path > 3u) {
+        printf("[proto] 回路按钮 → 全部:**不在这里切**。"
+               "「全部」是「三条腿各测一次」的编排,\n"
+               "        切换发生在每条腿**测量开始时**(点测见 Process(),扫压见 sweep_begin_leg())\n");
+        return true;
+    }
+
+    if (RelayView_ApplyPath(path)) {
+        printf("[proto] 回路按钮 → %s:已切换并回读确认\n", path_name(path));
+    } else {
+        printf("[proto] ⚠️ 回路按钮 → %s:切换**未确认** —— 顶栏显示的是硬件真值(可能还是旧回路)。\n"
+               "        另开 SSH 核对:sudo -E python3 tools/relay_hold.py --watch\n",
+               path_name(path));
+    }
     return true;
 }
 
@@ -1068,14 +1282,21 @@ bool DisplayProtocol_RequestPoint(uint32_t path, uint32_t bias_tenths)
     bias_apply((float)bias_tenths / 10.0f);
 
     /* 🆕 排一次采集。**不当场采** —— 偏压(尤其高压级)要时间稳定,
-     *    交给 `Process()` 到点再采。见 `point_measure()` 的说明。 */
+     *    交给 `Process()` 到点再采。见 `point_measure()` 的说明。
+     *    🔴 **继电器也交给 `Process()` 到点时切**(2026-10-14):这里只记下"要哪路",
+     *       切换最坏阻塞 ~400 ms,放回调里会让触摸卡住(见 `sweep_begin_leg()` 的说明)。 */
+    if (path > 3u) {
+        path = 0u;                          /* 越界收敛到 CISS,不崩 */
+    }
     s_point_path      = path;
     s_point_volts_x10 = bias_tenths;
     s_point_all       = 0u;
+    s_point_leg       = path;
+    s_point_leg_n     = 1u;
     s_point_due_ms    = cv_millis() + s_dwell_ms;
     s_point_pending   = 1u;
 
-    printf("[proto] 点测 %s @ %.2f V:偏压已下发,%u ms 后采一次(波形进结果页)\n",
+    printf("[proto] 点测 %s @ %.2f V:偏压已下发,%u ms 后**切回路再采一次**(波形进结果页)\n",
            path_name(path), (double)s_bias_volts, (unsigned)s_dwell_ms);
     return true;
 }
@@ -1090,16 +1311,23 @@ bool DisplayProtocol_RequestPointAll(uint32_t bias_tenths)
 
     bias_apply((float)bias_tenths / 10.0f);
 
-    s_point_path      = 0u;             /* 三条一起填,path 不参与分支 */
+    /* 🔴 **「全部」= 三条腿各切各的继电器、各采各的一次**(2026-10-14 改)。
+     *    原文是"一份读数填三张卡" —— 那是在"继电器从不切换、三条回路
+     *    在硬件上本就是同一个回路"的前提下成立的。现在继电器真的会切,
+     *    这个前提没了,再共用一份读数就是**编数据**。
+     *
+     *    编排在 `Process()`:每条腿到点时先 `RelayView_ApplyPath(leg)` 再采,
+     *    采完若还有下一腿就把 due 往后推一个驻留、`pending` 重新置起。 */
+    s_point_path      = 0u;             /* all 模式下 path 不参与分支 */
     s_point_volts_x10 = bias_tenths;
     s_point_all       = 1u;
+    s_point_leg       = 0u;
+    s_point_leg_n     = 3u;
     s_point_due_ms    = cv_millis() + s_dwell_ms;
     s_point_pending   = 1u;
 
-    /* 三条回路共用同一个偏压 —— C 界面不切继电器组合,
-     * 挨着写三次同一个码没有意义 */
     printf("[proto] 点测 CISS+COSS+CRSS @ %.2f V:偏压已下发,"
-           "%u ms 后采一次(三条卡片共用同一份真实读数)\n",
+           "%u ms 后开始**三条腿依次测**(每条腿各切继电器,各填各的卡)\n",
            (double)s_bias_volts, (unsigned)s_dwell_ms);
     return true;
 }
@@ -1124,10 +1352,34 @@ bool DisplayProtocol_RequestRgThenSweepAll(uint32_t stop_tenths)
     s_cmd_total++;
     s_readback_pending++;
 
-    /* 「先测 RG,再三路扫压」—— RG 要继电器切到栅极电阻那条路,而 C 界面
-     * **不写**继电器寄存器(只读)⇒ 这条路切不过去。
-     * 照实说,然后照常把三路扫压跑起来。 */
-    printf("[proto] 先测 RG:界面不切继电器组合,跳过;**只跑三路扫压**\n");
+    /* 「先测 RG,再三路扫压」—— 2026-10-14 起**真的先把 RG 测了**。
+     * 原文是「界面不切继电器组合,跳过」,那是在写入权归 Python 的时期写的;
+     * 现在 C 侧是唯一写入方,这条路切得过去。 */
+    printf("[proto] 先测 RG:切 RG 回路 → 采一次 → 填电阻卡,然后跑三路扫压\n");
+
+    if (!RelayView_ApplyPath(3u /* RG */)) {
+        printf("[proto] ⚠️ RG 回路切换未确认 —— 下面的 RG 读数不可信。\n"
+               "        核实:sudo -E python3 tools/relay_hold.py --watch\n");
+    }
+    s_pair_path = 3u;
+
+    /* ⚠️ **当场采**(不等驻留):偏压此刻是用户当前设的那个,不是扫压的起点,
+     *    而 RG 这一项本身就只是个"顺带测一下"。真要精确,RG 应当和别的
+     *    测量项目一样走 `s_point_pending` 那条排程 —— 记进文档作为后续项,
+     *    本轮不为此改结构(改完这个函数就要拆成两段状态机,收益不值)。 */
+    if (adc_capture_pair() && s_pair.z_valid) {
+        char rg_text[24];
+        double rg = s_pair.z.z_re_ohm + 0.7;
+
+        (void)snprintf(rg_text, sizeof(rg_text), "%.2f Ω", rg);
+        UI_Demo_UpdateResistance(rg_text, 1u);
+        printf("[proto] RG = Re Z + 0.7 = %.4f + 0.7 = %.4f Ω(R0 = %.0f Ω,挡位 0x%X)\n",
+               s_pair.z.z_re_ohm, rg, s_pair.r0_ohm, (unsigned)s_pair.gear);
+    } else {
+        UI_Demo_UpdateResistance("--", 0u);
+        printf("[proto] RG 读数拿不到(Z 未算出)—— 电阻卡留 --,扫压照跑\n");
+    }
+
     sweep_start(0x07u, stop_tenths);
     return true;
 }

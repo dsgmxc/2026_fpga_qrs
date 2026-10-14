@@ -323,7 +323,7 @@ module cv_sys #(
     // ADC 采集(2026-10-06 加)—— 同样必须在从机例化【之前】声明
     wire [31:0] cfg_adc_cfg;        // 0x88 [7:0]DIV [15:8]PH_OFF [16]CONT [17]OEB_N [18]PDN
     wire        cfg_adc_go;         // 0x8C[0] 写 → 1 拍脉冲
-    wire [31:0] cfg_adc_buf_idx;    // 0x94 [12:0] 缓冲读索引(2026-10-08 12→13 位)
+    wire [31:0] cfg_adc_buf_idx;    // 0x94 [13:0] 缓冲读索引(0810:12→13 位 / 1014:13→14 位)
     wire [31:0] sts_adc_sts;        // 0x90 [0]locked [1]done [2]busy [3]otr
     wire [31:0] sts_adc_buf_data;   // 0x98 [11:0]采样 [12]OTR
 
@@ -920,10 +920,12 @@ module cv_sys #(
         .sts_otr         (sts_adc_sts[3]     ),
 
         // 缓冲读口 → 从机 0x94/0x98
-        //   ⚠️ 13 位对应 BUF_DEPTH=8192。⚠️ 单改这一行不够 ——
-        //      cv_axi_lite_slave.v 的写掩码也必须放到 32'h0000_1FFF,
-        //      否则索引 ≥4096 被静默截断成小数,读到另一个点且不报错。
-        .rd_idx          (cfg_adc_buf_idx[12:0]),
+        //   ⚠️ 14 位对应 BUF_DEPTH=16384(A/B 交织:偶地址=A、奇地址=B)。
+        //      2026-10-08 是 13 位/8192,2026-10-14 加倍。
+        //   ⚠️ 单改这一行不够 —— cv_axi_lite_slave.v 的写掩码也必须
+        //      放到 32'h0000_3FFF,否则索引 ≥16384 被静默截断成小数,
+        //      读到另一个点且不报错。
+        .rd_idx          (cfg_adc_buf_idx[13:0]),
         .rd_data         (sts_adc_buf_data[11:0]),
         .rd_otr          (sts_adc_buf_data[12]  )
     );

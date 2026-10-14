@@ -27,14 +27,29 @@
  *   而且两者都贴着窗沿,不是中心。**故本模块按"窗口中心"取刻度**
  *   (@ref AdcSample_PortATick / @ref AdcSample_PortBTick),不照抄 −P/2 与 0。
  *
- *   🔴 **一次 GO 只锁存一个 tick** ⇒ "两路"是靠**两次采集**拿到的:
- *      先 PushPhase(A 窗中心) 采 INA,再 PushPhase(B 窗中心) 采 INB。
- *      **不需要改 RTL、不需要重下位流。** 代价见下面「两路的相位不相关」。
+ *   🔴 **一次 GO 同时收 A 和 B(2026-10-14 改)。** 原先 `adc_capture.v` 的
+ *      `samp_en = (tick == ph_off)` **每个 ADC 周期只命中一个 tick**,同步的那
+ *      一对里 B 被扔掉 ⇒ 要 B 只能**再发一次 GO**(隔着一万多个转换周期)。
+ *      现在 RTL 在 A 窗、B 窗**各命中一次**,写成 `A₀ B₀ A₁ B₁ …`:
  *
- *   🔴 **两路的相位不相关**:A、B 是两次独立采集,各自的 GO 时刻任意,
- *      所以**两路之间的相位差是随机的**。⇒ 只能比**幅值**,不能算阻抗的相位。
- *      本模块因此只出幅值,`Cs` 按"被测件是纯电容"来算(见 @ref AdcSample_CsPf),
- *      **不出 Cp / D** —— 那两个需要相位,现在算出来是噪声。
+ *         地址 2k   → A_k(INA)      地址 2k+1 → B_k(INB)
+ *
+ *      ⛔ **A 在偶地址、B 在奇地址**,与"哪个先命中"无关(RTL 用两个独立写
+ *         指针 —— 折回之后 P=4 这类档位是 B 先命中,用 `wr_ptr+1` 会静默错位)。
+ *
+ *   🔴 **两路现在同相位了。** A_k 与 B_k 来自**同一个转换周期**(AD9238 的两路
+ *      本来就是同一个转换沿上同时采的两个 S/H,那 12 位总线只是把它们时分
+ *      复用送出)。本模块**不在两路之间加任何时间改正**,解调参考对两路是
+ *      同一条(`cos(2πMk/L)`,`k` 从 0 起)⇒ 两路解出的 I/Q **天然在同一相位
+ *      参考系里**,`atan2` 之差就是被测件的真实相移。
+ *
+ *      ⇒ 于是算得出**复数阻抗**,`Cs` 取 `−1/(ω·Im Z)`(不再需要"被测件是纯
+ *        电容"那个近似)、`Cp` 与 `D` 也出得来。见 @ref AdcSample_Impedance。
+ *
+ *      ⚠️ **仍未验证的一条,不要当成已证**:「一个 adc_clk 周期内先后送出的
+ *         这两个字属于**同一个转换**」P=2 有实测支持(`LLM-045` §G),
+ *         **其余 P 值未逐一验证**。当前三档激励全部跑在 P=2 上,换 DIV 前
+ *         请先按 `docs/acquisition_demod.md` 把窗口重扫一遍。
  *
  *   🔴 **P=2(65 MHz)这一档 2026-10-07 实测可用,原"接不出波形"的判断已作废。**
  *      换线成 2×9 排线后,`PH_OFF=0` 直接采到干净正弦(p-p=42,250 点里
@@ -44,6 +59,7 @@
  *      故 A 窗 = `{−1}`、B 窗 = `{0}`,**没有余量可微调** ——
  *      `cv_adc_phase_center()` 必须折回才落在 `{−1}`(不折回算出来是 +1,采不到),
  *      `MeasureConfig_NudgePhase()` 在这一档会一律拒绝(窗 [−1,−1] 无处可挪)。
+ *      ⚠️ B 的刻度现在**由硬件推**(`B = A + P/2` 折回),软件只推 A 那一个。
  *
  * 【寄存器归属】
  *   `0x88` 由 `measure_config.c` **独占写入**。本模块改采样刻度一律走
@@ -61,13 +77,17 @@
 extern "C" {
 #endif
 
-/** 缓冲深度(与 `adc_capture.v` 的 `BUF_DEPTH` 一致)。采集一次总是收满这么多点。
+/** 缓冲**字数**(与 `adc_capture.v` 的 `BUF_DEPTH` 一致)= A/B **交织**的总长。
  *
- *  🔴 **2026-10-08 由 4096 改 8192。** 理由:采样率统一固定 **65 MSPS** 后,
- *     最低档激励 **10 kHz** 的解调要求窗覆盖整数个激励周期,
- *     `gcd(65e6, 10e3) = 1e4` ⇒ 最简分母 `q = 6500` ⇒ **窗长至少 6500 点**,
- *     4096 装不下 ⇒ 10 kHz 在 65 MSPS 下原本是**数学上不成立**的组合。
- *     改到 8192 后各档激励(10k/100k/1M)全部落在合法窗长上:
+ *  🔴 **2026-10-14 由 8192 改 16384。** 因为现在一次 GO 同时收两路
+ *     (见文件头),每个 ADC 周期写**两个字** ⇒ 要保住"每通道 8192 点",
+ *     总长就得翻倍。
+ *
+ *  🔴 **为什么必须保住每通道 8192 而不是退到 4096**:采样率统一固定
+ *     **65 MSPS** 后,最低档激励 **10 kHz** 的解调要求窗覆盖整数个激励周期,
+ *     `gcd(65e6, 10e3) = 1e4` ⇒ 最简分母 `q = 6500` ⇒ **窗长至少 6500 点**。
+ *     每通道 4096 装不下 ⇒ 10 kHz 在 65 MSPS 下**数学上不成立**。
+ *     每通道 8192 时各档激励(10k/100k/1M)全部落在合法窗长上:
  *
  *     | 激励 | q | 窗长 L | 窗内整周期 m | 点/周期 |
  *     |---|---|---|---|---|
@@ -78,16 +98,25 @@ extern "C" {
  *     (10 MHz 数学上也放得下 —— `q = 13`、`L = 8190` —— 但 AD9833 的
  *      MCLK 焊死 25 MHz,**物理上输出不了**,2026-10-08 已从界面删除。)
  *
- *  ⚠️ 连带必改:`adc_capture.v` 的 `BUF_DEPTH`/`BUF_AW`、
- *     `cv_axi_lite_slave.v` 的写掩码 `32'h0000_1FFF`(不改掩码 ⇒ 索引 ≥4096
- *     被静默截断,读到的是**另一个点**,不报错)。
+ *  ⚠️ **连带必改(四处,漏一处就静默出错)**:
+ *     ① `adc_capture.v` 的 `BUF_DEPTH` / `BUF_AW`;
+ *     ② `cv_axi_lite_slave.v` 的写掩码 `32'h0000_3FFF`(不改掩码 ⇒ 索引
+ *        ≥16384 被静默截断,读到的是**另一个点**,不报错);
+ *     ③ `cv_sys.v` 的 `.rd_idx (cfg_adc_buf_idx[13:0])`;
+ *     ④ **本文件与 @ref ADC_SAMPLE_POINTS**。
+ *     ⇒ 判据:三个 RTL 处的数与本文件**都**等于 16384 / 8192。
  */
-#define ADC_SAMPLE_BUF_DEPTH   8192u
+#define ADC_SAMPLE_BUF_DEPTH   16384u
 
 /**
- * 每次读走的点数 = **整块缓冲**。
+ * **每通道**点数 = `ADC_SAMPLE_BUF_DEPTH / 2` = 8192。
  *
- * 🔴 **2026-10-08 由 250 改 8192,口径也变了。** 原文是
+ * ⚠️ 名字没变、**值也没变**(2026-10-08 起就是 8192),但**含义收窄了**:
+ *    以前它等于"整块缓冲",现在等于"交织缓冲里属于 A(或属于 B)的那一半"。
+ *    翻倍的是缓冲字数,不是解调窗长 —— 下面那张 `L = 6500/7800/8190`
+ *    的表**一个字都不用改**。
+ *
+ * 🔴 **2026-10-08 由 250 改 8192 的理由(仍然成立)**:原文是
  *    「不是 4096 —— 波形图上限 480,多读没地方放」,那个理由**已经不成立**:
  *    ① **解调要用满窗**:`AdcSample_Demodulate` 取的是 `≤ n` 的**最大** `q`
  *       整数倍 ⇒ `n` 越大窗越长、平均掉的噪声越多。各档
@@ -97,13 +126,13 @@ extern "C" {
  *       "几个激励周期的形状"而不是整窗 ⇒ 由 `pynq_protocol.c` 的
  *       `adc_feed_point_waveform()` **抽稀后再喂**,不再靠"少数点"来适配显示。
  *
- * ⚠️ 代价:一次采集 = 8192 写 `0x94` + 8192 读 `0x98` = 16384 次 AXI-Lite,
- *    量级 ~2.5 ms;相对 300 ms 的扫压驻留可忽略。**这是实测值,见验收记录。**
+ * ⚠️ 代价:一次采集 = 16384 写 `0x94` + 16384 读 `0x98` = 32768 次 AXI-Lite,
+ *    量级 ~5 ms(原 2.5 ms 的两倍);相对 300 ms 的扫压驻留仍可忽略。
  *
  * ⚠️ 上限由 @ref ADC_DEMOD_MAX_L 决定,改这里必须同时改那个(否则
  *    `build_table()` 直接失败,报「窗长 N 点,超出参考表上限 M」)。
  */
-#define ADC_SAMPLE_POINTS      ADC_SAMPLE_BUF_DEPTH
+#define ADC_SAMPLE_POINTS      (ADC_SAMPLE_BUF_DEPTH / 2u)
 
 /**
  * AD9238 满量程输入(差分,p-p,伏)。取 **2.0** —— AD9238 数据手册值。
@@ -121,8 +150,22 @@ extern "C" {
 #define ADC_SAMPLE_VFS_PP      2.0f
 
 /**
- * 跨阻放大器反馈电阻(Ω)。**未标定** —— 原理图上的标称值,不是测出来的。
- * 它的误差直接进 `Cs`,所以本模块输出的 Cs 只能当"相对形状"看。
+ * 跨阻放大器反馈电阻(Ω)。**未标定,而且 2026-10-14 起不再参与测量链。**
+ *
+ * 🔴 **它是个历史遗留的名字,不要再拿它折算电流。** 理由是一条链,不是一句判断:
+ *    ① 通道 B(INB)测的是**参考电阻 R0 两端的电压** `VL`
+ *       —— 前序 STM32 工程 `ad9238_capture.c:371` 逐字写着
+ *       「INA/A通道为VH,INB/B通道为VL」,而 `Z = R0·(VH−VL)/VL` 这个式子
+ *       **只有在 VL 就是 R0 上的电压时才成立**。若 B 前面真有跨阻放大器,
+ *       那个式子当场不成立 ⇒ 反证 B 前面没有 TIA。
+ *    ② 于是电流 `I = VL / R0`,而 **R0 就是挡位电阻**(10/100/1k/10k Ω,
+ *       见 @ref cv_range_ohms),**从 `0x18` 回读现算**,不是这里的常数。
+ *    ③ 本常数是 **1 kΩ**,而硬件复位挡位是 **B 挡 = 100 Ω** ⇒ 用它算电流
+ *       会**差 10 倍**。
+ *
+ * ⛔ **本轮不改它的数值** —— 改成 100 就变成"用猜测去替换另一个猜测"。
+ *    正确的做法是照夹具原理图确认(那需要用户手上的图纸)。本轮只把它
+ *    移出测量链、留在这里标注,见 `report/llm-log/LLM-062.md`。
  */
 #define ADC_SAMPLE_R_TIA       1000.0f
 
@@ -135,12 +178,30 @@ extern "C" {
 int32_t AdcSample_PortATick(uint32_t div);
 
 /**
- * @brief **port B(INB)** 时间槽的窗口中心 tick = `1.5 + P/4`。
+ * @brief **port B(INB)** 时间槽的窗口中心 tick = `1.5 + P/4`(软件独立推出的版本)。
  *
  * P=13 → **+5**(窗 `[+2,+7]`);已折回寄存器合法范围(见 `cv_adc_phase_center_b()`)。
  * ⛔ 不要拿 0 或 −P/2 代替 —— 见文件头那张窗口表。
+ *
+ * 🔴 **2026-10-14 起本函数不是权威,只作对照** —— 现在采 B 的刻度由**硬件**
+ *    按 @ref AdcSample_PortBTickHw 推,软件不再往 `0x88` 里写第二个刻度。
+ *    两者只在 **P 为奇数**时差一个 tick(窗宽 P/2,窗内不止一个合法刻度),
+ *    而当前三档激励全部跑在 P=2 上,那里两者都是 0。
  */
 int32_t AdcSample_PortBTick(uint32_t div);
+
+/**
+ * @brief **硬件实际用的** port B 刻度 = `A + P/2` 再折回(`adc_capture.v` 同一算式)。
+ *
+ * ⛔ **不要拿它去"修正"采到的相位** —— 两路是同一次转换采下来的,本来就
+ *    在同一个相位参考系里;再把 tick 差补进去等于插一个多余的软件时延。
+ *    它存在的唯一理由是**日志**:把"A tick / B tick"两个刻度打出来,
+ *    排障时才能判断"硬件那一版是不是还在数据窗里"。
+ *
+ * @param div    分频比 P
+ * @param tick_a 软件给 A 的刻度(通常 = @ref AdcSample_PortATick)
+ */
+int32_t AdcSample_PortBTickHw(uint32_t div, int32_t tick_a);
 
 /**
  * @brief 该 tick 是否落在 `0x88` 的**寄存器合法范围** `[−P/2, P−1−P/2]` 内。
@@ -151,30 +212,31 @@ int32_t AdcSample_PortBTick(uint32_t div);
 bool AdcSample_TickLegal(uint32_t div, int32_t tick);
 
 /**
- * @brief 采一次:改刻度 → GO → 等 done → 读 @p n 点 → **把刻度写回**。
+ * @brief **采一对**:改 A 刻度 → GO → 等 done → 读整块交织缓冲 → 拆成 A/B → **刻度写回**。
  *
  * 调用序列(顺序不能改,理由逐条见下):
  *   ① 等 `0x90.busy == 0`
  *      🔴 `adc_capture.v` 文件头明写:「改 P / PH_OFF 之前确认不在采集」。
  *         采集途中改会让 clk_base 域看到瞬时垃圾值。
- *   ② @ref MeasureConfig_PushPhase(ph_off)
+ *   ② @ref MeasureConfig_PushPhase(ph_off_A)
+ *      ⚠️ **只推 A 那一个刻度。** B 的刻度由 RTL 按 `A + P/2` 自推
+ *         (见 `adc_capture.v` 文件头 ④)—— 寄存器里只有一个 `PH_OFF` 字段,
+ *         推两个刻度就是"两个真相",迟早分叉。
  *   ③ 写 `0x8C = 1`(GO)
  *   ④ 等 `0x90.busy == 1` —— 确认这一拍 GO 真的落地了
  *   ⑤ 等 `0x90.done == 1` —— RTL 在 go_pulse 上**同时清 done**,
  *      所以这里等到的 done **必属本次采集**,不是上一次的残留。
- *   ⑥ 逐点写 `0x94` 索引、读 `0x98` 数据
+ *   ⑥ 逐字写 `0x94` 索引、读 `0x98` 数据(|@ref ADC_SAMPLE_BUF_DEPTH| 个字),
+ *      按**偶 = A / 奇 = B** 拆交织
  *   ⑦ @ref MeasureConfig_PopPhase() —— **失败路径也必须走到**
  *
- * @param ph_off   本次要用的采样刻度(见 @ref AdcSample_PortATick / @ref AdcSample_PortBTick)
- * @param n        要读的点数,上限 @ref ADC_SAMPLE_POINTS
- * @param out_code 长度 ≥ @p n,收 12 位采样码
- * @param out_otr  长度 ≥ @p n,收每点的 OTR 位;**可传 NULL**
- * @param out_otr_count 本次 OTR 置起的点数;**可传 NULL**
- * @return true = 读到了完整 @p n 点
+ * @param out_code_a 长度 ≥ @ref ADC_SAMPLE_POINTS,收 A(INA)12 位码
+ * @param out_code_b 长度 ≥ @ref ADC_SAMPLE_POINTS,收 B(INB)12 位码
+ * @param out_otr_count 本次 OTR 置起的字数(A+B 合计);**可传 NULL**
+ * @return true = 两路都读到了完整 @ref ADC_SAMPLE_POINTS 点
  */
-bool AdcSample_Capture(int32_t ph_off, uint32_t n,
-                       uint32_t *out_code, uint32_t *out_otr,
-                       uint32_t *out_otr_count);
+bool AdcSample_CapturePair(uint32_t *out_code_a, uint32_t *out_code_b,
+                           uint32_t *out_otr_count);
 
 /**
  * @brief 正交解调:算激励频率上的 I / Q / 幅值。
@@ -237,19 +299,58 @@ void AdcSample_LastWindow(uint32_t *out_l, uint32_t *out_m);
 float AdcSample_CodesToVolts(float codes);
 
 /**
- * @brief 幅值 → 串联等效电容(pF)。
+ * @brief 复数阻抗及其派生量(Cs / Cp / D)。
  *
- * `Cs = |I| / (2π·f_e·|V|)` —— **假设被测件是纯电容**。
- * 🔴 这个假设成立的前提是知道 V 与 I 的相位差,而两路是分两次采的、
- *    相位不相关 ⇒ 这里**只能用幅值比**,算出来的 Cs 不含真实损耗分量。
- *    如实标明"未标定"。
- *
- * @param v_exc_v 通道 A 的幅值(伏)
- * @param v_cur_v 通道 B 的幅值(伏,已过跨阻)
- * @param fe_hz   激励频率(Hz)
- * @return pF。@p v_exc_v 或 @p fe_hz 为 0 时返回 0。
+ * 出处 = 前序 STM32 工程 `ad9238_capture.c:371-403`(`z_re` 那段)与
+ * `periodic_measurement.c:549`(`Rg = Re(Z) + 0.7`)。
  */
-float AdcSample_CsPf(float v_exc_v, float v_cur_v, uint32_t fe_hz);
+typedef struct
+{
+    double z_re_ohm;    /* Re(Z) —— 等效串联电阻,含被测件的损耗 */
+    double z_im_ohm;    /* Im(Z) —— **容性时为负**               */
+    double cs_pf;       /* 串联等效电容 = −1/(ω·Im Z)            */
+    double cp_pf;       /* 并联等效电容 = −Im Z /(ω·|Z|²)        */
+    double d;           /* 损耗因数 D = tanδ = |Re Z / Im Z|     */
+    double cur_ma;      /* 流过被测件的电流 = |VL| / R0          */
+} AdcSampleZ;
+
+/**
+ * @brief 由两路的 I/Q 相量算复数阻抗 `Z = R0·(VH − VL)/VL`。
+ *
+ * 【为什么这个式子能用了】
+ *   原文(2026-10-10 之前)两路是**两次独立采集**,相位差随机 ⇒ 只能比幅值。
+ *   现在两路来自**同一次 GO、同一个转换周期** ⇒ 同一个相位参考系,
+ *   复数除法有意义。**本函数不在两路之间加任何时间改正**(加了才是错的)。
+ *
+ * 【为什么不需要知道满量程 `ADC_SAMPLE_VFS_PP`】
+ *   `Z = R0·(VH−VL)/VL` 里 VH 与 VL 各带同一个比例因子 `k`
+ *   (码→伏的换算对两路是同一个)⇒ `k` 在分子分母里**约掉**:
+ *       `R0·(kVH − kVL)/(kVL) = R0·(VH − VL)/VL`
+ *   ⇒ **未标定的 `ADC_SAMPLE_VFS_PP` 不再污染 Cs/Cp/D。** 这是本次改动
+ *     顺手拿到的性质,值得记一笔。
+ *   ⚠️ **前提是两路增益与相位一致**。A/B 两条路径若有增益差或附加相移,
+ *      那一部分会**原样进 Z** —— 那正是 OPEN/SHORT 校准(加分项 B8)要
+ *      消掉的东西,不是本函数能修的。
+ *
+ * 【公式】
+ *   记 `VH = (Ia, Qa)`、`VL = (Ib, Qb)`(单位都是 ADC 码,不必换算成伏),
+ *   `Vx = VH − VL = (Ia−Ib, Qa−Qb)`,`vb2 = Ib² + Qb²`:
+ *
+ *       z_re = R0·[(Ia−Ib)·Ib + (Qa−Qb)·Qb] / vb2
+ *       z_im = R0·[(Qa−Qb)·Ib − (Ia−Ib)·Qb] / vb2
+ *
+ *   与前序 `z_re = R0·((vx_re·vl_re) + (vx_im·vl_im))/denominator` 逐项一致
+ *   (`denominator = |VL|² = vb2`)。
+ *
+ * @param ia,qa  通道 A(INA = VH)的 I / Q,单位 ADC 码
+ * @param ib,qb  通道 B(INB = VL)的 I / Q,单位 ADC 码
+ * @param r0_ohm 参考电阻(**从 `0x18` 回读换算**,见 `cv_range_ohms()`);≤ 0 ⇒ 返回 false
+ * @param fe_hz  激励频率(Hz);0 ⇒ 返回 false
+ * @param out    输出;**不能为 NULL**
+ * @return true = 算出来了
+ */
+bool AdcSample_Impedance(float ia, float qa, float ib, float qb,
+                         double r0_ohm, uint32_t fe_hz, AdcSampleZ *out);
 
 /** @brief 最近一次失败的原因(静态字符串,永不为 NULL)。 */
 const char *AdcSample_LastError(void);

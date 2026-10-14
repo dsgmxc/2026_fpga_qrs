@@ -55,8 +55,12 @@ extern "C" {
 /* 继电器矩阵 + 档位选择(2026-10-10;源 = `src/python/cv_regs.py`)      */
 /*   ⚠️ 写 = 请求,读 = **已生效**值;非法请求被拒且状态不变,原因看      */
 /*      STATUS.err_code。                                              */
-/*   🔴 **C 界面本轮只读** —— 下面 4 个寄存器一个都不写,只读回显示。   */
-/*      写入权归 Python 侧,避免两个写入方。                            */
+/*   🟢 **写入权归 C 界面(2026-10-14 改)** —— `0x1C` 的唯一写入方是     */
+/*      `relay_view.c::RelayView_ApplyCode()`。原文写的是「C 界面本轮  */
+/*      只读,写入权归 Python 侧,避免两个写入方」,**那条约定没有兑现**:*/
+/*      `drivers/relay.py` 零调用方 ⇒ 硬件一直停在复位值。改动理由和    */
+/*      "为什么不是两个写入方"见 `relay_view.c` 的文件头。              */
+/*   ⚠️ `0x18`(挡位)**本轮仍不写** —— 复位值 B 挡 100 Ω,够用。        */
 /* ------------------------------------------------------------------ */
 #define CV_REG_RELAY_STATUS  0x04u   /* RO [0]busy [1]done [2]fault
                                         [15:8]err_code                      */
@@ -105,7 +109,7 @@ extern "C" {
 #define CV_REG_ADC_CTRL      0x8Cu   /* W  [0]GO —— ★ 命令,1 拍脉冲,读回恒 0 */
 #define CV_REG_ADC_STS       0x90u   /* RO [0]mmcm_locked [1]done [2]busy
                                         [3]otr_sticky                       */
-#define CV_REG_ADC_BUF_IDX   0x94u   /* RW [12:0] 采样缓冲读指针(8192 深)  */
+#define CV_REG_ADC_BUF_IDX   0x94u   /* RW [13:0] 采样缓冲读指针(16384 深) */
 #define CV_REG_ADC_BUF_DATA  0x98u   /* RO [11:0]sample [12]OTR            */
 
 /* 0x90 位域 */
@@ -129,6 +133,31 @@ extern "C" {
 /* 0x88 [16] CONT:1 = 连续采集,0 = 单次(等 PS 写 GO)。
  * 本项目用**单次** —— 采 8192 点置 done,PS 读完再发下一次,不抢 AXI 带宽。 */
 #define CV_ADC_CFG_CONT      0x10000u
+
+/**
+ * @brief `0x18` 挡位独热码 → 该挡的**参考电阻 R0**(Ω)。
+ *
+ * R0 就是 `Z = R0·(VH−VL)/VL` 里的那个 R0,也是"挡位"这个概念的物理内容:
+ * A/B/C/D 四挡 = 10 Ω / 100 Ω / 1 kΩ / 10 kΩ 四条换挡支路。
+ * 前序 STM32 工程 `ad9238_capture.c` 的 `reference_resistance_ohm` 是同一个量。
+ *
+ * 🔴 **必须从 `0x18` 回读再换算,不要在任何地方硬编码。** 当前复位值是
+ *    B 挡(100 Ω),但 `0x18` 是 RW —— 硬编码等于假设"挡位永远不会变",
+ *    而挡位一变,Rg / Cs / 电流三个数会**同时**错,且不报错。
+ *
+ * @return 挡位电阻(Ω);**非独热码返回 0**(哨兵,调用方必须当错误处理,
+ *         不要拿 0 去做除数 —— 那就是除零)
+ */
+static inline double cv_range_ohms(uint32_t range_sel)
+{
+    switch (range_sel & CV_RANGE_MASK) {
+    case CV_RANGE_A: return 10.0;
+    case CV_RANGE_B: return 100.0;
+    case CV_RANGE_C: return 1000.0;
+    case CV_RANGE_D: return 10000.0;
+    default:         return 0.0;
+    }
+}
 
 /* ------------------------------------------------------------------ */
 /* AD9238 采样率与相位                                                 */
@@ -207,6 +236,17 @@ static inline int32_t cv_adc_phase_center(uint32_t div)
  * ⚠️ 与 `cv_adc_phase_center()` **同一条舍入规则**(半远离零,
  *    整数算术,避开 Python 银行家舍入);`cv_regs.py` 侧**尚无 port B 对应物**,
  *    哪天 Python 也要用,记得一起补 —— 这里先留个明处,别让它悄悄分叉。
+ *
+ * 🔴 **2026-10-14 起本函数降级为「参考资料」—— 不再是权威,只留作对照。**
+ *    原因:`adc_capture.v` 现在**一次 GO 同时存 A/B**(B 的刻度由硬件按
+ *    `B = A + P/2` 自推),所以"B 该采哪个 tick"这件事**已经不由软件决定**了。
+ *    两者的差别只在 **P 为奇数**时:窗口宽 P/2 个 tick ⇒ 窗内**不止一个**
+ *    合法刻度,取哪个都在 B 的数据窗里,只是采样相位差一个 tick。
+ *      P=13 → 硬件取 +4,本函数给 +5(都在窗 [2,7] 内,都不算错)
+ *      P=2  → 两者都是 0 ✓(**当前三档激励只用 P=2**,见 CLAUDE.md §八)
+ *    ⛔ **不要拿本函数的返回值去"修正"硬件采到的相位** —— 那等于在已对齐的
+ *       两路之间又插一个软件时延。它现在的唯一用途是**排障时对照**:
+ *       "硬件那一版是不是还在窗里"。
  */
 static inline int32_t cv_adc_phase_center_b(uint32_t div)
 {

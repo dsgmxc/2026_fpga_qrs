@@ -41,10 +41,9 @@
 #define ADC_STS_OTR_MASK      0x8u
 
 /* 等待超时(ms)。`cv_millis()` 只有 1 ms 分辨力,所以这几个数要**明显大于**
- * 真实耗时,不然会把"正常但慢"判成超时。真实耗时量级:
- *   收满 8192 点:最快档(DIV=2,65 MSPS)= 126 µs;最慢档(DIV=130)= 8.2 ms
- *   最慢档(DIV=2 → 65 MHz)只要 63 µs
- * ⇒ done 给 200 ms 是 ~50 倍余量,不会误报。 */
+ * 真实耗时,不然会把"正常但慢"判成超时。真实耗时量级(2026-10-14 缓冲加倍后):
+ *   收满 16384 字:最快档(DIV=2,65 MSPS)= 252 µs;最慢档(DIV=130)= 16.4 ms
+ * ⇒ done 给 200 ms 仍有 ~12 倍余量,不会误报。 */
 #define ADC_WAIT_IDLE_MS      50u
 #define ADC_WAIT_GO_MS        50u
 #define ADC_WAIT_DONE_MS      200u
@@ -181,7 +180,31 @@ int32_t AdcSample_PortATick(uint32_t div)
 
 int32_t AdcSample_PortBTick(uint32_t div)
 {
-    return cv_adc_phase_center_b(div);      /* 1.5 + P/4,已折回合法范围 */
+    return cv_adc_phase_center_b(div);      /* 1.5 + P/4,已折回合法范围 —— 只作对照了 */
+}
+
+int32_t AdcSample_PortBTickHw(uint32_t div, int32_t tick_a)
+{
+    /* 🔴 **必须与 `adc_capture.v` 的那三行逐位同构**(`ph_b_s` 那段):
+     *
+     *     hi_s     = P − 1 − P/2                (寄存器合法上界)
+     *     ph_b_sum = A + P/2                    (B 就在 A 后面半个 ADC 周期)
+     *     ph_b     = (ph_b_sum > hi) ? ph_b_sum − P : ph_b_sum
+     *
+     * ⛔ **不要"优化"成 `(A + half) % P` 之类** —— 折回范围不是 `[0,P)`,
+     *    而是 `[−P/2, P−1−P/2]`(偏移二进制式的刻度)。
+     * ⛔ 也**不要**借 `cv_adc_phase_center_b()`:那个是"独立地把物理中心
+     *    1.5+P/4 取整",P 为奇数时会与硬件差一个 tick(见 `pynq_regs.h` 的说明)。
+     *    本函数是硬件的**镜像**,只用于日志。
+     *
+     * ⚠️ 数学上 A 合法 ⇒ B 必然合法(至多减一次 P 就落回范围),所以本函数
+     *    不需要、也没有"B 越界"这个失败态。 */
+    int32_t p    = (int32_t)((div < 2u) ? 2u : div);
+    int32_t half = p >> 1;
+    int32_t hi   = p - 1 - half;
+    int32_t b    = tick_a + half;
+
+    return (b > hi) ? (b - p) : b;
 }
 
 bool AdcSample_TickLegal(uint32_t div, int32_t tick)
@@ -207,21 +230,71 @@ float AdcSample_CodesToVolts(float codes)
     return (codes * ADC_SAMPLE_VFS_PP) / 4096.0f;
 }
 
-float AdcSample_CsPf(float v_exc_v, float v_cur_v, uint32_t fe_hz)
+bool AdcSample_Impedance(float ia, float qa, float ib, float qb,
+                         double r0_ohm, uint32_t fe_hz, AdcSampleZ *out)
 {
-    double i_amp;
-    double y;
-    double cs;
+    double dv_re, dv_im, vb2, w, mag2;
 
-    if ((v_exc_v <= 0.0f) || (fe_hz == 0u)) {
-        return 0.0f;
+    if (out == NULL) {
+        set_err("阻抗参数错:out 为空");
+        return false;
+    }
+    if ((r0_ohm <= 0.0) || (fe_hz == 0u)) {
+        /* r0 <= 0 就是"挡位码非独热"那个哨兵(见 cv_range_ohms)。**绝不能
+         * 放过去** —— 它会变成一个除零,出来的 inf 会一路画到曲线上。 */
+        (void)snprintf(s_err, sizeof(s_err),
+                       "阻抗算不了:R0 = %.3f Ω(挡位码非独热?)或激励 %u Hz 为 0",
+                       r0_ohm, (unsigned)fe_hz);
+        return false;
     }
 
-    i_amp = (double)v_cur_v / (double)ADC_SAMPLE_R_TIA;   /* A */
-    y     = i_amp / (double)v_exc_v;                      /* S —— 假设纯电容 ⇒ = ωC */
-    cs    = y / (ADC_TWO_PI * (double)fe_hz);             /* F */
+    /* Vx = VH − VL(全在 ADC 码域;比例因子稍后与 VL 一起约掉) */
+    dv_re = (double)ia - (double)ib;
+    dv_im = (double)qa - (double)qb;
+    vb2   = ((double)ib * (double)ib) + ((double)qb * (double)qb);
 
-    return (float)(cs * 1e12);                            /* pF */
+    if (vb2 <= 0.0) {
+        /* |VL| = 0 ⇒ 选择支路没有信号(继电器没切到、R0 支路断路、或输入没接)。
+         * ⚠️ 这不是"算出来是 0",是**这个测量不成立** —— 必须报错,
+         *    不能返回一个 0 Ω 让界面画成一条贴着横轴的直线。 */
+        set_err("阻抗算不了:|VL| = 0 ⇒ 参考电阻支路没有信号"
+                "(查:① 回路继电器真的切过去了吗;② R0 支路是否断路;③ 输入有没有接)");
+        return false;
+    }
+
+    w = ADC_TWO_PI * (double)fe_hz;                 /* ω */
+
+    out->z_re_ohm = r0_ohm * ((dv_re * (double)ib) + (dv_im * (double)qb)) / vb2;
+    out->z_im_ohm = r0_ohm * ((dv_im * (double)ib) - (dv_re * (double)qb)) / vb2;
+
+    mag2 = (out->z_re_ohm * out->z_re_ohm) + (out->z_im_ohm * out->z_im_ohm);
+
+    /* 串联等效电容。**容性时 Im Z < 0,所以负号让它为正。**
+     * 若被测件呈感性(Im Z > 0),Cs 会算出负值 —— **不要夹到 0**,
+     * 负号就是"这不是个电容"的信号,夹掉等于把诊断信息扔了。 */
+    out->cs_pf = (out->z_im_ohm != 0.0)
+               ? ((-1e12 / w) / out->z_im_ohm)
+               : 0.0;
+
+    /* 并联等效电容 Cp = Cs/(1 + D²) = −Im Z /(ω·|Z|²) */
+    out->cp_pf = (mag2 > 0.0) ? ((-(out->z_im_ohm) * 1e12) / (w * mag2)) : 0.0;
+
+    /* 损耗因数 D = tanδ = ωCsRs = |Re Z / Im Z| */
+    out->d = (out->z_im_ohm != 0.0)
+           ? fabs(out->z_re_ohm / out->z_im_ohm)
+           : 0.0;
+
+    /* 流过被测件的电流 = |VL| / R0。用码算幅值再换算成伏:
+     * ⚠️ 这一项**仍然用未标定的 ADC_SAMPLE_VFS_PP**(它不像 Z 那样能约掉),
+     *    所以电流读数是"相对形状可信、绝对值未标定"。 */
+    {
+        double mag_b_codes = sqrt(((double)ib * (double)ib) + ((double)qb * (double)qb));
+        double mag_b_v     = (double)AdcSample_CodesToVolts((float)mag_b_codes);
+
+        out->cur_ma = (mag_b_v / r0_ohm) * 1000.0;
+    }
+
+    return true;
 }
 
 /* ==========================================================================
@@ -237,10 +310,11 @@ bool AdcSample_LinkReady(void)
  * 采集
  * ========================================================================== */
 
-bool AdcSample_Capture(int32_t ph_off, uint32_t n,
-                       uint32_t *out_code, uint32_t *out_otr,
-                       uint32_t *out_otr_count)
+bool AdcSample_CapturePair(uint32_t *out_code_a, uint32_t *out_code_b,
+                           uint32_t *out_otr_count)
 {
+    uint32_t div;
+    int32_t  tick_a;
     uint32_t i;
     uint32_t otr_n = 0u;
     bool     pushed = false;
@@ -248,12 +322,29 @@ bool AdcSample_Capture(int32_t ph_off, uint32_t n,
 
     AdcSample_ClearError();
 
-    if ((out_code == NULL) || (n == 0u) || (n > ADC_SAMPLE_BUF_DEPTH)) {
-        set_err("参数错:out_code 为空,或 n 为 0,或 n 超过缓冲深度 4096");
+    if ((out_code_a == NULL) || (out_code_b == NULL)) {
+        set_err("参数错:out_code_a / out_code_b 不能为空");
         return false;
     }
     if (!AdcSample_LinkReady()) {
         set_err("0x90[0] mmcm_locked = 0 ⇒ MMCM 没锁,采集通路没起来(先查位流)");
+        return false;
+    }
+
+    /* ⓪ A 的刻度与合法性。B 的刻度不在这里推 —— 硬件按 A+P/2 自算。
+     *    落在寄存器合法范围外的刻度**永不命中**:现象是 `done` 不置位(超时),
+     *    很容易被误判成"位流不对"。所以提前给出可执行的判断。
+     *    ⚠️ 原文案是"换更大的 DIV(1/2/5/10/13 MSPS 里挑)"—— 2026-10-08 起
+     *       那是**做不到的建议**:采样率已固定 65 MSPS、界面上没有换档入口。
+     *       真遇到它,说明 `cv_adc_phase_center()` 的折回与当前
+     *       `CV_ADC_DIV_DEFAULT` 不一致 —— 那是**代码缺陷**,不是"挑一档"。 */
+    div    = MeasureConfig_GetSampleDiv();
+    tick_a = AdcSample_PortATick(div);
+    if (!AdcSample_TickLegal(div, tick_a)) {
+        AdcSample_SetErrorf("DIV=%u 下窗口中心越出寄存器合法范围(A tick %+d)。"
+                            "采样率已固定 65 MSPS(DIV=2),没有别的档可换 ⇒ 这是"
+                            "cv_adc_phase_center() 的折回与 DIV 不一致,属代码缺陷。",
+                            (unsigned)div, (int)tick_a);
         return false;
     }
 
@@ -264,8 +355,8 @@ bool AdcSample_Capture(int32_t ph_off, uint32_t n,
         return false;
     }
 
-    /* ② 推入本次要用的采样刻度。0x88 由 measure_config 代写。 */
-    if (!MeasureConfig_PushPhase(ph_off)) {
+    /* ② 推入本次要用的采样刻度(**只有 A 那一个**)。0x88 由 measure_config 代写。 */
+    if (!MeasureConfig_PushPhase(tick_a)) {
         set_err("PushPhase 失败(刻度越界 / 0x88 回读不一致,见上面 [mc] 那行)");
         return false;
     }
@@ -287,20 +378,27 @@ bool AdcSample_Capture(int32_t ph_off, uint32_t n,
         goto out;
     }
 
-    /* ⑥ 读缓冲。单次模式下缓冲已**冻结**,可以慢慢读。
-     *    读口是寄存器输出,rd_data 比 rd_idx 晚一拍 —— AXI 事务间隔远不止一拍。 */
-    for (i = 0u; i < n; ++i) {
+    /* ⑥ 读**整块交织缓冲**并拆交织。单次模式下缓冲已**冻结**,可以慢慢读。
+     *    读口是寄存器输出,rd_data 比 rd_idx 晚一拍 —— AXI 事务间隔远不止一拍。
+     *
+     *    🔴 布局:`地址 2k = A_k(INA)`、`2k+1 = B_k(INB)`(见 `adc_capture.v` 文件头 ④)。
+     *    ⛔ **不要按"前半段是 A、后半段是 B"去切** —— 那样每路拿到的是交错的
+     *       两路数据,解调出来看着**仍像正弦**(频率是一半),**不报错**。
+     *       判据:两路的 p-p 会几乎相同且都偏小,而正确拆法下 A 是激励、B 是响应。 */
+    for (i = 0u; i < ADC_SAMPLE_BUF_DEPTH; ++i) {
         uint32_t d;
         uint32_t o;
 
         cv_reg_write(CV_REG_ADC_BUF_IDX, i);
         d = cv_reg_read(CV_REG_ADC_BUF_DATA);
 
-        out_code[i] = CV_ADC_SAMPLE(d);
-        o = CV_ADC_OTR(d);
-        if (out_otr != NULL) {
-            out_otr[i] = o;
+        if ((i & 1u) == 0u) {
+            out_code_a[i >> 1] = CV_ADC_SAMPLE(d);   /* 偶 → A */
+        } else {
+            out_code_b[i >> 1] = CV_ADC_SAMPLE(d);   /* 奇 → B */
         }
+
+        o = CV_ADC_OTR(d);
         if (o != 0u) {
             otr_n++;
         }

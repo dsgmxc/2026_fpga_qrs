@@ -255,13 +255,14 @@ module cv_axi_lite_slave #(
     output wire                                 cfg_clk_release, // 0x84[0] → dac_1220.rst_n / MMCM RST
 
     //-------------------------------------------------------------------------
-    // ADC 采集(2026-10-06 加)—— 130 MHz 分频 + 8192 深缓冲(2026-10-08 加长)
+    // ADC 采集(2026-10-06 加)—— 130 MHz 分频 + 16384 深缓冲
+    //   (2026-10-08 4096→8192;2026-10-14 A/B 交织 8192→16384)
     //   同样【不是 AXI 端口,不要加 X_INTERFACE_INFO】—— 普通线网,在 cv_sys 内消化。
     //   位域 mask 交给消费侧做(本层出寄存器原值;但见下面 0x88 的例外说明)。
     //-------------------------------------------------------------------------
     output wire [C_S_AXI_DATA_WIDTH-1:0]        cfg_adc_cfg,      // 0x88
     output wire                                 cfg_adc_go,       // 0x8C[0] 写 → 1 拍脉冲
-    output wire [C_S_AXI_DATA_WIDTH-1:0]        cfg_adc_buf_idx,  // 0x94 [12:0] 读索引(2026-10-08 12→13 位)
+    output wire [C_S_AXI_DATA_WIDTH-1:0]        cfg_adc_buf_idx,  // 0x94 [13:0] 读索引(0810:12→13 / 1014:13→14 位)
     input  wire [C_S_AXI_DATA_WIDTH-1:0]        sts_adc_sts,      // 0x90
     input  wire [C_S_AXI_DATA_WIDTH-1:0]        sts_adc_buf_data, // 0x98
     // adc_capture 的 done/busy 之类【不单独开口】—— 已经打包进 sts_adc_sts,
@@ -577,15 +578,17 @@ module cv_axi_lite_slave #(
                 IDX_DDS_FREQ : dds_freq  <= wdata_r;
                 // ⚠️ 下面两个【掩码到有效位】,理由同 0x84:读回必须是已生效值。
                 //    ADC_CFG 有效到 [18](DIV/PH_OFF/CONT/OEB_N/PDN),掩到 19 位;
-                //    ADC_BUF_IDX 有效到 [12](8192 深),掩到 13 位。
+                //    ADC_BUF_IDX 有效到 [13](16384 深),掩到 14 位。
                 //    上面那些整字存的寄存器是"留给将来的位还能读回"的历史约定,
                 //    控制寄存器不适用。
                 IDX_ADC_CFG     : adc_cfg     <= wdata_r & 32'h0007_FFFF;
-                // ⚠️ 掩码 = 缓冲深度 −1。2026-10-08 BUF_DEPTH 4096→8192 ⇒ 掩码
-                //    12 位→13 位。**这一行是本改动真正的闸**:忘记放宽的话,
-                //    写 5000 会被静默截成 904,读回的是**另一个点的数据**,
-                //    不报错、不复位、不复位 done —— 与"按钮守卫停在旧档位"同形。
-                IDX_ADC_BUF_IDX : adc_buf_idx <= wdata_r & 32'h0000_1FFF;
+                // ⚠️ 掩码 = 缓冲深度 −1。2026-10-08 BUF_DEPTH 4096→8192 ⇒ 13 位;
+                //    2026-10-14 A/B 成对交织再 8192→16384 ⇒ **14 位**。
+                //    **这一行是本改动真正的闸**:忘记放宽的话,写 10000 会被
+                //    静默截成 1800,读回的是**另一个点的数据**,不报错、
+                //    done 照置 —— 与"按钮守卫停在旧档位"同形。
+                //    ⇒ 判据:C 侧 `ADC_SAMPLE_BUF_DEPTH` 与这里必须都等于 16384。
+                IDX_ADC_BUF_IDX : adc_buf_idx <= wdata_r & 32'h0000_3FFF;
                 //-------------------------------------------------------------
                 // 0x18 / 0x1C / 0x24(2026-10-10)
                 //
