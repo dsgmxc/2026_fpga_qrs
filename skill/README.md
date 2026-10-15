@@ -49,11 +49,15 @@ skill/
 | [`verilog-review-checklist/`](verilog-review-checklist/skill.md) | RTL 静态审查清单(按本赛道考察侧重排序),每条对应一次真实踩坑 | ✅ **已落地** |
 | [`spi-tb-patterns/`](spi-tb-patterns/skill.md) | 自检测试台设计:图案判别力实测 + 变异测试 + 负测试自验证 + 看门狗 | ✅ **已落地** |
 | [`measurement-instrument-can-be-wrong/`](measurement-instrument-can-be-wrong/skill.md) | **量具会错**:八次事故 + 四条通用判据(素材最厚的一项) | ✅ **已落地** |
-| [`stale-artifact-silent-reuse/`](stale-artifact-silent-reuse/skill.md) | 工具缓存/产物比源文件活得久,且不报错 —— 四种形态 | ✅ **已落地** |
+| [`stale-artifact-silent-reuse/`](stale-artifact-silent-reuse/skill.md) | 工具缓存/产物比源文件活得久,且不报错 —— **五种形态**(第五种:**交付源码比它自己发布的位流旧**) | ✅ **已落地**(2026-10-15 补形态 5) |
 | [`rtl-constant-experiment-must-verify-netlist/`](rtl-constant-experiment-must-verify-netlist/skill.md) | 把 RTL 常量当实验自变量时:源码不是证据,综合后网表才是 | ✅ **已落地** |
 | [`use-layout-as-ruler/`](use-layout-as-ruler/skill.md) | 用被测对象自己的几何当量具,而不是用人的手当量具 | ✅ **已落地** |
 | [`gbk-example-porting/`](gbk-example-porting/skill.md) | 中文厂商 GBK 例程向 Linux 工具链移植:往返校验 + 正文 md5 | ✅ **已落地** |
 | [`silent-capacity-gates/`](silent-capacity-gates/skill.md) | 改一个容量时沿路的 `掩码/上限/截断`:静默型 / 报错型 / **上限型≠容量型** 三分法 | ✅ **已落地**(2026-10-08) |
+| [`classify-by-state-not-by-intent/`](classify-by-state-not-by-intent/skill.md) | 日志分组统计:归类要挑「写下去会被回读确认」的**状态行**,不能挑会残留的**意图行** | ✅ **已落地**(2026-10-15) |
+| [`recount-dont-increment/`](recount-dont-increment/skill.md) | **汇总数字一律现场重跑**;增量算术会让你同时继承错误基线、又叠加自己的增量 | ✅ **已落地**(2026-10-15) |
+| [`independent-evidence-must-share-no-pipeline/`](independent-evidence-must-share-no-pipeline/skill.md) | 判"独立证据"要分两层问:另一根线?**同一采样刻度?** 同拍即同一条腿 | ✅ **已落地**(2026-10-15) |
+| [`consistency-gate-over-median/`](consistency-gate-over-median/skill.md) | 整次采集坏掉时**中位数治不了**:物理不变式 + 重采。「合理」由不变式定义,不由投票定义 | ✅ **已落地**(2026-10-15) |
 
 ### ⏸ 计划中但**未落地**(缺"已验证的效果"与"来源",不建空壳)
 
@@ -86,6 +90,13 @@ skill/
    一次真实的"整屏全黑"根因定位,**判据选择、单变量分离、双观测者**三样都在里面。
 5. **`use-layout-as-ruler/`** —— 最短,但**效率提升最明显**:一个悬了两轮的问题,
    换问法后**一次按压结案**。
+6. **`classify-by-state-not-by-intent/`** —— 最"不起眼"但**后果最严重**的一个:
+   一个归属逻辑错的统计脚本,长出了一整条**已经写进草稿的错结论**。
+   判据只有三行,但适用于**任何把日志当数据源的分组统计**。
+7. **`consistency-gate-over-median/`** —— 直接回答用户那句朴素提问
+   「**多测几次取合理值行不行**」:**方向对,中位数不行**。
+   里面有一整套"先证明重采有用、再采纳"的实证流程,
+   以及"判据的阈值要从分布里选、不是从理论里拍"的完整四行对照表。
 
 **「这些是成功了才写的吗?」**
 
@@ -103,19 +114,30 @@ skill/
 所以正确做法是:**从项目第一天起,每踩一个坑就回来补一条**。
 `report/llm-log/` 里的纠错轨迹,就是本目录的原料。
 
-**本目录当前状态(2026-10-10)**:
+**本目录当前状态(2026-10-15)**:
 
-- 索引提名过 **73** 个候选 skill 名(`grep -oE 'skill/[a-z0-9-]+' report/llm-log/INDEX.md | sort -u | wc -l`),
-  **已落地 12 项**(2026-10-08 新增 `silent-capacity-gates/`;2026-10-10 新增
-  `count-both-sides-of-interface/`)。
-- 落地的 12 项**全部**满足五要素;「已验证的效果」全部可追到
-  `report/measurements/` 的存档或 `report/llm-log/` 的记录编号。
+> 📌 **本节数字全部现场重跑**(`skill/recount-dont-increment/` 的自家纪律;
+> 上一版这几行是手写的,已核对——本次为**改成实跑值**,不是在上版基础上递增)。
+
+| 项 | 值 | 怎么来的 |
+|---|---|---|
+| 已落地 skill | **16 项** | `find skill -name skill.md \| wc -l` |
+| README 表内链接 | **16 条** | `grep -oE '\]\([a-z0-9-]+/skill\.md\)' skill/README.md \| sort -u \| wc -l` |
+| 索引提名过的候选名 | **135 个** | `grep -oE 'skill/[a-z0-9-]+' llm-log/INDEX.md \| sort -u \| wc -l`(2026-10-10 时为 73) |
+| 交付仓已入库的 LLM 记录 | **69 篇** | `ls -1 llm-log/LLM-*.md \| wc -l` 与 `grep -c '^\| \[LLM-' llm-log/INDEX.md` **两条独立路径一致** |
+
+- 落地的 16 项**全部**满足五要素;「已验证的效果」全部可追到
+  `board/measurements/` 的存档或 `llm-log/` 的记录编号。
 - **未落地的项写进上表并说明卡点**,不以空壳充数。
 - 📌 新增项的来源固定是**同一周内真实发生的事**:
   - `silent-capacity-gates/` ← `LLM-055` 的三道静默关卡 + 一次上板验收
     (`20261008_65msps_window_board_acceptance.md`);
   - `count-both-sides-of-interface/` ← `LLM-059` 的四天误判 +
-    `20261010_relay_cfg_write_anomaly.md` §9(记录互相矛盾)→ §10(结案)。
+    `20261010_relay_cfg_write_anomaly.md` §9(记录互相矛盾)→ §10(结案);
+  - 2026-10-15 新增 **4 项** ← `LLM-068` + `LLM-069` 两份记录的纠错轨迹
+    (见各 skill 的「来源」节,逐条给出编号);
+    **`stale-artifact-silent-reuse/` 同日补了第五种形态**(该形态来自交付仓现状核对,
+    不是 LLM 会话,故在 skill 内**如实标注**"无 llm-log 记录")。
   **没有为了凑数而写。**
 
 **归属声明**:本目录下的 `skill.md` 均为 **Claude 撰写的 markdown 文档**
