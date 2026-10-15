@@ -56,8 +56,12 @@ webtalk*.jou
 
 # --- Vivado 跑在仓库根目录时留下的残渣(2026-10-15 加)------------------------
 # 只列具体形态,**不用 `*.log`** —— 理由见文件末尾「故意不忽略」第 1 条。
-# ⚠️ 故意**不列** `summary.txt`:`build/summary.txt` 是 M03 证据(已入库),
-#    根目录那份是误拷出来的副本,留着让人看见并决定,不靠 gitignore 掩盖。
+# ⚠️ 故意**不列** `summary.txt`:`build/summary.txt` 是 M03 证据(已入库)。
+#    📌 **2026-10-15(第 61 次)决定**:根目录那份 `summary.txt` 是
+#    `report_summary.tcl` 在未设 `QRS_OUT_DIR` 时按默认落盘的副本(CWD=仓库根),
+#    **内容与 `build/summary.txt` 重复且已过期** ⇒ **已删除**。
+#    ⇒ 跑构建时**务必带 `QRS_OUT_DIR=<repo>/build`**,否则又会在根目录冒出一份。
+#    ⛔ 仍**不用 gitignore 拦它** —— 拦了就是"安静地吞掉",宁可让它显形再删。
 /vivado.log
 vivado_*.backup.log
 
