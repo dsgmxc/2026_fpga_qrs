@@ -342,44 +342,67 @@ TOUCH_PT_BIT = {
 SIGNED_REGS = ("I_A", "Q_A", "I_B", "Q_B")
 
 # ---------------------------------------------------------------------------
-# 模拟前端换算(2026-10-05)
+# 模拟前端换算(2026-10-05 立 / 🔴 2026-10-15 按 DF=0 重写)
 # ---------------------------------------------------------------------------
 # 🔴 DAC1220 → 偏压:板上**有一级外部高压放大,比例 10:1**。
 #    即 DAC 模块出 10 V,被测器件上就是 100 V。**这一级不在寄存器里** ——
 #    寄存器只管 20 位码值,倍数完全由硬件接线决定,软件改不了。
 #
-# 模块级传递函数(板上三点实测过 −5 / 0 / +5 V,见 docs/dac1220_interface.md):
-#     V_module = -10 + 20 * code / 1048575
+# 🔴 **2026-10-15 更正 —— 本段原先写的是 DF=1 的传递式,现硬件是 DF=0。**
+#    `dac_1220.v` 的 CMR 已于 2026-10-12 由 `0x20A1`(DF=1) 改成 `0x2081`(DF=0),
+#    两个格式**只差半个量程**(同一批码整体旋转 `0x80000`)。C 侧同日就改了
+#    (`src/c_ui/app/pynq_regs.h::cv_bias_volts_to_code` 末尾那个 `^ 0x80000u`),
+#    **Python 这一份漏了三天**,同 RTL 复位值那一处是同一个错。
 #
-# 三个端点(右边都乘了 10):
-#     code = 0        → V_module = -10.0 V → 偏压 **-100.0 V**  ← ⚠️ 危险端,不是 0 V!
-#     code = 0x80000  → V_module =   0.0 V → 偏压    0.0 V      ← ★ 复位值取这里
-#     code = 0xFFFFF  → V_module = +10.0 V → 偏压 +100.0 V
+# 模块级传递函数(DF=0,**板上实测** `0x7FFFF→+9.72` / `0x80000→−10.0` /
+# `0x00000→0.0` / `0xFFFFF→0.0`;理想式见下,实测斜率见 docs/dac1220_interface.md):
+#     V_module = -10 + 20 * straight / 1048575     其中 straight = code ^ 0x80000
 #
-# ⚠️ 复位值之所以取**中位**而不是 0:码值 0 会让上电偏压停在 **-100 V**,
-#    而"0 码"极易被误读成"0 V"。中位是唯一不依赖高压级极性的安全点。
-#    RTL 侧的落地见 cv_axi_lite_slave.v 的 bias_code 复位值 + 上电 set 脉冲。
+# 四个端点(偏压那一列都乘了 10):
+#     code = 0x00000  → straight = 0x80000 → V_module =  0.0 V → 偏压    0.0 V ← ★ 0 V 在这里
+#     code = 0x7FFFF  → straight = 0xFFFFF → V_module =+10.0 V → 偏压 +100.0 V
+#     code = 0x80000  → straight = 0x00000 → V_module =-10.0 V → 偏压 **-100.0 V** ← ⚠️ 危险端
+#     code = 0xFFFFF  → straight = 0x7FFFF → V_module =  0.0 V → 偏压    0.0 V
+#
+# ⚠️ **旧注释的推理链整条作废**(留档以免重复):它写「复位值取中位 0x80000,
+#    因为码 0 会让上电停在 −100 V,而"0 码"极易被误读成"0 V"」——
+#    **推理没错,前提错了**:那是 DF=1 下的映射。DF=0 下恰好**反过来**,
+#    0x80000 才是 −100 V,**0x00000 就是 0 V**。RTL 复位值同步改成 `0x00000`
+#    (2026-10-15),两边现在一致。
 BIAS_CODE_MAX    = 0xFFFFF       # 20 位满量程(1048575)
-BIAS_CODE_MID    = 0x80000       # 复位值 = 0 V 偏压
+BIAS_CODE_ROT    = 0x80000       # ★ DF=0 与 straight 之间旋转半格
+BIAS_CODE_ZERO   = 0x00000       # ★ DF=0 下的 0 V 码(= RTL 的 bias_code 复位值)
 BIAS_MODULE_VMIN = -10.0         # 模块级端点(V)
 BIAS_MODULE_VMAX = +10.0
 BIAS_HV_RATIO    = 10.0          # ★ 外部高压级倍数(硬件接线,非寄存器)
 BIAS_VOLT_MIN    = BIAS_MODULE_VMIN * BIAS_HV_RATIO    # -100.0 V
 BIAS_VOLT_MAX    = BIAS_MODULE_VMAX * BIAS_HV_RATIO    # +100.0 V
 
+# ⛔ 原 `BIAS_CODE_MID = 0x80000`(注「复位值 = 0 V 偏压」)**已删除** ——
+#    名字本身就把错前提编进去了,留着迟早再被引用一次。全文无其它引用方。
+
 
 def bias_volts_to_code(volts):
-    """偏压(V,**含** 10:1 高压级)→ 20 位 DAC 码。超出 ±100 V 夹到端点。"""
+    """偏压(V,**含** 10:1 高压级)→ 20 位 DAC 码(DF=0)。超出 ±100 V 夹到端点。
+
+    与 C 侧 `cv_bias_volts_to_code()` 逐字同构 —— 两边不一致就会出现
+    「界面显示 0 V、DAC 实际出 −100 V」这类最难查的坏法。
+    """
     module_v = volts / BIAS_HV_RATIO
     raw = (module_v - BIAS_MODULE_VMIN) * BIAS_CODE_MAX / \
           (BIAS_MODULE_VMAX - BIAS_MODULE_VMIN)
-    return max(0, min(BIAS_CODE_MAX, int(round(raw))))
+    if raw < 0.0:
+        raw = 0.0
+    elif raw > BIAS_CODE_MAX:
+        raw = BIAS_CODE_MAX
+    return int(raw + 0.5) ^ BIAS_CODE_ROT
 
 
 def bias_code_to_volts(code):
-    """20 位 DAC 码 → 偏压(V,**含** 10:1 高压级)。把读回值翻成人看的数。"""
+    """20 位 DAC 码(DF=0)→ 偏压(V,**含** 10:1 高压级)。把读回值翻成人看的数。"""
+    straight = (int(code) & BIAS_CODE_MAX) ^ BIAS_CODE_ROT
     module_v = BIAS_MODULE_VMIN + \
-        (BIAS_MODULE_VMAX - BIAS_MODULE_VMIN) * (int(code) & BIAS_CODE_MAX) / BIAS_CODE_MAX
+        (BIAS_MODULE_VMAX - BIAS_MODULE_VMIN) * straight / BIAS_CODE_MAX
     return module_v * BIAS_HV_RATIO
 
 
