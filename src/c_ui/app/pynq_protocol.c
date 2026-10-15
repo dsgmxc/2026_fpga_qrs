@@ -49,7 +49,13 @@
  *     `app/relay_view.c` 文件头。
  *   · 现在点「回路」按钮**真的切继电器**(`RelayView_ApplyPath()`);
  *     顶栏那两栏仍然只显示**回读的已生效值**,不显示"用户点了什么"。
- *   · `0x18 RANGE_SEL` **本轮仍然只读** —— 挡位不在本次范围内(见 §四)。
+ *   · 🟢 **2026-10-15 起 `0x18`(挡位)也由本进程写** —— 测量页新增
+ *     A/B/C/D 四颗按钮,走 `DisplayProtocol_RequestGear()` →
+ *     `RelayView_ApplyGear()`。原文是「`0x18` 本轮仍只读,挡位不在本次
+ *     范围内」,**那句只在 2026-10-14 那一轮的范围内成立**;用户随后
+ *     接上了挡位矩阵并要求控制它。
+ *     ⇒ 至此 `0x1C` 与 `0x18` **两个寄存器都是本进程独占写**,
+ *        `drivers/relay.py` 仍然是没有任何调用方的取证材料。
  * 🆕 2026-10-06:**Cs 读数有了,但不是 DLIA 算的。** 走的是
  *    `adc_sample.c` —— 采 AD9238 缓冲(0x8C/0x90/0x94/0x98)+ C 侧正交解调。
  *    结果页的「单点波形 / 扫压波形」两张图和扫压曲线上的 Cs 都由此来。
@@ -138,6 +144,11 @@
 #define SWEEP_DWELL_MS_MIN     1u
 #define SWEEP_DWELL_MS_MAX     10000u
 
+/* 🆕 2026-10-15 扫压自动换挡的迟滞宽度(十倍程),交给 `cv_range_pick()`。
+ * 为什么必须有迟滞、0.15 这个数怎么来的 —— 见 `pynq_regs.h::cv_range_pick()`。
+ * 一句话:挡位边界恰在相邻两挡正中间,不给迟滞就会在边界附近来回跳。 */
+#define SWEEP_GEAR_MARGIN      0.15
+
 /* 激励频率与采样率**不在这里定义** —— 归 `measure_config.h` / `pynq_regs.h`。
  * 本文件只负责"什么时候下发",不负责"下发什么值"。 */
 
@@ -158,6 +169,11 @@ static uint32_t s_sweep_total;
 static uint32_t s_sweep_index;          /* 已下发的点数(1 起) */
 static uint32_t s_sweep_next_ms;
 static float    s_bias_volts;           /* 最后一次真正下发的偏压(量化后的真值) */
+
+/* 🆕 2026-10-15:自动换挡**这一轮已被关掉**(换失败了,或非独热码)。
+ * ⚠️ 必须是粘滞的:判据是确定性的,失败后每一点都会算同一个"该换"的结论,
+ *    不粘滞就会**每 300 ms 重试一次并弹一次框**,把扫压搅成一片报错。 */
+static uint32_t s_auto_gear_off;
 
 static uint32_t s_demo_auto_page;       /* CV_UI_DEMO_PAGE:跑完切到这一页 */
 static uint32_t s_demo_auto_stage;
@@ -238,6 +254,22 @@ static const char *path_name(uint32_t path)
     static const char *const names[] = {"CISS", "COSS", "CRSS", "RG"};
 
     return (path < 4u) ? names[path] : "?";
+}
+
+/**
+ * @brief 挡位编号 → 名字(2026-10-15 加)。
+ *
+ * ⚠️ 与 `relay_view.c` 里那个 `range_name()` **是两份** —— 那个是 `static`,
+ *    且它的输入是**独热码**(`0x1/0x2/0x4/0x8`),本函数的输入是**下标**(0..3)。
+ *    ⛔ 别把两者接错:传独热码进来会得到 `CV_RANGE_B(2) → "C"`,错一位且不报。
+ *    名字带 R0 而不只是挡号 —— 用户看到的"A/B/C/D"本身不带信息量,
+ *    R0 才是它在算式里的含义(`Z = R0·(VH−VL)/VL`)。
+ */
+static const char *gear_name(uint32_t index)
+{
+    static const char *const names[] = {"A(10Ω)", "B(100Ω)", "C(1kΩ)", "D(10kΩ)"};
+
+    return (index < 4u) ? names[index] : "?";
 }
 
 /**
@@ -391,8 +423,11 @@ static bool adc_capture_pair(void)
 
     /* 🔴 **参考电阻 R0 每次现读 0x18**,不硬编码、不缓存 ——
      *    挡位一变,Rg / Cs / Cp / 电流会**同时**错。见 `cv_range_ohms()`。
-     *    ⚠️ 本项目本轮不写 0x18(复位值 = B 挡 100 Ω),但**读它**是必须的:
-     *       写死等于假设"挡位永远不会变"。 */
+     *    🆕 2026-10-15 起挡位**真的会变**了(测量页 A/B/C/D 四颗按钮 →
+     *    `DisplayProtocol_RequestGear()`),所以"必须现读"从"纪律"变成了
+     *    "事实":写死一个常数现在会**当场**出错数,不再是"将来某天"。
+     *    ⚠️ 读到的可能是**上一次写失败**遗留的旧挡 —— 判据在同一函数下面的
+     *    `[adc]` 日志行:它把 `R0` 与挡位码一并打出来,事后对得上。 */
     s_pair.gear   = cv_reg_read(CV_REG_RANGE_SEL) & CV_RANGE_MASK;
     s_pair.r0_ohm = cv_range_ohms(s_pair.gear);
 
@@ -631,11 +666,16 @@ static void point_measure(void)
          * 那个 0.7 Ω 是前序的 `PERIODIC_MEASUREMENT_RG_CALIBRATION_OHM`
          * (线阻/接触电阻的经验补偿,不是理论值)。**照抄,不自己另立一个数。**
          *
-         * ⚠️ 前序为 RG **强制 A 挡(10 Ω)并锁换挡**(`pc_protocol.c:282-284`);
-         *    本项目本轮**不写 0x18**,所以 RG 跑在复位挡位 B(100 Ω)上。
-         *    这不影响公式正确性(R0 是回读来的),只影响对比度:
-         *    `VL/VH = R0/(R0+Rg)` —— B 挡下 Rg ≈ 12 Ω 只带来 ~11% 的差量。
-         *    记进文档作为后续可调项,**不擅自改挡位**。 */
+         * ⚠️ 前序为 RG **强制 A 挡(10 Ω)并锁换挡**(`pc_protocol.c:282-284`)。
+         *    🆕 **2026-10-15:这条现在可以照做了** —— 挡位有了写入者,
+         *    要复现前序的对比度就点 A 挡(10 Ω)。
+         *    · 但**没有**在此处自动强制 A 挡:挡位是用户在测量页上选的,
+         *      这里替他把挡位改掉,他刚才那一下就成了没发生过的事(而且
+         *      下一张卡的 R0 也会跟着变)。**让挡位只有一个人说了算。**
+         *    · 留在 B 挡(100 Ω,复位值)也能测,只是对比度差:
+         *      `VL/VH = R0/(R0+Rg)` —— Rg ≈ 12 Ω 时 B 挡差量 ~11%,
+         *      A 挡 ~55%。**要准就点 A 挡,这是操作选择,不是代码问题。**
+         *    · R0 一律回读 `0x18`,所以公式在哪个挡都成立,不受此影响。 */
         uint32_t ok_rg = valid && s_pair.z_valid;
 
         if (ok_rg) {
@@ -833,17 +873,24 @@ static void sweep_start(uint32_t mask, uint32_t stop_tenths)
     s_sweep_index      = 0u;
     s_sweep_active     = 1u;
     s_sweep_next_ms    = cv_millis();       /* 第一点立刻发,不等一个驻留 */
+    s_auto_gear_off    = 0u;                /* 🆕 新的一轮,重新允许自动换挡 */
 
     UI_Demo_ClearSweep(3u);                 /* 3 ≥ 3 = 清全部三路 */
     sweep_begin_leg(first);                 /* ← 切继电器 + 开第一条腿的曲线 */
 
     printf("[proto] 扫压开始:%s,%.2f V → %.2f V,%u 点/腿,每点 %u ms\n"
            "        %s**逐腿**切换继电器,每条腿各测各的。\n"
-           "        读数:Cs/Cp/D 由同一个复数 Z 出(未标定)\n",
+           "        读数:Cs/Cp/D 由同一个复数 Z 出(未标定)\n"
+           "        🆕 挡位:第 1 点用**当前**挡位 0x%X(%.0f Ω),"
+           "第 2 点起按 |Z| 自动换(迟滞 %.2f 十倍程)。\n"
+           "           ⇒ 扫压期间挡位归自动管,手动那 4 颗按钮会被盖掉。\n",
            (mask == 0x07u) ? "CISS+COSS+CRSS" : path_name(first),
            (double)SWEEP_START_VOLTS, (double)stop_volts,
            (unsigned)s_sweep_total, (unsigned)s_dwell_ms,
-           (mask == 0x07u) ? "三条腿" : "一条腿");
+           (mask == 0x07u) ? "三条腿" : "一条腿",
+           (unsigned)(cv_reg_read(CV_REG_RANGE_SEL) & CV_RANGE_MASK),
+           cv_range_ohms(cv_reg_read(CV_REG_RANGE_SEL) & CV_RANGE_MASK),
+           (double)SWEEP_GEAR_MARGIN);
 }
 
 static void sweep_finish(void)
@@ -866,12 +913,120 @@ static void sweep_finish(void)
     }
 
     s_sweep_active = 0u;
+
+    /* 🔴 **扫压结束必须把偏压收回 0 V —— 这里原来漏了。**
+     *    用户 2026-10-15 实测发现:「它这扫完都没有置零」。收尾后读 `0x14 = 0x0007FFFF`
+     *    ⇒ 栅极**一直顶着 +100.000 V**,人离开工位、接着点别的回路时都还带着。
+     *    ⚠️ 走 `bias_apply(0.0f)` 而不是直接 `cv_reg_write(0x14, 0)`:
+     *       表头「偏压:」那一栏只有这条路径会更新(`bias_announce`),
+     *       绕过去界面就停在「100.00V」上 —— 那不是省事,是**在仪表上说一句谎话**。
+     *    ⚠️ 用 `0.0f` 而不是界面旋钮下限 0.1 V:收尾要的是**真零**,
+     *       即码 `0x00000`(**不是** `0x80000` —— 补码下那是 −100 V,见 `pynq_regs.h`)。 */
+    (void)bias_apply(0.0f);
+
     UI_Demo_SetSweepInspectionReady();
     UI_Demo_SetStatusText(s_demo_enabled ?
-        "状态:扫压结束(演示读数)" :
-        "状态:扫压结束(Cs/Cp/D 未标定)");
+        "状态:扫压结束(演示读数,偏压已归 0)" :
+        "状态:扫压结束(偏压已归 0,Cs/Cp/D 未标定)");
     printf("[proto] 扫压结束:%s,共 %u 点已下发到 DAC\n",
            path_name(s_sweep_leg), (unsigned)s_sweep_index);
+}
+
+/**
+ * @brief 🆕 2026-10-15:用**刚测到的** `|Z|` 决定下一个点该用哪一挡参考电阻。
+ *
+ * 【为什么需要它 —— 用户 2026-10-15 的原话:「不然数据都很奇怪」】
+ *   挡位原来全靠手动选,而一次扫压横跨 0.1 V → 100 V,`|Z|` 变 **40 倍以上**
+ *   (实测 CRSS 腿:363 Ω → 15 313 Ω),却全程停在用户点的那一挡上。后果不是"略差":
+ *
+ *   | 偏压 | `|Z|` | 挡位(手动 B=100 Ω) | `VL/VH` | 结局 |
+ *   |---|---|---|---|---|
+ *   | 0.10 V | 363 Ω | B | 23 % | 可用(只是没到最优) |
+ *   | 6.77 V | 441 Ω | B | 20 % | 开始吃紧 |
+ *   | 13.66 V | 5 231 Ω | B | **1.9 %** | 已不可信 |
+ *   | 100 V | 15 313 Ω | B | **0.64 %** | `VL` 只剩 23~36 码峰峰 |
+ *
+ *   高压段 `VL` 掉到 12 位 ADC 的量化/噪声底,**而 `Z` 恰恰是拿 `VH/VL` 这个
+ *   比值算出来的** ⇒ `VL` 的噪声被按 `|Z|/R0` 倍放大**直接乘进 Cs**。
+ *   实测那段 Cs 出现"一个倍压内掉 14 倍"(6.77 V:434 pF → 13.66 V:31 pF),
+ *   那不是器件特性,是量程没跟上。
+ *
+ * 【为什么判据是 `|Z| ≈ R0` 而不是别的】
+ *   误差的两个来源在此处相等,推导与迟滞宽度见 `pynq_regs.h::cv_range_pick()`。
+ *
+ * 【为什么"拿上一点的结果定下一点"是合法的】
+ *   `|Z|` 随偏压**单调**(电容随偏压单调下降),所以相邻两点的最优挡位只会
+ *   相邻或相同 —— 用上一点选下一点,**最多落后一个点**,而且第一跳之后
+ *   就收敛了。日志每行都印了当时的挡位(`adc_log_pair`),落后与否看得见。
+ *
+ * ⛔ **不做的两件事(都是有意不做,不是漏了)**
+ *   ① **不给第 1 点预扫一次**。预扫要阻塞一个驻留(≈300 ms + 采集),
+ *      而本函数所在的 `sweep_step()` 由 `DisplayProtocol_Process()` 在主循环里调,
+ *      `sweep_start()` 却是**在触摸回调里**调的 —— 在那里阻塞会让界面卡住,
+ *      正是 `sweep_begin_leg()` 注释里立过的那条规矩。
+ *      ⇒ 第 1 点用"当前挡位"(用户手动选的那一挡就是起手提示),第 2 点起自动。
+ *   ② **跑完不复原用户的挡位**。扫压期间挡位归自动管(顶栏与按钮高亮都是
+ *      `0x18` 回读,看得见);收尾时停在**最后一点真正用过的**那一挡上,
+ *      那正是看曲线时最想知道的。
+ */
+static void sweep_autoscale(void)
+{
+    double   z_mag;
+    uint32_t cur, pick;
+
+    if (s_auto_gear_off != 0u) {
+        return;
+    }
+    /* ⚠️ `|Z|` 不可信就别据它换挡 —— 那等于拿噪声去选量程。
+     *    这一点的读数会照常填进曲线(`s_pair.z_valid` 为 0 时曲线本来就不画点)。 */
+    if (!s_pair.z_valid) {
+        return;
+    }
+    z_mag = sqrt((s_pair.z.z_re_ohm * s_pair.z.z_re_ohm) +
+                 (s_pair.z.z_im_ohm * s_pair.z.z_im_ohm));
+    if (!(z_mag > 0.0)) {
+        return;
+    }
+
+    cur  = cv_reg_read(CV_REG_RANGE_SEL) & CV_RANGE_MASK;
+    pick = cv_range_pick(z_mag, cur, SWEEP_GEAR_MARGIN);
+    if (pick == 0u) {
+        /* 只有 |Z| 无效才会走到这里,上面已经挡过 —— 真到了就说明判据自身异常。 */
+        printf("[proto] ⚠️ 自动换挡:判据返回 0(不该发生),本轮不再自动换挡\n");
+        s_auto_gear_off = 1u;
+        return;
+    }
+    if (pick == cur) {
+        return;                       /* 迟滞窗口内 —— 什么都不做 */
+    }
+
+    if (!RelayView_ApplyGear(pick)) {
+        printf("[proto] ⚠️ 自动换挡 %.0f Ω(0x%X)未确认 —— **本轮不再尝试**;\n"
+               "        下一点仍按 0x%X 算(每行 Z 日志都印了当时挡位),\n"
+               "        要手动接管:测量页那 4 颗挡位按钮。\n",
+               cv_range_ohms(pick), (unsigned)pick, (unsigned)cur);
+        s_auto_gear_off = 1u;
+        return;
+    }
+
+    /* `VL/VH = R0 / |R0 + Z|` —— **相量和的模**,不是 `R0/(R0+|Z|)`。
+     * 两者在 `|Z| ≫ R0` 时接近,在 `|Z| ≈ R0` 时差一倍 ——
+     * 本函数恰恰常在 `|Z| ≈ R0` 附近做判断,所以只能写对的那个。
+     * (左边那个数是**实测**的 `mag_b/mag_a`,右边是换算到新挡的**预测值**。) */
+    {
+        double r_cur  = cv_range_ohms(cur);
+        double r_pick = cv_range_ohms(pick);
+        double d_new  = sqrt(((r_pick + s_pair.z.z_re_ohm) * (r_pick + s_pair.z.z_re_ohm)) +
+                             (s_pair.z.z_im_ohm * s_pair.z.z_im_ohm));
+
+        printf("[proto] 🔁 自动换挡:%.0f Ω(0x%X)→ %.0f Ω(0x%X)| "
+               "|Z| = %.0f Ω,VL/VH 实测 %.1f%% → 预计 %.1f%%(R0=%.0f Ω,+%.0f%% 于 |Z|)\n",
+               r_cur, (unsigned)cur, r_pick, (unsigned)pick, z_mag,
+               (s_pair.mag_a_v > 0.0f) ? (100.0 * (double)s_pair.mag_b_v / (double)s_pair.mag_a_v) : 0.0,
+               (d_new > 0.0) ? (100.0 * r_pick / d_new) : 0.0,
+               r_pick,
+               (z_mag > 0.0) ? (100.0 * ((r_pick / z_mag) - 1.0)) : 0.0);
+    }
 }
 
 /** @brief 下发一个扫压点。由 `DisplayProtocol_Process()` 按驻留时间调。 */
@@ -887,6 +1042,17 @@ static void sweep_step(void)
      *    (演示模式下读数由模型给,不采。) */
     if ((s_sweep_index > 0u) && !s_demo_enabled) {
         sweep_measure_point(s_sweep_index);
+        /* 🆕 ①.5 **趁这一点的新鲜 |Z| 在手上,先把下一点该用的挡位换好。**
+         *  放这个位置的三个理由:
+         *   · 这里才刚拿到 |Z|,判据要的就是它;
+         *   · 在②的"写下一个偏压"之前 ⇒ 换挡的机械稳定时间(挡位继电器)
+         *     和偏压的建立时间**重叠**在同一个驻留里,不多花时间;
+         *   · `RelayView_ApplyGear()` 只做几次寄存器读写、**不阻塞**
+         *     (挡位分支不看 `busy_r`,见 `relay_ctrl.v`),所以放进
+         *     `Process()` 这条主循环里是安全的 —— 与 `ApplyPath()` 不同,
+         *     那个最坏阻塞 200 ms×2,只能待在腿与腿之间。
+         *  ⛔ 演示模式不换挡:那读数是模型编的,拿它选量程毫无意义。 */
+        sweep_autoscale();
     }
 
     /* ② 再推进下一个点。
@@ -1053,7 +1219,10 @@ void DisplayProtocol_Init(void)
            "        偏压 = 0.0 V(0x14 = 0x%05X)\n"
            "        扫压驻留 = %u ms(可用 CV_SWEEP_DWELL_MS 覆盖)\n"
            "        🟢 回路:0x1C **本进程是唯一写入方**(点测量项目才切,见 relay_view.c);\n"
-           "           档位:0x18 仍只读回显 —— 本轮不改挡位,由复位值决定(标称 B = 100 Ω)。\n"
+           "        🟢 档位:0x18 **本进程也是唯一写入方**(2026-10-15 起,"
+           "测量页 A/B/C/D 四颗按钮)。\n"
+           "           ⚠️ 开机挡位由 RTL 复位值决定(标称 B = 100 Ω),"
+           "但**以 0x18 回读为准** —— 每次测量都现读,不缓存。\n"
            "           Cs/Cp/D 由同一个复数 Z 出(Z = R0·(VH−VL)/VL,未标定)\n",
            (unsigned)MeasureConfig_GetDdsHz(),
            (unsigned)cv_dds_hz_to_code(MeasureConfig_GetDdsHz()),
@@ -1143,7 +1312,10 @@ void DisplayProtocol_Process(void)
  * 🔄 2026-10-06:原先只复三样(偏压 / 激励 / 界面),用户要求"按下后所有参数
  *    恢复默认",所以补上了**采样率与相位**。现在覆盖面是:
  *
- *      `0x14` 偏压      → 0 V(码 0x80000)
+ *      `0x14` 偏压      → 0 V(码 `0x00000`)
+ *                          ⚠️ 原文这里写 `0x80000` —— 那是**补码下的 −100 V**
+ *                          (见 `pynq_regs.h` 的 2026-10-12 实测段),已经写错了。
+ *                          实际执行的是 `bias_apply(0.0f)`,码 `0x00000` 才对。
  *      `0x80` 激励      → 1 MHz
  *      `0x88` 采样率    → `CV_ADC_DIV_DEFAULT` → 32.5 MSPS(DIV=4,2026-10-15 起)
  *      `0x88` 相位      → 该分频比的窗口中心(DIV=4 → **+1**;公式现算,不是常数)
@@ -1259,6 +1431,67 @@ bool DisplayProtocol_RequestPath(uint32_t path)
                path_name(path));
     }
     return true;
+}
+
+/**
+ * @brief 挡位按钮 A/B/C/D —— 真的写 `0x18`(2026-10-15 新增)。
+ *
+ * 🔴 **在此之前全工程没有 `0x18` 的写入者**:顶栏显示它、`cv_range_ohms()`
+ *    换算 R0、`point_measure()` 每次测量现读它 —— 但**没有人写它**。
+ *    于是挡位矩阵即使物理接上了,也永远停在 RTL 复位值 **B 挡(100 Ω)**。
+ *    ⇒ 与 2026-10-14 那个"回路按钮只换颜色"是**同一类缺陷**,只是那一轮
+ *      收 `0x1C` 时把 `0x18` 漏掉了(当时挡位不在范围内)。
+ *
+ * ⚠️ **与 `RequestPath()` 的一处不同**:那边切完要等继电器稳定窗(≤400 ms),
+ *    所以实际切换推迟到 `Process()` 到点时做;这里**当场写**
+ *    —— 挡位是模拟开关、`0x18` 分支在 RTL 里当拍生效且不看 busy
+ *    (理由见 `relay_view.h::RelayView_ApplyGear()` 的说明),
+ *    阻塞只有两次 AXI 往返(µs 级),放在触摸回调里安全。
+ *
+ * ⛔ **不碰 `s_bias`、不重排采集** —— 挡位变了之后正在扫压/正在等的那个点,
+ *    其 R0 会变而它是在写 `0x18` **之前**起的,归属说不清。所以:
+ *    正在跑扫压时挡位按钮**照切但不推荐**(切完这条曲线的 R0 前后不一致,
+ *    数据里看得出来)。这一条**没有加互锁** —— 加锁会让用户以为按钮坏了;
+ *    判据是日志:每个 `[relay] 挡位 →` 行都带 R0,事后能对上。
+ *
+ * @param index 0=A(10Ω) 1=B(100Ω) 2=C(1kΩ) 3=D(10kΩ);越界直接拒,不动硬件
+ * @return 是否已下发**且**回读确认(`false` 时原因已 printf + 弹框)
+ */
+bool DisplayProtocol_RequestGear(uint32_t index)
+{
+    static const uint32_t onehot[4] =
+        {CV_RANGE_A, CV_RANGE_B, CV_RANGE_C, CV_RANGE_D};
+
+    s_cmd_total++;
+    /* 挡位也算"测量设置类"指令,与回路按钮共用计数 ——
+     * `DisplayProtocol_GetPathCommandCount()` 报的是"设置类按钮总点击数",
+     * 语义从 2026-10-15 起略微变宽。⛔ 不新开一个计数器:它只被打印用,
+     * 再分一类只会让那行日志更长而不更有用。 */
+    s_path_cmds++;
+
+    if (index > 3u) {
+        printf("[proto] ⛔ 挡位按钮下标 %u 越界(只有 0..3),不下发\n",
+               (unsigned)index);
+        return false;
+    }
+
+    /* force 刷一次:让顶栏与按钮先站到"硬件现在在哪挡"上。
+     * ⚠️ 不能省 —— 若上一次写失败,按钮高亮还停在旧挡,先刷一次保证
+     *    "写之前显示的是真值",失败之后显示的也还是真值。 */
+    (void)RelayView_Refresh(1);
+
+    if (RelayView_ApplyGear(onehot[index])) {
+        printf("[proto] 挡位按钮 → %s:已切换并回读确认(R0 = %.0f Ω)\n",
+               gear_name(index), cv_range_ohms(onehot[index]));
+        return true;
+    }
+
+    printf("[proto] ⚠️ 挡位按钮 → %s:切换**未确认** —— 顶栏与按钮高亮显示的"
+           "仍是硬件真值(可能还是旧挡)。\n"
+           "        四个读数(Rg / Cs / Cp / I)都按【当前挡位】反演,"
+           "挡位没切成功就不要拿这批数当真。\n",
+           gear_name(index));
+    return false;
 }
 
 bool DisplayProtocol_RequestBias(uint32_t bias_tenths)
@@ -1407,8 +1640,14 @@ bool DisplayProtocol_RequestSweepStop(void)
            (unsigned)s_sweep_index, (unsigned)s_sweep_total,
            (double)s_bias_volts);
     s_sweep_active = 0u;
+    /* 🔴 **「中止」与「跑完」同样要归零** —— 理由见 `sweep_finish()` 那段。
+     *   原文这里写「偏压保持在当前点」并且照做了:中止后栅极顶在当时的电压上,
+     *   跟"扫完了不置零"是同一个洞,只是走的是另一条出口。
+     *   中止不需要保留工作点:没有"继续扫"这条路,要接着测只能重新发起,
+     *   而重新发起会自己写第一点。 */
+    (void)bias_apply(0.0f);
     UI_Demo_SetSweepInspectionReady();      /* 已经拿到的点仍可查看 */
-    UI_Demo_SetStatusText("状态:扫压已停止(偏压保持在当前点)");
+    UI_Demo_SetStatusText("状态:扫压已停止(偏压已归 0)");
     return true;
 }
 

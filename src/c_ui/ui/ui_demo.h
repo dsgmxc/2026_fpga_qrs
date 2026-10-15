@@ -50,10 +50,18 @@ void UI_Demo_SetStatusText(const char *text);
 void UI_Demo_SetInitStatusText(const char *text);
 void UI_Demo_SetActualBias(const char *bias_text);
 void UI_Demo_SetActualPath(const char *path_text);
-/* 🆕 2026-10-10:顶栏「档位:」栏(感应电阻挡位 10Ω/100Ω/1kΩ/10kΩ)。
+/* 🆕 2026-10-10:顶栏「档位:」栏(参考电阻挡位 10Ω/100Ω/1kΩ/10kΩ)。
    与上面两个同一个口径 —— 灌进来的是 **PL 回读的已生效值**,不是请求值。
-   调用方 = `app/relay_view.c`。 */
-void UI_Demo_SetActualGear(const char *gear_text);
+   调用方 = `app/relay_view.c`。
+
+   🆕 2026-10-15 加了 @p gear_code —— **测量页那 4 颗挡位按钮的高亮也跟着它走**。
+   在此之前本函数只更新顶栏那一行文字,按钮高亮没有来源。
+   ⇒ 加了这个参数之后,「挡位」在界面上的**两处显示同源**,
+     不会出现"顶栏说 B、按钮高亮在 D"那种自相矛盾。
+   ⚠️ **别改成"按下就去高亮"** —— 写失败时按钮会变成一句谎话,而本模块的
+     全部存在意义就是消灭界面上的谎话(见 `relay_view.c` 文件头)。
+   @param gear_code `0x18` 的原始独热码(非独热会照实显示 `0xN`,不高亮任何一颗) */
+void UI_Demo_SetActualGear(const char *gear_text, uint32_t gear_code);
 
 /* 🆕 2026-10-10:只读的系统提示框(标题 + 正文 + 「知道了」)。
    给 `app/relay_view.c` 报继电器/档位读回异常用。

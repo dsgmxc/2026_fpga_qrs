@@ -23,6 +23,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <math.h>       /* log10/fabs —— `cv_range_pick()` 的十倍程判据用 */
 
 #ifdef __cplusplus
 extern "C" {
@@ -60,7 +61,10 @@ extern "C" {
 /*      只读,写入权归 Python 侧,避免两个写入方」,**那条约定没有兑现**:*/
 /*      `drivers/relay.py` 零调用方 ⇒ 硬件一直停在复位值。改动理由和    */
 /*      "为什么不是两个写入方"见 `relay_view.c` 的文件头。              */
-/*   ⚠️ `0x18`(挡位)**本轮仍不写** —— 复位值 B 挡 100 Ω,够用。        */
+/*   🟢 **`0x18`(挡位)2026-10-15 起同样归 C 界面写** —— 唯一写入方是   */
+/*      `relay_view.c::RelayView_ApplyGear()`。原文是「`0x18` 本轮仍    */
+/*      不写 —— 复位值 B 挡 100 Ω,够用」,**那句已作废**:用户接上了    */
+/*      挡位矩阵并要求控制它。⛔ 不是 RTL 缺功能,是 C 侧一直没人写。   */
 /* ------------------------------------------------------------------ */
 #define CV_REG_RELAY_STATUS  0x04u   /* RO [0]busy [1]done [2]fault
                                         [15:8]err_code                      */
@@ -157,6 +161,64 @@ static inline double cv_range_ohms(uint32_t range_sel)
     case CV_RANGE_D: return 10000.0;
     default:         return 0.0;
     }
+}
+
+/**
+ * @brief 由 `|Z|` 选**最合适**的参考电阻挡位(独热码)。自动换挡的判据只有这一份。
+ *
+ * 【判据:让 `|Z|` 落在 R0 的**最近十倍程**上】
+ *   `Z = R0·(VH−VL)/VL`,误差只有两个来源,且方向相反:
+ *     · `|Z| ≫ R0` ⇒ `VL` 小,`VL` 的**相对**误差被放大 `|Z|/R0` 倍
+ *       (高压段实测:`VL/VH` 掉到 0.64 %,只有 23~36 码峰峰,贴 12 位量化底);
+ *     · `|Z| ≪ R0` ⇒ `VL ≈ VH`,差值 `VH−VL` 小,它的相对误差被放大 `R0/|Z|` 倍。
+ *   两者在 **`|Z| = R0`** 处相等 ⇒ 最优点就是 `|Z| ≈ R0`,
+ *   此时 `VL/VH ≈ 0.707`,两种失效模式各占一半、谁也不主导。
+ *   四挡是等比级数(10 / 100 / 1 k / 10 k)⇒ "最近"就是**在 log 轴上取最近的挡**。
+ *
+ * 【为什么必须有迟滞】
+ *   边界恰在两个挡位**正中间**(各差 0.5 个十倍程)。`|Z|` 有噪声,
+ *   逐点取最近会让边界附近的点来回跳挡,而**每跳一次,曲线就换一次标定基础**。
+ *   故只有新挡位比当前挡位**明显更近**(≥ @p margin_decades)时才切。
+ *
+ * ⚠️ **本函数只回答"该用哪一挡",不写寄存器。** 下发走
+ *    `RelayView_ApplyGear()`(全工程唯一的 `0x18` 写入方)。
+ *
+ * @param z_ohm          |Z|(Ω);≤ 0 视为无效
+ * @param cur_onehot     当前挡位独热码(`0x18` 回读值);非独热则无"当前挡"可比
+ * @param margin_decades 迟滞宽度(十倍程)。0.15 ≈ 1.41×,见上
+ * @return 建议的独热码;**`z_ohm` 无效时返回 0**(哨兵,调用方必须当错误处理)
+ */
+static inline uint32_t cv_range_pick(double z_ohm, uint32_t cur_onehot,
+                                     double margin_decades)
+{
+    static const uint32_t cand[4] = {CV_RANGE_A, CV_RANGE_B,
+                                     CV_RANGE_C, CV_RANGE_D};
+    double   log_z, best_d, cur_d;
+    uint32_t best = 0u;
+    int      i;
+
+    if (!(z_ohm > 0.0)) {
+        return 0u;
+    }
+    log_z  = log10(z_ohm);
+    best_d = 1e9;
+    for (i = 0; i < 4; ++i) {
+        double d = fabs(log10(cv_range_ohms(cand[i])) - log_z);
+        if (d < best_d) {
+            best_d = d;
+            best   = cand[i];
+        }
+    }
+
+    cur_onehot &= CV_RANGE_MASK;
+    if (cur_onehot == 0u) {
+        return best;                    /* 当前挡未知:直接取最优 */
+    }
+    cur_d = fabs(log10(cv_range_ohms(cur_onehot)) - log_z);
+    if (best_d + margin_decades >= cur_d) {
+        return cur_onehot;              /* 优势不够明显 —— **不动**,防抖 */
+    }
+    return best;
 }
 
 /* ------------------------------------------------------------------ */

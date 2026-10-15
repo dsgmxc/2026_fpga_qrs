@@ -134,6 +134,14 @@ static lv_obj_t *g_page_containers[5];
 static uint8_t g_page_built[5];
 static lv_obj_t *g_single_path_buttons[5];   /* CISS/COSS/CRSS/RG/全部 */
 static lv_obj_t *g_sweep_path_buttons[4];
+/* 🆕 2026-10-15:测量页的挡位按钮 A/B/C/D(10Ω/100Ω/1kΩ/10kΩ)。
+ * ⚠️ 下标 = 独热码的**位号**,不是 `CV_RANGE_*` 的码值 ——
+ *    高亮时用 `UI_GearButtonIndex(g_ui_gear)` 换算,别直接拿码值当下标。
+ * 🔴 **挡位支路数一律走 `UI_GEAR_COUNT`**,照文件头那条纪律(`UI_INIT_DDS_COUNT`
+ *    踩过的坑):数组维度、按钮数、高亮循环三处都由同一个数导出,
+ *    改表就自动改到各处,不靠人记。下面还钉了一条编译期断言。 */
+#define UI_GEAR_COUNT  4u
+static lv_obj_t *g_gear_buttons[UI_GEAR_COUNT];
 static lv_obj_t *g_single_bias_value_label;
 static lv_obj_t *g_sweep_bias_value_label;
 static lv_obj_t *g_single_result_label;
@@ -187,6 +195,13 @@ static uint32_t g_ui_current_page;
 static uint32_t g_ui_reset_request_count;
 static uint32_t g_ui_single_path;
 static uint32_t g_ui_sweep_path;
+/* 🆕 2026-10-15:当前**已生效**的挡位独热码。
+ * 🔴 初值 `0xFFFFFFFF` 是**哨兵**(= "还没从硬件回读过"),不是"未选挡"——
+ *    `0x0` 是合法的"什么都不知道"的另一种写法,而 RTL 明确把全 0 判为非法,
+ *    两者混在一起会让"上电那一瞬间"和"硬件真被写成全 0 了"分不开。
+ *    哨兵值下**一颗按钮都不高亮**,顶栏同样是空的,不会替硬件先说一句话。
+ * 写入方:`UI_Demo_SetActualGear()` —— 那是唯一入口,数据源是 PL 回读。 */
+static uint32_t g_ui_gear = 0xFFFFFFFFu;
 static uint32_t g_ui_single_bias_tenths;
 static uint32_t g_ui_sweep_end_tenths;
 static uint32_t g_ui_analysis_voltage_tenths;
@@ -273,6 +288,35 @@ static const UI_Action g_sweep_path_actions[] =
     {313u, "扫压回路:全部"}
 };
 
+/* 🆕 2026-10-15:挡位按钮。动作码 **215–218** —— 紧挨着回路选择那一段
+ * (210–214),两者语义相邻(都是"测量设置"),且 215 起在原表里是空的。
+ * ⚠️ 文案里的 Ω 是 U+03A9,已在 `ui_font_cn_20` 子集里(顶栏「档位:」栏
+ *    从 2026-10-10 起一直在用它)。⛔ 加新字符前先核字库,缺字**静默**显示空白。 */
+/* 按钮上的字(`g_gear_texts`)与顶栏状态提示(`g_gear_actions[].status_text`)
+ * **分开写**,照回路那组的做法(`path_names` vs `g_single_path_actions`):
+ * 按钮要短(半宽 126 px),提示要完整。 */
+static const char *const g_gear_texts[] =
+{
+    "A 10Ω", "B 100Ω", "C 1kΩ", "D 10kΩ"
+};
+static const UI_Action g_gear_actions[] =
+{
+    {215u, "状态:档位 A(10Ω)"},
+    {216u, "状态:档位 B(100Ω)"},
+    {217u, "状态:档位 C(1kΩ)"},
+    {218u, "状态:档位 D(10kΩ)"}
+};
+
+/* 🔴 **编译期把两张表钉到 `UI_GEAR_COUNT` 上。**
+ *    少了项:第 4 颗按钮拿到空指针动作 / 越界文字 —— 崩,或者静默空白;
+ *    多了项:多出来那项永远点不到。**两种编译器都不报** —— 除非这里报。
+ *    这正是文件头那条「档位数一律走宏」纪律要防的那类漂移
+ *    (2026-10-08「65MSPS 那颗按钮点了没反应」就是同一个病)。 */
+_Static_assert(sizeof(g_gear_texts) / sizeof(g_gear_texts[0]) == UI_GEAR_COUNT,
+               "g_gear_texts 的表长必须等于 UI_GEAR_COUNT");
+_Static_assert(sizeof(g_gear_actions) / sizeof(g_gear_actions[0]) == UI_GEAR_COUNT,
+               "g_gear_actions 的表长必须等于 UI_GEAR_COUNT");
+
 static const UI_Action g_single_measure_action =
     {220u, "状态:单点测量指令发送完成"};
 static const UI_Action g_sweep_start_action =
@@ -287,6 +331,7 @@ static void UI_ShowSweep(void);
 static void UI_ShowResults(void);
 static void UI_ResultsRefresh(void);
 static void UI_UpdateSinglePathStyle(void);
+static void UI_UpdateGearStyle(void);
 static void UI_UpdateMeasureResultMode(void);
 static void UI_UpdateSweepPathStyle(void);
 static void UI_UpdateSingleBiasLabel(void);
@@ -368,6 +413,81 @@ static void UI_UpdateSinglePathStyle(void)
     }
 
     UI_UpdateMeasureResultMode();
+}
+
+/* ------------------------------------------------------------------ */
+/* 🆕 2026-10-15:挡位按钮的高亮                                        */
+/* ------------------------------------------------------------------ */
+
+/**
+ * @brief 挡位独热码 → 按钮下标。
+ *
+ * 独热码是 `1<<n`,下标就是 `n` —— 但**别直接把码值当下标用**:
+ * `CV_RANGE_B` 是 2,而 B 挡的按钮下标是 1。两处混用能编译、能跑,
+ * 只是高亮永远差一位,是典型的静默错位。
+ *
+ * ⛔ 非独热(含全 0,以及"还没回读过"的哨兵 `0xFFFFFFFF`)返回
+ *    `UI_GEAR_COUNT` —— 一个**保证越界**的值,调用方据此一颗都不高亮。
+ *    别让它返回 0:那会把"不知道"画成"A 挡",正是本模块要消灭的那类谎话。
+ */
+static uint32_t UI_GearButtonIndex(uint32_t onehot)
+{
+    uint32_t bits = onehot & 0xFu;
+    uint32_t index = 0u;
+
+    if (bits == 0u) {
+        return UI_GEAR_COUNT;              /* 全 0 = 硬件判为非法的组合 */
+    }
+    while ((bits & 1u) == 0u) {
+        bits >>= 1;
+        ++index;
+        if (index >= UI_GEAR_COUNT) {
+            return UI_GEAR_COUNT;          /* 不是恰好一位(或高位有残留) */
+        }
+    }
+    return (bits == 1u) ? index : UI_GEAR_COUNT;
+}
+
+static void UI_UpdateGearStyle(void)
+{
+    /* 四挡各自的强调色。与回路按钮那组**故意不同** —— 回路那组有 5 颗、
+     * 挡位只有 4 颗,若共用一组色,两组按钮并排时"颜色相同"会被误读成
+     * "这两个是一回事"。 */
+    static const uint32_t accent_colors[UI_GEAR_COUNT] =
+        {UI_COLOR_CYAN, UI_COLOR_GREEN, UI_COLOR_ORANGE, UI_COLOR_PURPLE};
+    uint32_t active = UI_GearButtonIndex(g_ui_gear);
+    uint32_t index;
+
+    for (index = 0u; index < UI_GEAR_COUNT; ++index)
+    {
+        lv_obj_t *button = g_gear_buttons[index];
+
+        if (button == NULL)
+        {
+            continue;
+        }
+
+        if (index == active)
+        {
+            lv_obj_set_style_bg_color(button,
+                                      lv_color_hex(accent_colors[index]),
+                                      LV_PART_MAIN | LV_STATE_DEFAULT);
+            lv_obj_set_style_border_color(button,
+                                          lv_color_hex(accent_colors[index]),
+                                          LV_PART_MAIN);
+            lv_obj_set_style_border_width(button, 2, LV_PART_MAIN);
+        }
+        else
+        {
+            lv_obj_set_style_bg_color(button,
+                                      lv_color_hex(UI_COLOR_SURFACE),
+                                      LV_PART_MAIN | LV_STATE_DEFAULT);
+            lv_obj_set_style_border_color(button,
+                                          lv_color_hex(UI_COLOR_BORDER),
+                                          LV_PART_MAIN);
+            lv_obj_set_style_border_width(button, 1, LV_PART_MAIN);
+        }
+    }
 }
 
 /*
@@ -2665,10 +2785,30 @@ static lv_obj_t *UI_PrepareRootScreen(void)
     g_engineering_qr_model_label = NULL;
     g_keypad_value_label = NULL;
     g_keypad_note_label = NULL;
-    for (index = 0u; index < 4u; ++index)
+    /* ⚠️ 两个数组**长度不同**(5 与 4),原来这条循环写死 `< 4u` ——
+     *    `g_single_path_buttons[4]`(「全部」那颗)漏在外面。
+     *    当前 `UI_PrepareRootScreen()` 只在启动时跑一次,且 `ui_demo.c`
+     *    开头已经 `memset` 过整个数组,所以**还没有实际后果**;
+     *    但这是一颗哑弹:哪天根屏重建第二次,下标 4 就是个悬垂指针,
+     *    而 `UI_UpdateSinglePathStyle()` 只判 `NULL` 不判悬垂,当场野指针写。
+     *    改成各清各的、上界从 `sizeof` 导出 —— 以后加挡位按钮不用回来改这里。 */
+    for (index = 0u;
+         index < (uint32_t)(sizeof(g_single_path_buttons) /
+                            sizeof(g_single_path_buttons[0]));
+         ++index)
     {
         g_single_path_buttons[index] = NULL;
+    }
+    for (index = 0u;
+         index < (uint32_t)(sizeof(g_sweep_path_buttons) /
+                            sizeof(g_sweep_path_buttons[0]));
+         ++index)
+    {
         g_sweep_path_buttons[index] = NULL;
+    }
+    for (index = 0u; index < UI_GEAR_COUNT; ++index)
+    {
+        g_gear_buttons[index] = NULL;
     }
     UI_CreateCommonStatusHeader(screen);
     return screen;
@@ -2833,6 +2973,20 @@ static void UI_SimpleActionEvent(lv_event_t *event)
         g_ui_single_path = action->action_code - 210u;
         UI_UpdateSinglePathStyle();
         command_queued = DisplayProtocol_RequestPath(g_ui_single_path);
+    }
+    /* 🆕 2026-10-15:挡位 A/B/C/D(动作码 215–218)。
+     * 🔴 **这里不设 `g_ui_gear`** —— 挡位按钮的高亮由**硬件回读**驱动
+     *    (`UI_Demo_SetActualGear()` ← `relay_view.c`),不跟"用户点了哪颗"走。
+     *    原因:写失败时按钮高亮就会变成一句谎话,而整个 `relay_view` 模块
+     *    存在的意义就是消灭界面上的谎话(见其文件头)。
+     *    所以这条分支只负责**下发**,高亮等 `RelayView_Refresh()` 回来再说。
+     *    ⚠️ 副作用:硬件真被拒时按钮"点了没反应" —— 那是**对的**,
+     *       弹框与 `[relay] ⚠️` 日志会说明原因,不能靠高亮掩盖。 */
+    else if ((action->action_code >= 215u) &&
+             (action->action_code <= 218u))
+    {
+        command_queued =
+            DisplayProtocol_RequestGear(action->action_code - 215u);
     }
     else if ((action->action_code >= 310u) &&
              (action->action_code <= 313u))
@@ -4226,6 +4380,55 @@ static void UI_ShowMeasure(void)
         g_single_bias_value_label = lv_obj_get_child(bias_button, 0);
         UI_UpdateSingleBiasLabel();
     }
+
+    /* ---- 🆕 2026-10-15:参考电阻挡位 A/B/C/D -------------------------
+     * 2×2 网格:可用宽 260(300 − 两侧各 20),两颗 + 8 px 缝 = 260。
+     * y 取 180..296,正好落在「偏压设置」底(166)与「开始测量」顶(322)
+     * 之间的空档里 —— 没有挪动任何既有控件,所以不会连带改到别处的坐标。
+     *
+     * 🔴 **挡位为什么必须由人指定**:`Z = R0·(VH−VL)/VL` 里的 R0 就是挡位,
+     *    Rg / Cs / Cp / 电流四个数**同时**依赖它。挡位选错不会报错,
+     *    只会四个数一起偏 —— 前序 `acquisition_gain.c` 为 RG 强制 A 挡
+     *    (10 Ω)正是为了拉开 `VL/VH = R0/(R0+Rg)` 的对比度。
+     * ⛔ 前序那套自动换挡**没有抄** —— 它在前序固件里是**死的**
+     *    (`sweep_measurement.c:201` 的 `UsesFixedGear()` 硬编码 `return true`,
+     *    `pc_protocol.c` 的 `auto` 命令只回 `E,AUTO_DISABLED`),从未验证过。
+     *    抄一堆没跑过的阈值不如先让人拍板。 */
+    /* ⚠️ **文案用「电阻档位」而不是「参考电阻挡位」** —— 不是简称,是字库。
+     *    `--symbols` 子集里**有 `档`(U+6863)、没有 `挡`(U+6321)**,
+     *    `考` 也不在其中;缺字在 LVGL 里**静默显示成空白**,编译器一句不报。
+     *    2026-10-15 我第一版写的正是「参考电阻挡位」,核字库时才发现
+     *    会渲染成「参 电阻 位」。⇒ **加中文文案前先拿 `--symbols` 那行核一遍。** */
+    UI_CreateText(control_panel, "电阻档位", &ui_font_cn_20,
+                  UI_COLOR_STATUS, 20, 180, 260, 26, LV_TEXT_ALIGN_LEFT);
+    for (index = 0u; index < UI_GEAR_COUNT; ++index)
+    {
+        lv_coord_t gear_x = 20 + (lv_coord_t)(index % 2u) * 134;
+        lv_coord_t gear_y = 210 + (lv_coord_t)(index / 2u) * 46;
+
+        g_gear_buttons[index] =
+            UI_CreateButton(control_panel,
+                            g_gear_texts[index],
+                            UI_COLOR_SURFACE,
+                            gear_x,
+                            gear_y,
+                            126,
+                            40,
+                            UI_SimpleActionEvent,
+                            (void *)&g_gear_actions[index]);
+    }
+    UI_UpdateGearStyle();      /* 上电那一刻还没回读过 → 一颗都不高亮 */
+    /* ⚠️ **本轮挡位按钮只放在测量页**。扫压页没有 —— 即扫压前若要换挡,
+     *    得先回测量页点一下。这是个**已知取舍**,不是遗漏:
+     *      · 挡位是全局设置,顶栏一直显示它 ⇒ 不存在"以为换了其实没换";
+     *      · 但扫压页正是最需要它的一处(前序为 RG 扫压强制 A 挡 10 Ω)——
+     *        所以这条迟早要补。⛔ 补的时候**别复制这十几行**:
+     *        抽成 `UI_CreateGearButtons(parent, x, y)` 两个页面共用,
+     *        否则两处高亮会各持一份 `g_ui_gear` 的副本,迟早不同步。
+     *    ⛔ 现在先不补的理由:**板上没有显示器,我改完看不到版面** ——
+     *        每多改一处未经验证的坐标,就多一个只能靠猜的赌注。
+     *        等能上电、能看见屏,再加这一行不迟。 */
+
     UI_CreateButton(control_panel,
                     "开始测量",
                     UI_COLOR_GREEN,
@@ -6307,8 +6510,15 @@ void UI_Demo_SetActualPath(const char *path_text)
 
 /* 🆕 2026-10-10:顶栏「档位:」栏。与上面 `SetActualPath` 逐行同构 ——
  * 同一条数据通路(存缓冲 → UI_UpdateCommonStatus → 刷标签),
- * 内容同样是 **PL 回读的已生效值**。调用方 = `app/relay_view.c`。 */
-void UI_Demo_SetActualGear(const char *gear_text)
+ * 内容同样是 **PL 回读的已生效值**。调用方 = `app/relay_view.c`。
+ *
+ * 🆕 2026-10-15:多了 @p gear_code,**测量页那 4 颗挡位按钮的高亮也在这里刷**。
+ *    ⇒ 顶栏文字与按钮高亮**同源、同一拍更新**,不可能出现"顶栏说 B、
+ *      按钮高亮在 D"。这是个不变量:`g_ui_gear` 全工程**只有本函数写**。
+ *    ⛔ 别在按键回调里顺手设一下 `g_ui_gear` "让点击响应更快"  ——
+ *      写失败时按钮就会高亮一颗硬件根本没切的挡位,而 R0 读了旧值、
+ *      四个读数一起错却没人报警。那正是本模块要消灭的那类谎话。 */
+void UI_Demo_SetActualGear(const char *gear_text, uint32_t gear_code)
 {
     if (gear_text == NULL)
     {
@@ -6317,6 +6527,8 @@ void UI_Demo_SetActualGear(const char *gear_text)
     (void)strncpy(g_ui_actual_gear, gear_text,
                   sizeof(g_ui_actual_gear) - 1u);
     g_ui_actual_gear[sizeof(g_ui_actual_gear) - 1u] = '\0';
+    g_ui_gear = gear_code & 0xFu;
+    UI_UpdateGearStyle();
     UI_UpdateCommonStatus();
 }
 

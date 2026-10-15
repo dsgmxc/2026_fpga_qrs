@@ -12,6 +12,16 @@
  *
  * 🔴 **本模块是 `0x1C` / `0x18` 的【唯一写入方】—— 2026-10-14 改。**
  *
+ *   · ⚠️ **2026-10-14 那次只收到了 `0x1C`。** `0x18` 名义上写进了本文件头,
+ *     实际一个写入者都没有 —— 全工程对 `0x18` **只有读**(顶栏显示、
+ *     `cv_range_ohms()` 换算 R0)。于是挡位矩阵即使物理接上了,也永远停在
+ *     RTL 复位值 **B 挡 100 Ω**。**2026-10-15 补上 `RelayView_ApplyGear()`**,
+ *     这次是真的唯一写入方。
+ *     ⛔ **不是 RTL 缺功能**:`relay_ctrl.v` 的 `0x18` 分支与 `0x1C` 同批
+ *     实现、同批上板验证过;部署位流里 `gear[0..3]` 已落在
+ *     `Y13/V10/V11/W10`(`system_wrapper_io_placed.rpt` 可查)。
+ *     ⇒ **本轮纯 C 侧,不重新综合、不重载位流。**
+ *
  *   · 原文(2026-10-10)是「**只读,一个寄存器都不写**;写入权归 Python 侧」。
  *     那条约定**没有兑现**,这正是"切换测量项目回路不跟着切"的根因:
  *
@@ -146,15 +156,20 @@ uint32_t RelayView_Refresh(int force)
         s_last_cfg = cfg;
     }
 
-    /* ---- 档位栏 ---- */
+    /* ---- 档位栏 ----
+     * 🆕 2026-10-15:setter 多带一个**独热码**(`gear`),不只带显示名。
+     *    原因:测量页那 4 颗挡位按钮的高亮要跟**硬件真值**走,而不是跟
+     *    "用户刚点了哪颗"。若按钮高亮跟请求走,写失败时按钮就变成一句谎话
+     *    —— 那正是本模块存在的理由(见文件头「界面在说谎」)。
+     *    加上这个参数之后,**设置挡位状态的入口全工程只有这一处**。 */
     if (gear != s_last_gear) {
         const char *name = range_name(gear);
 
         if (name != NULL) {
-            UI_Demo_SetActualGear(name);
+            UI_Demo_SetActualGear(name, gear);
         } else {
             (void)snprintf(buf, sizeof(buf), "0x%X", (unsigned)gear);
-            UI_Demo_SetActualGear(buf);
+            UI_Demo_SetActualGear(buf, gear);
             printf("[relay] ⚠️ RANGE_SEL 回读 0x%X 非独热\n", (unsigned)gear);
         }
         s_last_gear = gear;
@@ -338,4 +353,86 @@ bool RelayView_ApplyPath(uint32_t path)
      * "现在轮到哪条腿"的地方。在这里随便挑一条切,只会让顶栏闪一下。 */
     printf("[relay] 「全部」= 各回路分别测,切换发生在测量时,此处不动继电器\n");
     return false;
+}
+
+/* ------------------------------------------------------------------ */
+/* 挡位写入侧(2026-10-15 新增)—— 全工程唯一写 0x18 的地方             */
+/* ------------------------------------------------------------------ */
+
+bool RelayView_ApplyGear(uint32_t onehot)
+{
+    const char *name;
+    uint32_t    st, err, back;
+
+    onehot &= CV_RANGE_MASK;
+    name    = range_name(onehot);
+
+    /* 独热闸。⛔ 别把它删掉"省一次查表" —— `relay_ctrl.v` 的
+     * `legal_gear()` 只认 4'b0001/0010/0100/1000,送别的值进去会被拒
+     * (err=0x02)且 **`gear_reg` 一位不动**,表面看就是"点了没反应"。
+     * 在这里拦下来,错误信息才落在发起方这一侧。
+     * ⚠️ **全 0 也在拒收之列**(R0 = ∞ ⇒ 开路,读数全是噪声),而它是最容易
+     *    被 `onehot &= MASK` 之类的手滑"造"出来的值之一 —— 所以这条闸
+     *    必须在前,不能换成"非零就放行"。 */
+    if (name == NULL) {
+        printf("[relay] ⛔ 挡位码 0x%X 非独热,拒绝下发\n", (unsigned)onehot);
+        return false;
+    }
+
+    /* 幂等:已经在目标挡位上就什么都不做。
+     * ★ 两个作用,都是**功能**不是优化:
+     *   ① 用户连点同一颗按钮不该产生 AXI 写;
+     *   ② `err` 是**粘滞**的(`relay_ctrl.v:301` —— 只有"被受理的写"
+     *      才清它),粘着旧错时应当照写一次把它清掉,所以判据里
+     *      `err == NONE` 是必需的,不是可选。
+     * ⚠️ 这里**没有**"等 busy 落"那一步,和 `ApplyCode` 不同 ——
+     *    理由逐字写在 `relay_ctrl.v` 的 `④ 挡位请求` 注释里:
+     *    挡位分支**不看 `busy_r`**,继电器正在稳定时换挡是**允许**的。 */
+    back = cv_reg_read(CV_REG_RANGE_SEL) & CV_RANGE_MASK;
+    err  = CV_RELAY_STS_ERR(cv_reg_read(CV_REG_RELAY_STATUS));
+    if (back == onehot && err == CV_RELAY_ERR_NONE) {
+        RelayView_Refresh(1);
+        return true;
+    }
+
+    /* 写。⛔ **全工程只此一处 `cv_reg_write(CV_REG_RANGE_SEL)`。** ----
+     * C 侧的 `cv_reg_write` 是**单笔** volatile 存储 + 内存屏障
+     * (`pynq_regs.c:78-86`),不存在 `drivers/relay.py` §0 里那个
+     * "`struct.pack_into` 发两笔事务"的缺陷(那条只针对 `0x1C` 查过,
+     * 但同一套写法两处通用)。 */
+    cv_reg_write(CV_REG_RANGE_SEL, onehot);
+
+    /* 查错 —— ★ 先读 err,再比读回值(err 是原因,读回值是现象;
+     * 反过来「被拒绝」会表现成「读回不一致」,日志里就丢了 err_code=0x02
+     * 这条线索)。`0x18` 是当拍生效,不需要像 `ApplyCode` 那样等倒计时,
+     * 这里的两次读就是全部延时。 */
+    st  = cv_reg_read(CV_REG_RELAY_STATUS);
+    err = CV_RELAY_STS_ERR(st);
+    if (err != CV_RELAY_ERR_NONE) {
+        printf("[relay] ⚠️ 写 0x18=0x%X(%s) 被拒:err=0x%02X(读回 0x%X)\n",
+               (unsigned)onehot, name, (unsigned)err,
+               (unsigned)(cv_reg_read(CV_REG_RANGE_SEL) & CV_RANGE_MASK));
+        RelayView_Refresh(1);        /* 让弹框按 err_code 说具体原因 */
+        return false;
+    }
+
+    back = cv_reg_read(CV_REG_RANGE_SEL) & CV_RANGE_MASK;
+    if (back != onehot) {
+        /* err 干净而读回不等 —— `relay_ctrl.v` 的因果链在这里断了。
+         * 这是**真异常**,要留证,不要拿"重试一次"盖过去。 */
+        printf("[relay] ⚠️ 写 0x18=0x%X(%s) 读回 0x%X,err=0(因果链断裂)\n",
+               (unsigned)onehot, name, (unsigned)back);
+        RelayView_Refresh(1);
+        return false;
+    }
+
+    /* 顶栏 + 挡位按钮立刻变,不等那 200 ms 节流 ------------------------- */
+    RelayView_Refresh(1);
+
+    /* R0 一并打出来:`0x18` 一变,Rg / Cs / Cp / 电流**四个数同时变**,
+     * 而它们各自的计算处都是"现读 0x18 换算"(见 `cv_range_ohms()`),
+     * 日志里把 R0 写死下来,事后对不上时才有出处,不用回头猜当时是哪一挡。 */
+    printf("[relay] 挡位 → %s(0x%X, R0 = %.0f Ω)\n",
+           name, (unsigned)onehot, cv_range_ohms(onehot));
+    return true;
 }
