@@ -1,0 +1,448 @@
+
+============================================================
+ 变异体 M1  freq_word_f 两帧顺序对调(先发 14 MSB 再发 14 LSB)—— 违反手册表 9
+============================================================
+ adc_9833 功能仿真自检报告
+ 时钟 50 MHz / PWR_WAIT=1000(加速值,真值 10000000)
+ SPI_HALF_T=256 / CS_SETUP=1000 / 帧间隔 1024 拍 —— 均为真值
+ 期望值来源:AD9833 手册中文 Rev. E 表 2 / 表 5 / 表 6 / 表 9 / p15
+============================================================
+  [帧 0] 0x2100   @ 198.97 us
+  [帧 1] 0x570a   @ 408.51 us
+  [帧 2] 0x428f   @ 618.05 us
+  [帧 3] 0x2000   @ 827.59 us
+ init_done 于 858.33 us 拉高 → 开始逐帧测量
+
+-- 更新1:code = 28'h0a3d70a --
+  [帧 4] 0x428f   @ 1037.19 us
+  [帧 5] 0x570a   @ 1246.73 us
+
+-- 更新2:code = 28'h1234567 --
+  [帧 6] 0x448d   @ 1456.29 us
+   帧6 已收完 → 现在把更新3 的触发打在**发射中途**
+
+-- 更新3:code = 28'h0aaaaaa(触发落在更新2 的 GAP 里)--
+  [帧 7] 0x4567   @ 1665.83 us
+  [帧 8] 0x42aa   @ 1875.39 us
+  [帧 9] 0x6aaa   @ 2084.93 us
+
+A. 初始化 4 帧(表 5 控制字 / 表 9 频率写入规则)
+   帧0 实测 0x2100 / 期望 0x2100   PASS
+   帧1 实测 0x570a / 期望 0x570a   PASS
+   帧2 实测 0x428f / 期望 0x428f   PASS
+   帧3 实测 0x2000 / 期望 0x2000   PASS
+  PASS | at least 4 init frames emitted
+  PASS | init frame0 = 0x2100
+  PASS | init frame1 = 0x570A
+  PASS | init frame2 = 0x428F
+  PASS | init frame3 = 0x2000
+
+B. 控制字位域(表 5 / 表 6;只看帧 0 与帧 3)
+  PASS | frame0 D15,D14 = 00 -> control register
+  PASS | frame3 D15,D14 = 00 -> control register
+  PASS | frame1 D15,D14 = 01 -> FREQ0 write
+  PASS | frame2 D15,D14 = 01 -> FREQ0 write
+  PASS | both freq frames share same D15,D14 (Table 9)
+  PASS | frame0 B28(D13) = 1 -> 28-bit two-write load
+  PASS | frame3 B28(D13) = 1
+  PASS | frame0 RESET(D8) = 1 -> power-on reset
+  PASS | frame3 RESET(D8) = 0 -> reset released
+  PASS | frame0 vs frame3 differ only in RESET (f0^f3==0x0100)
+  PASS | HLB(D12) = 0 (ignored when B28=1)
+  PASS | FSELECT(D11) = 0 -> FREQ0 selected
+  PASS | PSELECT(D10) = 0 -> PHASE0 selected
+  PASS | SLEEP1(D7) = 0 -> MCLK enabled
+  PASS | SLEEP12(D6) = 0 -> DAC active
+  PASS | OPBITEN(D5) = 0 -> DAC to VOUT
+  PASS | DIV2(D3) = 0
+  PASS | MODE(D1) = 0 -> sinusoidal output
+  PASS | reserved D4 / D2 / D0 all zero
+
+C. 频率字重建(表9:第一帧 = 14 个 LSB,第二帧 = 14 个 MSB)
+   FREQREG 实测 28'h0a3d70a / 期望 28'h0a3d70a
+   f_out = 25 MHz x 10737418 / 2^28 = 999999.9776 Hz
+  PASS | init FREQREG rebuilt = 0xA3D70A
+  PASS | f_out within 1 Hz of 1 MHz (target 999999.978 Hz)
+
+D. 正常态(分帧送码值)
+   更新1 code=28'h0a3d70a 实测 428f 570a / 期望 570a 428f  FAIL
+   更新2 code=28'h1234567 实测 448d 4567 / 期望 4567 448d  FAIL
+   更新3 code=28'h0aaaaaa 实测 42aa 6aaa / 期望 6aaa 42aa  FAIL
+  FAIL | update1 frames = 570A / 428F
+  FAIL | update2 frames = 4567 / 448D
+  FAIL | update1 frames byte-identical to init frames 1/2 (same Table 9 rule)
+  FAIL | update3 = 6AAA / 42AA (trigger fired mid-transmission, edge not lost)
+  PASS | total frames = 10 (4 init + 3 updates x 2)
+  FAIL | update1 FREQREG rebuilt = 0x0A3D70A
+  FAIL | update2 FREQREG rebuilt = 0x1234567
+  FAIL | update3 FREQREG rebuilt = 0x0AAAAAA
+
+E. 时序实测(全部为真值,未加速)
+   SCLK 半周期 实测 5120.00 ns(设计值 5120 ns = SPI_HALF_T 拍,表2 t5/t6 下限 10 ns)
+   t4  SCLK 周期 实测 10240.00 ns(表2 下限 25 ns)
+   t7  FSYNC->SCLK 下降沿 最小 25100.00 ns(表2 下限 5 ns)
+   t8  SCLK 下降沿->FSYNC 上升沿 最小 10260.00 / 最大 10260.00 ns(表2 窗口 10 ~ 10235 ns)
+   t11 SCLK 高->FSYNC 下降沿 最小 20270.00 ns(表2 下限 5 ns)
+   帧间 FSYNC 高电平 最小 20580.00 ns
+   FSYNC 上升沿 -> 下一帧首个 SCLK 下降沿 最小 45680.00 ns(这才是 t8 max 要保护的东西)
+  PASS | SCLK half period = SPI_HALF_T = 256 clk (5120 ns)
+  PASS | SCLK half period jitter = 0
+  PASS | t5/t6 SCLK high/low duration >= 10 ns
+  PASS | t4 SCLK period >= 25 ns
+  PASS | t7 >= 5 ns
+  PASS | t8 >= 10 ns
+  FAIL | t8 <= t4 - 5 ns (LITERAL bound; see note in E)
+  PASS | next SCLK falling edge after FSYNC rise >= 5 ns
+  PASS | t11: SCLK high when FSYNC falls
+  PASS | no protocol violation (16 bits/frame, no stray SCLK)
+
+F. init_done
+   第 4 帧结束 827.59 us / init_done 858.35 us(相差 30.76 us)
+  PASS | init_done asserted after frame3
+  PASS | init_done rises exactly once
+  PASS | FSYNC idle high during reset
+
+============================================================
+ 检查项 47 项:PASS 39 / FAIL 8
+ 结论:存在 8 项失败,见上表
+============================================================
+$finish called at time : 2094930 ns : File "/home/hyp/Desktop/fpga_pro/qrs/qrs.srcs/sim_1/new/tb_adc_9833.v" Line 402
+exit
+INFO: xsimkernel Simulation Memory Usage: 273844 KB (Peak: 339120 KB), Simulation CPU Usage: 700 ms
+INFO: [Common 17-206] Exiting xsim at Sun Sep 20 21:44:11 2026...
+
+============================================================
+ 变异体 M2  init 帧2: 0x428F -> 0x828F(地址位由 FREQ0 变成 FREQ1)
+============================================================
+ adc_9833 功能仿真自检报告
+ 时钟 50 MHz / PWR_WAIT=1000(加速值,真值 10000000)
+ SPI_HALF_T=256 / CS_SETUP=1000 / 帧间隔 1024 拍 —— 均为真值
+ 期望值来源:AD9833 手册中文 Rev. E 表 2 / 表 5 / 表 6 / 表 9 / p15
+============================================================
+  [帧 0] 0x2100   @ 198.97 us
+  [帧 1] 0x570a   @ 408.51 us
+  [帧 2] 0x828f   @ 618.05 us
+  [帧 3] 0x2000   @ 827.59 us
+ init_done 于 858.33 us 拉高 → 开始逐帧测量
+
+-- 更新1:code = 28'h0a3d70a --
+  [帧 4] 0x570a   @ 1037.19 us
+  [帧 5] 0x428f   @ 1246.73 us
+
+-- 更新2:code = 28'h1234567 --
+  [帧 6] 0x4567   @ 1456.29 us
+   帧6 已收完 → 现在把更新3 的触发打在**发射中途**
+
+-- 更新3:code = 28'h0aaaaaa(触发落在更新2 的 GAP 里)--
+  [帧 7] 0x448d   @ 1665.83 us
+  [帧 8] 0x6aaa   @ 1875.39 us
+  [帧 9] 0x42aa   @ 2084.93 us
+
+A. 初始化 4 帧(表 5 控制字 / 表 9 频率写入规则)
+   帧0 实测 0x2100 / 期望 0x2100   PASS
+   帧1 实测 0x570a / 期望 0x570a   PASS
+   帧2 实测 0x828f / 期望 0x428f   FAIL
+   帧3 实测 0x2000 / 期望 0x2000   PASS
+  PASS | at least 4 init frames emitted
+  PASS | init frame0 = 0x2100
+  PASS | init frame1 = 0x570A
+  FAIL | init frame2 = 0x428F
+  PASS | init frame3 = 0x2000
+
+B. 控制字位域(表 5 / 表 6;只看帧 0 与帧 3)
+  PASS | frame0 D15,D14 = 00 -> control register
+  PASS | frame3 D15,D14 = 00 -> control register
+  PASS | frame1 D15,D14 = 01 -> FREQ0 write
+  FAIL | frame2 D15,D14 = 01 -> FREQ0 write
+  FAIL | both freq frames share same D15,D14 (Table 9)
+  PASS | frame0 B28(D13) = 1 -> 28-bit two-write load
+  PASS | frame3 B28(D13) = 1
+  PASS | frame0 RESET(D8) = 1 -> power-on reset
+  PASS | frame3 RESET(D8) = 0 -> reset released
+  PASS | frame0 vs frame3 differ only in RESET (f0^f3==0x0100)
+  PASS | HLB(D12) = 0 (ignored when B28=1)
+  PASS | FSELECT(D11) = 0 -> FREQ0 selected
+  PASS | PSELECT(D10) = 0 -> PHASE0 selected
+  PASS | SLEEP1(D7) = 0 -> MCLK enabled
+  PASS | SLEEP12(D6) = 0 -> DAC active
+  PASS | OPBITEN(D5) = 0 -> DAC to VOUT
+  PASS | DIV2(D3) = 0
+  PASS | MODE(D1) = 0 -> sinusoidal output
+  PASS | reserved D4 / D2 / D0 all zero
+
+C. 频率字重建(表9:第一帧 = 14 个 LSB,第二帧 = 14 个 MSB)
+   FREQREG 实测 28'h0a3d70a / 期望 28'h0a3d70a
+   f_out = 25 MHz x 10737418 / 2^28 = 999999.9776 Hz
+  PASS | init FREQREG rebuilt = 0xA3D70A
+  PASS | f_out within 1 Hz of 1 MHz (target 999999.978 Hz)
+
+D. 正常态(分帧送码值)
+   更新1 code=28'h0a3d70a 实测 570a 428f / 期望 570a 428f  PASS
+   更新2 code=28'h1234567 实测 4567 448d / 期望 4567 448d  PASS
+   更新3 code=28'h0aaaaaa 实测 6aaa 42aa / 期望 6aaa 42aa  PASS
+  PASS | update1 frames = 570A / 428F
+  PASS | update2 frames = 4567 / 448D
+  FAIL | update1 frames byte-identical to init frames 1/2 (same Table 9 rule)
+  PASS | update3 = 6AAA / 42AA (trigger fired mid-transmission, edge not lost)
+  PASS | total frames = 10 (4 init + 3 updates x 2)
+  PASS | update1 FREQREG rebuilt = 0x0A3D70A
+  PASS | update2 FREQREG rebuilt = 0x1234567
+  PASS | update3 FREQREG rebuilt = 0x0AAAAAA
+
+E. 时序实测(全部为真值,未加速)
+   SCLK 半周期 实测 5120.00 ns(设计值 5120 ns = SPI_HALF_T 拍,表2 t5/t6 下限 10 ns)
+   t4  SCLK 周期 实测 10240.00 ns(表2 下限 25 ns)
+   t7  FSYNC->SCLK 下降沿 最小 25100.00 ns(表2 下限 5 ns)
+   t8  SCLK 下降沿->FSYNC 上升沿 最小 10260.00 / 最大 10260.00 ns(表2 窗口 10 ~ 10235 ns)
+   t11 SCLK 高->FSYNC 下降沿 最小 20270.00 ns(表2 下限 5 ns)
+   帧间 FSYNC 高电平 最小 20580.00 ns
+   FSYNC 上升沿 -> 下一帧首个 SCLK 下降沿 最小 45680.00 ns(这才是 t8 max 要保护的东西)
+  PASS | SCLK half period = SPI_HALF_T = 256 clk (5120 ns)
+  PASS | SCLK half period jitter = 0
+  PASS | t5/t6 SCLK high/low duration >= 10 ns
+  PASS | t4 SCLK period >= 25 ns
+  PASS | t7 >= 5 ns
+  PASS | t8 >= 10 ns
+  FAIL | t8 <= t4 - 5 ns (LITERAL bound; see note in E)
+  PASS | next SCLK falling edge after FSYNC rise >= 5 ns
+  PASS | t11: SCLK high when FSYNC falls
+  PASS | no protocol violation (16 bits/frame, no stray SCLK)
+
+F. init_done
+   第 4 帧结束 827.59 us / init_done 858.35 us(相差 30.76 us)
+  PASS | init_done asserted after frame3
+  PASS | init_done rises exactly once
+  PASS | FSYNC idle high during reset
+
+============================================================
+ 检查项 47 项:PASS 42 / FAIL 5
+ 结论:存在 5 项失败,见上表
+============================================================
+$finish called at time : 2094930 ns : File "/home/hyp/Desktop/fpga_pro/qrs/qrs.srcs/sim_1/new/tb_adc_9833.v" Line 402
+exit
+INFO: xsimkernel Simulation Memory Usage: 273844 KB (Peak: 339120 KB), Simulation CPU Usage: 700 ms
+INFO: [Common 17-206] Exiting xsim at Sun Sep 20 21:44:16 2026...
+
+============================================================
+ 变异体 M3  init 帧3: 0x2000 -> 0x2100(RESET 位永不释放)
+============================================================
+ adc_9833 功能仿真自检报告
+ 时钟 50 MHz / PWR_WAIT=1000(加速值,真值 10000000)
+ SPI_HALF_T=256 / CS_SETUP=1000 / 帧间隔 1024 拍 —— 均为真值
+ 期望值来源:AD9833 手册中文 Rev. E 表 2 / 表 5 / 表 6 / 表 9 / p15
+============================================================
+  [帧 0] 0x2100   @ 198.97 us
+  [帧 1] 0x570a   @ 408.51 us
+  [帧 2] 0x428f   @ 618.05 us
+  [帧 3] 0x2100   @ 827.59 us
+ init_done 于 858.33 us 拉高 → 开始逐帧测量
+
+-- 更新1:code = 28'h0a3d70a --
+  [帧 4] 0x570a   @ 1037.19 us
+  [帧 5] 0x428f   @ 1246.73 us
+
+-- 更新2:code = 28'h1234567 --
+  [帧 6] 0x4567   @ 1456.29 us
+   帧6 已收完 → 现在把更新3 的触发打在**发射中途**
+
+-- 更新3:code = 28'h0aaaaaa(触发落在更新2 的 GAP 里)--
+  [帧 7] 0x448d   @ 1665.83 us
+  [帧 8] 0x6aaa   @ 1875.39 us
+  [帧 9] 0x42aa   @ 2084.93 us
+
+A. 初始化 4 帧(表 5 控制字 / 表 9 频率写入规则)
+   帧0 实测 0x2100 / 期望 0x2100   PASS
+   帧1 实测 0x570a / 期望 0x570a   PASS
+   帧2 实测 0x428f / 期望 0x428f   PASS
+   帧3 实测 0x2100 / 期望 0x2000   FAIL
+  PASS | at least 4 init frames emitted
+  PASS | init frame0 = 0x2100
+  PASS | init frame1 = 0x570A
+  PASS | init frame2 = 0x428F
+  FAIL | init frame3 = 0x2000
+
+B. 控制字位域(表 5 / 表 6;只看帧 0 与帧 3)
+  PASS | frame0 D15,D14 = 00 -> control register
+  PASS | frame3 D15,D14 = 00 -> control register
+  PASS | frame1 D15,D14 = 01 -> FREQ0 write
+  PASS | frame2 D15,D14 = 01 -> FREQ0 write
+  PASS | both freq frames share same D15,D14 (Table 9)
+  PASS | frame0 B28(D13) = 1 -> 28-bit two-write load
+  PASS | frame3 B28(D13) = 1
+  PASS | frame0 RESET(D8) = 1 -> power-on reset
+  FAIL | frame3 RESET(D8) = 0 -> reset released
+  FAIL | frame0 vs frame3 differ only in RESET (f0^f3==0x0100)
+  PASS | HLB(D12) = 0 (ignored when B28=1)
+  PASS | FSELECT(D11) = 0 -> FREQ0 selected
+  PASS | PSELECT(D10) = 0 -> PHASE0 selected
+  PASS | SLEEP1(D7) = 0 -> MCLK enabled
+  PASS | SLEEP12(D6) = 0 -> DAC active
+  PASS | OPBITEN(D5) = 0 -> DAC to VOUT
+  PASS | DIV2(D3) = 0
+  PASS | MODE(D1) = 0 -> sinusoidal output
+  PASS | reserved D4 / D2 / D0 all zero
+
+C. 频率字重建(表9:第一帧 = 14 个 LSB,第二帧 = 14 个 MSB)
+   FREQREG 实测 28'h0a3d70a / 期望 28'h0a3d70a
+   f_out = 25 MHz x 10737418 / 2^28 = 999999.9776 Hz
+  PASS | init FREQREG rebuilt = 0xA3D70A
+  PASS | f_out within 1 Hz of 1 MHz (target 999999.978 Hz)
+
+D. 正常态(分帧送码值)
+   更新1 code=28'h0a3d70a 实测 570a 428f / 期望 570a 428f  PASS
+   更新2 code=28'h1234567 实测 4567 448d / 期望 4567 448d  PASS
+   更新3 code=28'h0aaaaaa 实测 6aaa 42aa / 期望 6aaa 42aa  PASS
+  PASS | update1 frames = 570A / 428F
+  PASS | update2 frames = 4567 / 448D
+  PASS | update1 frames byte-identical to init frames 1/2 (same Table 9 rule)
+  PASS | update3 = 6AAA / 42AA (trigger fired mid-transmission, edge not lost)
+  PASS | total frames = 10 (4 init + 3 updates x 2)
+  PASS | update1 FREQREG rebuilt = 0x0A3D70A
+  PASS | update2 FREQREG rebuilt = 0x1234567
+  PASS | update3 FREQREG rebuilt = 0x0AAAAAA
+
+E. 时序实测(全部为真值,未加速)
+   SCLK 半周期 实测 5120.00 ns(设计值 5120 ns = SPI_HALF_T 拍,表2 t5/t6 下限 10 ns)
+   t4  SCLK 周期 实测 10240.00 ns(表2 下限 25 ns)
+   t7  FSYNC->SCLK 下降沿 最小 25100.00 ns(表2 下限 5 ns)
+   t8  SCLK 下降沿->FSYNC 上升沿 最小 10260.00 / 最大 10260.00 ns(表2 窗口 10 ~ 10235 ns)
+   t11 SCLK 高->FSYNC 下降沿 最小 20270.00 ns(表2 下限 5 ns)
+   帧间 FSYNC 高电平 最小 20580.00 ns
+   FSYNC 上升沿 -> 下一帧首个 SCLK 下降沿 最小 45680.00 ns(这才是 t8 max 要保护的东西)
+  PASS | SCLK half period = SPI_HALF_T = 256 clk (5120 ns)
+  PASS | SCLK half period jitter = 0
+  PASS | t5/t6 SCLK high/low duration >= 10 ns
+  PASS | t4 SCLK period >= 25 ns
+  PASS | t7 >= 5 ns
+  PASS | t8 >= 10 ns
+  FAIL | t8 <= t4 - 5 ns (LITERAL bound; see note in E)
+  PASS | next SCLK falling edge after FSYNC rise >= 5 ns
+  PASS | t11: SCLK high when FSYNC falls
+  PASS | no protocol violation (16 bits/frame, no stray SCLK)
+
+F. init_done
+   第 4 帧结束 827.59 us / init_done 858.35 us(相差 30.76 us)
+  PASS | init_done asserted after frame3
+  PASS | init_done rises exactly once
+  PASS | FSYNC idle high during reset
+
+============================================================
+ 检查项 47 项:PASS 43 / FAIL 4
+ 结论:存在 4 项失败,见上表
+============================================================
+$finish called at time : 2094930 ns : File "/home/hyp/Desktop/fpga_pro/qrs/qrs.srcs/sim_1/new/tb_adc_9833.v" Line 402
+exit
+INFO: xsimkernel Simulation Memory Usage: 273844 KB (Peak: 339120 KB), Simulation CPU Usage: 700 ms
+INFO: [Common 17-206] Exiting xsim at Sun Sep 20 21:44:21 2026...
+
+============================================================
+ 变异体 M4  正常态两帧的地址位 01 -> 00(把频率字当成控制字发出去)
+============================================================
+ adc_9833 功能仿真自检报告
+ 时钟 50 MHz / PWR_WAIT=1000(加速值,真值 10000000)
+ SPI_HALF_T=256 / CS_SETUP=1000 / 帧间隔 1024 拍 —— 均为真值
+ 期望值来源:AD9833 手册中文 Rev. E 表 2 / 表 5 / 表 6 / 表 9 / p15
+============================================================
+  [帧 0] 0x2100   @ 198.97 us
+  [帧 1] 0x570a   @ 408.51 us
+  [帧 2] 0x428f   @ 618.05 us
+  [帧 3] 0x2000   @ 827.59 us
+ init_done 于 858.33 us 拉高 → 开始逐帧测量
+
+-- 更新1:code = 28'h0a3d70a --
+  [帧 4] 0x170a   @ 1037.19 us
+  [帧 5] 0x428f   @ 1246.73 us
+
+-- 更新2:code = 28'h1234567 --
+  [帧 6] 0x0567   @ 1456.29 us
+   帧6 已收完 → 现在把更新3 的触发打在**发射中途**
+
+-- 更新3:code = 28'h0aaaaaa(触发落在更新2 的 GAP 里)--
+  [帧 7] 0x448d   @ 1665.83 us
+  [帧 8] 0x2aaa   @ 1875.39 us
+  [帧 9] 0x42aa   @ 2084.93 us
+
+A. 初始化 4 帧(表 5 控制字 / 表 9 频率写入规则)
+   帧0 实测 0x2100 / 期望 0x2100   PASS
+   帧1 实测 0x570a / 期望 0x570a   PASS
+   帧2 实测 0x428f / 期望 0x428f   PASS
+   帧3 实测 0x2000 / 期望 0x2000   PASS
+  PASS | at least 4 init frames emitted
+  PASS | init frame0 = 0x2100
+  PASS | init frame1 = 0x570A
+  PASS | init frame2 = 0x428F
+  PASS | init frame3 = 0x2000
+
+B. 控制字位域(表 5 / 表 6;只看帧 0 与帧 3)
+  PASS | frame0 D15,D14 = 00 -> control register
+  PASS | frame3 D15,D14 = 00 -> control register
+  PASS | frame1 D15,D14 = 01 -> FREQ0 write
+  PASS | frame2 D15,D14 = 01 -> FREQ0 write
+  PASS | both freq frames share same D15,D14 (Table 9)
+  PASS | frame0 B28(D13) = 1 -> 28-bit two-write load
+  PASS | frame3 B28(D13) = 1
+  PASS | frame0 RESET(D8) = 1 -> power-on reset
+  PASS | frame3 RESET(D8) = 0 -> reset released
+  PASS | frame0 vs frame3 differ only in RESET (f0^f3==0x0100)
+  PASS | HLB(D12) = 0 (ignored when B28=1)
+  PASS | FSELECT(D11) = 0 -> FREQ0 selected
+  PASS | PSELECT(D10) = 0 -> PHASE0 selected
+  PASS | SLEEP1(D7) = 0 -> MCLK enabled
+  PASS | SLEEP12(D6) = 0 -> DAC active
+  PASS | OPBITEN(D5) = 0 -> DAC to VOUT
+  PASS | DIV2(D3) = 0
+  PASS | MODE(D1) = 0 -> sinusoidal output
+  PASS | reserved D4 / D2 / D0 all zero
+
+C. 频率字重建(表9:第一帧 = 14 个 LSB,第二帧 = 14 个 MSB)
+   FREQREG 实测 28'h0a3d70a / 期望 28'h0a3d70a
+   f_out = 25 MHz x 10737418 / 2^28 = 999999.9776 Hz
+  PASS | init FREQREG rebuilt = 0xA3D70A
+  PASS | f_out within 1 Hz of 1 MHz (target 999999.978 Hz)
+
+D. 正常态(分帧送码值)
+   更新1 code=28'h0a3d70a 实测 170a 428f / 期望 570a 428f  FAIL
+   更新2 code=28'h1234567 实测 0567 448d / 期望 4567 448d  FAIL
+   更新3 code=28'h0aaaaaa 实测 2aaa 42aa / 期望 6aaa 42aa  FAIL
+  FAIL | update1 frames = 570A / 428F
+  FAIL | update2 frames = 4567 / 448D
+  FAIL | update1 frames byte-identical to init frames 1/2 (same Table 9 rule)
+  FAIL | update3 = 6AAA / 42AA (trigger fired mid-transmission, edge not lost)
+  PASS | total frames = 10 (4 init + 3 updates x 2)
+  PASS | update1 FREQREG rebuilt = 0x0A3D70A
+  PASS | update2 FREQREG rebuilt = 0x1234567
+  PASS | update3 FREQREG rebuilt = 0x0AAAAAA
+
+E. 时序实测(全部为真值,未加速)
+   SCLK 半周期 实测 5120.00 ns(设计值 5120 ns = SPI_HALF_T 拍,表2 t5/t6 下限 10 ns)
+   t4  SCLK 周期 实测 10240.00 ns(表2 下限 25 ns)
+   t7  FSYNC->SCLK 下降沿 最小 25100.00 ns(表2 下限 5 ns)
+   t8  SCLK 下降沿->FSYNC 上升沿 最小 10260.00 / 最大 10260.00 ns(表2 窗口 10 ~ 10235 ns)
+   t11 SCLK 高->FSYNC 下降沿 最小 20270.00 ns(表2 下限 5 ns)
+   帧间 FSYNC 高电平 最小 20580.00 ns
+   FSYNC 上升沿 -> 下一帧首个 SCLK 下降沿 最小 45680.00 ns(这才是 t8 max 要保护的东西)
+  PASS | SCLK half period = SPI_HALF_T = 256 clk (5120 ns)
+  PASS | SCLK half period jitter = 0
+  PASS | t5/t6 SCLK high/low duration >= 10 ns
+  PASS | t4 SCLK period >= 25 ns
+  PASS | t7 >= 5 ns
+  PASS | t8 >= 10 ns
+  FAIL | t8 <= t4 - 5 ns (LITERAL bound; see note in E)
+  PASS | next SCLK falling edge after FSYNC rise >= 5 ns
+  PASS | t11: SCLK high when FSYNC falls
+  PASS | no protocol violation (16 bits/frame, no stray SCLK)
+
+F. init_done
+   第 4 帧结束 827.59 us / init_done 858.35 us(相差 30.76 us)
+  PASS | init_done asserted after frame3
+  PASS | init_done rises exactly once
+  PASS | FSYNC idle high during reset
+
+============================================================
+ 检查项 47 项:PASS 42 / FAIL 5
+ 结论:存在 5 项失败,见上表
+============================================================
+$finish called at time : 2094930 ns : File "/home/hyp/Desktop/fpga_pro/qrs/qrs.srcs/sim_1/new/tb_adc_9833.v" Line 402
+exit
+INFO: xsimkernel Simulation Memory Usage: 273844 KB (Peak: 339120 KB), Simulation CPU Usage: 700 ms
+INFO: [Common 17-206] Exiting xsim at Sun Sep 20 21:44:27 2026...

@@ -26,12 +26,11 @@ tools/pl_state.py —— 「PL 现在配没配置?」的**零风险**探针
 | 5 `PSS_CFG_RESET_B` | 1 | 1 | **不区分** | 它描述的是 PL 的复位/供电状态,与"配没配"无关 |
 | 9 `PSS_GPWRDWN_B` | 1 | 1 | **不区分** | 同上 |
 | **10 `PSS_FST_CFG_B`** | 0 | **1** | ★ **区分** | "第一次 PL 配置完成" |
-| INT_STS(0x0C) bit2 | 未测 | **1** | 可能区分 | `PCFG_DONE` 中断(粘滞)—— ⚠️ **加载前那次没读到**,见下 |
+| INT_STS(0x0C) bit2 | 0 | **1** | ★ **区分** | `PCFG_DONE` 中断(粘滞)。整字 `0x00020000` → `0x00020004` |
 
-⚠️ **只测了"加载后"那一列**:空 PL 时的 `STATUS` 是实测的(`0x40000A30`),
-但**同一时刻的 `INT_STS` 我没有读**。所以 bit10 是**实测区分**,
-`INT_STS` bit2 只是"加载后为 1",**不能算作已验证的判据** —— 留在此处备查,
-下次上电顺手补读一次即可坐实(不加任何成本)。
+✅ **两列都实测了**(2026-10-15 补):空 PL 那一列原先只记了 `STATUS`,
+`INT_STS` 是**当天晚些时候冷启动后补读的** —— `INT_STS = 0x00020000`,bit2 = 0。
+⇒ `INT_STS` bit2 与 `STATUS` bit10 **都**是已验证的判据(代码里 `pl_loaded()` 取两者的或)。
 
 ⇒ 判据取 **bit10 `FST_CFG_B`**。它回答的是「**本周期加载过位流没有**」——
    正是我们要问的那个问题(重配置只走 PCAP,只会让它从 0 变 1)。
@@ -57,10 +56,15 @@ tools/pl_state.py —— 「PL 现在配没配置?」的**零风险**探针
    `PCFG_DONE` 那个信号在 **INT_STS(0x0C)bit 2**(`XDCFG_IXR_PCFG_DONE_MASK = 0x04`),
    是**中断状态**位,不是 STATUS 的状态位。
 
-判据(2026-10-15 实测校准):
+判据(2026-10-15 实测校准,**两种状态各读一次**):
 
-    空 PL    : STATUS = 0x40000A30 → CFG_RESET_B=1、GPWRDWN_B=1、FST_CFG_B=0
-    已配置 PL: CFG_RESET_B=0、GPWRDWN_B=0、FST_CFG_B=1   ← `Overlay()` 之后再跑一次即可复验
+    空 PL    : STATUS = 0x40000A30  INT_STS = 0x00020000
+               → CFG_RESET_B=1、GPWRDWN_B=1、FST_CFG_B=0、PCFG_DONE=0
+    已配置 PL: STATUS = 0x50000F30  INT_STS = 0x00020004
+               → CFG_RESET_B=1、GPWRDWN_B=1、FST_CFG_B=1、PCFG_DONE=1
+                 ⚠️ 位 5、位 9 **两种状态都是 1** —— 拿它们当判据必错。
+
+⇒ 只有 **bit10(FST_CFG_B)** 与 **INT_STS bit2(PCFG_DONE)** 区分。
 """
 
 import os

@@ -1,0 +1,94 @@
+
+****** xsim v2025.2 (64-bit)
+  **** SW Build 6299465 on Fri Nov 14 12:34:56 MST 2025
+  **** IP Build 6300035 on Fri Nov 14 10:48:45 MST 2025
+  **** SharedData Build 6298862 on Thu Nov 13 04:50:51 MST 2025
+  **** Start of session at: Sat Sep 19 21:20:10 2026
+    ** Copyright 1986-2022 Xilinx, Inc. All Rights Reserved.
+    ** Copyright 2022-2025 Advanced Micro Devices, Inc. All Rights Reserved.
+
+source xsim.dir/tb_sim/xsim_script.tcl
+# xsim {tb_sim} -autoloadwcfg -runall
+Time resolution is 1 ps
+run -all
+============================================================
+ dac_1220 功能仿真自检报告
+ 时钟 50 MHz / PWR_WAIT=1000 CAL_WAIT_T=3000 SETTLE_WAIT=1500(加速值)
+ 期望值来源:TI SBAS082G Table 5/6/7/9/11/13
+============================================================
+  [字节 0] 0x24   @ 1907.81 us
+  [字节 1] 0x20   @ 2020.43 us
+  [字节 2] 0xa0   @ 2133.05 us
+  [字节 3] 0x05   @ 2245.67 us
+  [字节 4] 0xa1   @ 2358.29 us
+  init_done 于 2423.91 us 拉高 → 开始逐帧测量
+
+-- 第 1 帧:code = 20'h12350,set_in 打脉冲 --
+  [字节 5] 0x40   @ 2560.95 us
+  [字节 6] 0x12   @ 2673.57 us
+  [字节 7] 0x35   @ 2786.19 us
+  [字节 8] 0x00   @ 2898.81 us
+  第 1 帧 DIR:code = 20'h12350 → DIR 实测 24'h123500 / 期望 24'h123500
+  PASS | DIR = code << 4 (datasheet p14 'left justified' / Table 9)
+
+-- 第 2 帧:code = 20'habcde,set_in 再打脉冲 --
+  [字节 9] 0x40   @ 3085.89 us
+  [字节 10] 0xab   @ 3198.51 us
+  [字节 11] 0xcd   @ 3311.13 us
+  [字节 12] 0xe0   @ 3423.75 us
+  第 2 帧 DIR:code = 20'habcde → DIR 实测 24'habcde0 / 期望 24'habcde0
+  PASS | DIR = code << 4 (datasheet p14 'left justified' / Table 9)
+
+A. 复位图案(手册 Table 5 窗口 @50 MHz)
+   段    实测        下限        上限        判定
+   t16   260.02 us   208.32 us   325.52 us   PASS
+   t17   10.02 us   4.08 us   --          PASS
+   t18   570.02 us   416.66 us   732.42 us   PASS
+   (低段) 10.02 us   手册未单列
+   t19   900.02 us   833.32 us   976.56 us   PASS
+  PASS | t16 within [512,800] tXIN
+  PASS | t17 >= 10 tXIN
+  PASS | t18 within [1024,1800] tXIN
+  PASS | t19 within [2048,2400] tXIN
+
+B. 字节流
+   校准 5 字节  实测 24 20 a0 05 a1
+                期望 24 20 a0 05 a1   PASS
+  PASS | cal sequence bytes = 24 20 A0 05 A1
+   第 1 帧 DIR   实测 40 12 35 00
+                期望 40 12 35 00   (code=20'h12350 → DIR=24'h123500)  PASS
+  PASS | DIR frame bytes = 40 + code[19:12] + code[11:4] + {code[3:0],4'b0}
+   第 2 帧 DIR   实测 40 ab cd e0
+                期望 40 ab cd e0   (code=20'habcde → DIR=24'habcde0)  PASS
+  PASS | DIR frame bytes = 40 + code[19:12] + code[11:4] + {code[3:0],4'b0}
+
+C. 寄存器语义(按 Table 6/7 解码命令后重建,与字节切分无关)
+   CMR 实测 16'h20a1 / 期望 16'h20a1
+  PASS | CMR bit13 = 1 (Table 13: write '1' to this bit)
+  PASS | CMR RES(bit7) = 1 -> 20-bit mode
+  PASS | CMR DF(bit5) = 1 -> straight binary
+  PASS | CMR MD(1:0) = 01 -> self-calibration mode
+  PASS | CMR ADPT(bit15) = 0 -> adaptive filtering on (default)
+  PASS | CMR CALPIN(bit14) = 0 -> output off during cal (default)
+  PASS | CMR whole = 0x20A1
+
+D. init_done 时刻
+   复位图案结束 1770.31 us / 第 5 个校准字节 2338.27 us / init_done 2423.93 us
+  PASS | init_done after last cal byte + CAL_WAIT (not at reset-pattern end)
+  PASS | dac_cs stuck low since reset (D20 / datasheet p11 tie-low path)
+
+F. 时序实测
+   SCLK 半周期  256 拍 = 5.12 us → f_SCLK = 97.66 kHz
+   字节间隔 t14 1791 拍 = 35.82 us(手册下限 41 tXIN = 16.68 us)
+  PASS | SCLK half period = SPI_HALF_T = 256 clk (5.12us, 97.66kHz)
+  PASS | byte gap t14 >= 41 tXIN
+  PASS | SCLK half period jitter = 0
+
+============================================================
+ 检查项 21 项:PASS 21 / FAIL 0
+ 结论:全部通过
+============================================================
+$finish called at time : 3503750 ns : File "/home/hyp/Desktop/fpga_pro/qrs/qrs.srcs/sim_1/new/tb_dac_1220.v" Line 361
+exit
+INFO: xsimkernel Simulation Memory Usage: 286720 KB (Peak: 339892 KB), Simulation CPU Usage: 710 ms
+INFO: [Common 17-206] Exiting xsim at Sat Sep 19 21:20:12 2026...

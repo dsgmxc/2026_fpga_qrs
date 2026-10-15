@@ -1,0 +1,55 @@
+
+****** xsim v2025.2 (64-bit)
+  **** SW Build 6299465 on Fri Nov 14 12:34:56 MST 2025
+  **** IP Build 6300035 on Fri Nov 14 10:48:45 MST 2025
+  **** SharedData Build 6298862 on Thu Nov 13 04:50:51 MST 2025
+  **** Start of session at: Tue Sep 15 21:54:31 2026
+    ** Copyright 1986-2022 Xilinx, Inc. All Rights Reserved.
+    ** Copyright 2022-2025 Advanced Micro Devices, Inc. All Rights Reserved.
+
+source xsim.dir/tb_sim/xsim_script.tcl
+# xsim {tb_sim} -autoloadwcfg -runall
+Time resolution is 1 ps
+run -all
+=========================================
+  MODE: CPOL=1  CPHA=1  MSB_FIRST=1
+=========================================
+--- frame: tx=0001  rx(slave)=8000 ---
+  [PASS] MOSI: slave_rx_cap == pat_tx
+  [PASS] MISO: rx_data      == pat_rx
+  [PASS] lave rx bit count  == DATA_WIDTH
+  [PASS] lave tx bit count  == DATA_WIDTH
+--- frame: tx=8000  rx(slave)=0001 ---
+  [PASS] MOSI: slave_rx_cap == pat_tx
+  [PASS] MISO: rx_data      == pat_rx
+  [PASS] lave rx bit count  == DATA_WIDTH
+  [PASS] lave tx bit count  == DATA_WIDTH
+--- frame: tx=aaaa  rx(slave)=5555 ---
+  [PASS] MOSI: slave_rx_cap == pat_tx
+  [PASS] MISO: rx_data      == pat_rx
+  [PASS] lave rx bit count  == DATA_WIDTH
+  [PASS] lave tx bit count  == DATA_WIDTH
+--- frame: tx=1234  rx(slave)=5678 ---
+  [PASS] MOSI: slave_rx_cap == pat_tx
+  [PASS] MISO: rx_data      == pat_rx
+  [PASS] lave rx bit count  == DATA_WIDTH
+  [PASS] lave tx bit count  == DATA_WIDTH
+--- frame: tx=0000  rx(slave)=ffff ---
+  [PASS] MOSI: slave_rx_cap == pat_tx
+  [PASS] MISO: rx_data      == pat_rx
+  [PASS] lave rx bit count  == DATA_WIDTH
+  [PASS] lave tx bit count  == DATA_WIDTH
+--- frame: tx=5678  rx(slave)=1234 ---
+  [PASS] MOSI: slave_rx_cap == pat_tx
+  [PASS] MISO: rx_data      == pat_rx
+  [PASS] lave rx bit count  == DATA_WIDTH
+  [PASS] lave tx bit count  == DATA_WIDTH
+  [PASS] edges == frames * 2 * DATA_WIDTH
+=========================================
+  PASS = 25   FAIL = 0
+  RESULT: ALL PASS
+=========================================
+$finish called at time : 26485 ns : File "/tmp/spi_sim/tb_spi_master.v" Line 251
+exit
+INFO: xsimkernel Simulation Memory Usage: 286652 KB (Peak: 339824 KB), Simulation CPU Usage: 680 ms
+INFO: [Common 17-206] Exiting xsim at Tue Sep 15 21:54:33 2026...

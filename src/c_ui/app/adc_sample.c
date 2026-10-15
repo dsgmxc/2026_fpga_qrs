@@ -230,6 +230,25 @@ float AdcSample_CodesToVolts(float codes)
     return (codes * ADC_SAMPLE_VFS_PP) / 4096.0f;
 }
 
+bool AdcSample_PpConsistent(float pp_codes, float mag_codes, float *out_ratio)
+{
+    /* 幅值已经是**码**了(`AdcSample_Demodulate` 返回的就是码),不要再过一次
+     * `CodesToVolts` —— 那要多除一次 VFS_PP、再多乘回来,白绕一圈还多两次浮点舍入。
+     * 纯正弦的峰峰值 = 2×振幅,这是本判据的全部前提。 */
+    double exp_pp = 2.0 * (double)mag_codes;
+    double limit  = ((double)ADC_SAMPLE_PP_RATIO_MAX * exp_pp) + (double)ADC_SAMPLE_PP_FLOOR;
+
+    if (out_ratio != NULL) {
+        /* 幅值 0 时比值无意义(除数 0)—— 返 0 而不是 inf,
+         * 免得日志里打出 `inf` 又被当成"特别坏"。此时 limit = FLOOR,
+         * 一段真正的直流/死信号只要 `码 <= 64` 仍被判自洽,这是有意的:
+         * 判据只管"有没有毛刺",不管"有没有信号"(那是波形页的活)。 */
+        *out_ratio = (exp_pp > 0.0) ? (float)((double)pp_codes / exp_pp) : 0.0f;
+    }
+
+    return ((double)pp_codes <= limit);
+}
+
 bool AdcSample_Impedance(float ia, float qa, float ib, float qb,
                          double r0_ohm, uint32_t fe_hz, AdcSampleZ *out)
 {

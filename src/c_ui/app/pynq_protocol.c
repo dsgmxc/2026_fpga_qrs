@@ -123,6 +123,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>         /* access() —— 扫压自动换挡的开关文件,见 SWEEP_AUTO_GEAR_FLAG */
 
 /* ==========================================================================
  * 参数
@@ -149,6 +150,23 @@
  * 一句话:挡位边界恰在相邻两挡正中间,不给迟滞就会在边界附近来回跳。 */
 #define SWEEP_GEAR_MARGIN      0.15
 
+/* 🔴 **2026-10-15 起扫压自动换挡默认【关闭】—— 挡位固定,由用户手动选。**
+ *
+ * 为什么关:接线整理后的一次上板,打开自动换挡跑出来是这样 ——
+ *   COSS 腿把挡位从 B 顶到 C,CRSS 腿**继承 C** 再顶到 D;而 **CRSS 恰恰是当时
+ *   唯一一条随偏压变化的曲线**,抬到 D 之后出来的是 |Z| = 140 kΩ、Cs 为负、
+ *   D = 71 的垃圾(见 `report/measurements/20261015_uilog_*.txt`)。
+ *   换挡判据本身没错 —— **错的是它脚下的 |Z| 本身就不可信**(参考电阻是否
+ *   真是挡位标称值,尚未用已知件标定过)。在一个坏数上乘一次错比例,只会放大。
+ *   ⇒ 在测量链标定完之前,先把挡位钉死,少一个自变量。
+ *
+ * 开关用**文件**不用环境变量:环境变量要重启服务才生效,而 `qrs-ui.service`
+ *   重启 = 第二次加载位流(**红线**)。这个文件在 `sweep_start()` 时读,随时可改:
+ *       sudo touch /home/xilinx/sweep_auto_gear     # 打开自动换挡
+ *       sudo rm    /home/xilinx/sweep_auto_gear     # 关闭(默认)
+ * ⚠️ 两种模式在 `sweep_start()` 的日志里都会明说,事后对日志不会有歧义。 */
+#define SWEEP_AUTO_GEAR_FLAG    "/home/xilinx/sweep_auto_gear"
+
 /* 激励频率与采样率**不在这里定义** —— 归 `measure_config.h` / `pynq_regs.h`。
  * 本文件只负责"什么时候下发",不负责"下发什么值"。 */
 
@@ -174,6 +192,15 @@ static float    s_bias_volts;           /* 最后一次真正下发的偏压(量
  * ⚠️ 必须是粘滞的:判据是确定性的,失败后每一点都会算同一个"该换"的结论,
  *    不粘滞就会**每 300 ms 重试一次并弹一次框**,把扫压搅成一片报错。 */
 static uint32_t s_auto_gear_off;
+
+/* 🔴 扫压自动换挡的**总开关**(与上面那个粘滞位不同:这个是用户意图,那是失败状态)。
+ *    默认关 —— 理由与开关文件路径见 `SWEEP_AUTO_GEAR_FLAG` 的注释。
+ *    ⚠️ 每次 `sweep_start()` 现读,不缓存:这样"改文件 → 下一场扫压"就生效,
+ *       不必重启服务(重启 = 第二次加载位流,红线)。 */
+static int sweep_auto_gear_enabled(void)
+{
+    return access(SWEEP_AUTO_GEAR_FLAG, F_OK) == 0;
+}
 
 static uint32_t s_demo_auto_page;       /* CV_UI_DEMO_PAGE:跑完切到这一页 */
 static uint32_t s_demo_auto_stage;
@@ -219,13 +246,26 @@ typedef struct
     double     r0_ohm;      /* 🆕 本次用的参考电阻 = 挡位电阻(回读换算)     */
     float      pp_a;        /* 通道 A 峰峰值,ADC 码(排障:输入有没有信号)  */
     float      pp_b;        /* 通道 B 峰峰值,ADC 码 */
+    float      mag_a_codes; /* 🆕 通道 A 解调幅值,**码**(自洽判据要的就是它)   */
+    float      mag_b_codes; /* 🆕 通道 B 解调幅值,**码**                        */
     uint32_t   otr;         /* 两路 OTR 置起的字数合计 */
     uint32_t   z_valid;     /* 🆕 1 = `z` 是本次算出来的;0 = 保留上一次的值 */
+    uint32_t   tries;       /* 🆕 本点连采了几次才自洽(1 = 一次就对)            */
 } AdcPair;
 
 static uint32_t s_code_a[ADC_SAMPLE_POINTS];
 static uint32_t s_code_b[ADC_SAMPLE_POINTS];
 static AdcPair  s_pair;
+
+/* 🆕 自洽判据的账本(2026-10-15)。`s_adc_points` 数的是"实际采了几次",
+ * 这两个数的是"其中被拒了几次 / 有几个点靠重采才救回来"。
+ * 出问题时看这三个数的比值就知道毛刺有多勤 —— 比翻日志快。 */
+static uint32_t s_adc_rej;          /* 被自洽判据拒掉的采集次数 */
+static uint32_t s_adc_rescued;      /* 靠重采救回来的点数(第一次就被拒的那些) */
+static uint32_t s_adc_void;         /* 连采满仍不自洽、判无读数的点数 */
+/* 一次测量最多采几次。默认 `ADC_SAMPLE_TRIES_MAX`,可用 `CV_ADC_TRIES` 覆盖
+ * (设 1 = 关掉重采,退回旧行为 —— 用来 A/B 对照验证本判据确实在起作用)。 */
+static uint32_t s_adc_tries_max = ADC_SAMPLE_TRIES_MAX;
 
 /** 本次采集**是在哪条腿上**做的(0/1/2/3 = CISS/COSS/CRSS/RG)。
  *  只用于日志 —— 出问题时第一句话是"这是在哪一路采的"。
@@ -398,8 +438,11 @@ static void adc_report_failure(const char *where)
  *
  *  ⚠️ `tick_a` 只是"软件以为 A 在哪";B 的刻度是**硬件**算的,这里用
  *     `AdcSample_PortBTickHw()` 把它复算一遍**只为日志**(排障时判断
- *     "硬件那一版是不是还在数据窗里")。⛔ 不要拿它去修正相位。 */
-static bool adc_capture_pair(void)
+ *     "硬件那一版是不是还在数据窗里")。⛔ 不要拿它去修正相位。
+ *
+ * 🔴 **2026-10-15 起本函数只负责"采一次"** —— 对外的入口是下面的
+ *    `adc_capture_pair()`,它按自洽判据重采。**不要直接调本函数。** */
+static bool adc_capture_pair_once(void)
 {
     uint32_t div    = MeasureConfig_GetSampleDiv();
     uint32_t fs_hz  = cv_adc_sample_hz(div);
@@ -456,11 +499,14 @@ static bool adc_capture_pair(void)
         if (s_code_b[i] > max_b) { max_b = s_code_b[i]; }
     }
 
+    s_pair.mag_a_codes = mag_a_codes;       /* 🆕 码,不是伏 —— 自洽判据用 */
+    s_pair.mag_b_codes = mag_b_codes;
     s_pair.mag_a_v = AdcSample_CodesToVolts(mag_a_codes);
     s_pair.mag_b_v = AdcSample_CodesToVolts(mag_b_codes);
     s_pair.pp_a    = (float)(max_a - min_a);
     s_pair.pp_b    = (float)(max_b - min_b);
     s_pair.otr     = otr_n;
+    s_pair.tries   = 1u;                    /* 由 `adc_capture_pair()` 累加 */
 
     /* ③ 复数阻抗 —— 这是本次改动的**目的**:Cs 不再靠"纯电容"近似,
      *    Cp / D 也从"算不出来"变成算得出来。
@@ -479,6 +525,82 @@ static bool adc_capture_pair(void)
     return true;
 }
 
+/**
+ * @brief 采一对,**直到这一次采集自洽为止**(2026-10-15 新增)。
+ *
+ * 【为什么是"重采"而不是"多采几次取中位数"】
+ *   CRSS 高压端的尖峰不是"读数有噪声",是**整次采集里混进了坏样本**:
+ *   同一个缓冲里,`幅值` 反推的峰峰是 27 码,而 `峰峰` 是 2588 码 —— **94 倍**。
+ *   这种点**整次都错**,N 次取中位数会让"错的多数"赢 ⇒ **中位数治不了它**。
+ *   有效的问法是先问"这一次算不算数"(判据见 `AdcSample_PpConsistent`),
+ *   不算数就**换一次重采**。这是用户口径「多测几次取合理值」的正确形态:
+ *   **"合理"由一条物理不变式定义,不由投票定义。**
+ *
+ * 【重采真的有用吗 —— 实测过】
+ *   日志里同一偏压连测 ≥4 次的 **63 组,全部是"有时标、有时不标"**,
+ *   **"次次都标"一组都没有** ⇒ 毛刺在同一点上不是恒定的,重采能救。
+ *
+ * 【返回值的语义(与 `_once` 一致 ⇒ 调用方一行都不用改)】
+ *   · false = 采集/解调本身失败(MMCM 没锁 / done 超时 / 窗长不合法…)
+ *             —— 重采救不了,直接上报。
+ *   · true  = 采到了,再看 `s_pair.z_valid`:
+ *              1 → 读数可用;0 → **本点判无读数**(曲线断一格,不填假值)。
+ *
+ * ⚠️ **判无读数时两路幅值与波形仍是那一次(坏)采集的真实内容** ——
+ *    不清成 0:0 会画成一条贴着横轴的曲线,看着像"电容很小",那是**假数据**。
+ *    日志里那行 ⛔ 会说明这一点。
+ */
+static bool adc_capture_pair(void)
+{
+    uint32_t k;
+
+    for (k = 0u; k < s_adc_tries_max; ++k) {
+        float ratio_a = 0.0f;
+        float ratio_b = 0.0f;
+        bool  ok_a;
+        bool  ok_b;
+
+        if (!adc_capture_pair_once()) {
+            return false;                       /* 采集/解调失败 —— 重采救不了 */
+        }
+
+        ok_a = AdcSample_PpConsistent(s_pair.pp_a, s_pair.mag_a_codes, &ratio_a);
+        ok_b = AdcSample_PpConsistent(s_pair.pp_b, s_pair.mag_b_codes, &ratio_b);
+
+        if (ok_a && ok_b) {
+            s_pair.tries = k + 1u;
+            if (k > 0u) {
+                s_adc_rescued++;
+                printf("[adc] ✓ 重采第 %u 次自洽,采用(码/期望 A %.2f B %.2f)\n",
+                       (unsigned)(k + 1u), (double)ratio_a, (double)ratio_b);
+            }
+            return true;
+        }
+
+        s_adc_rej++;
+        printf("[adc] ⚠️ 拒收第 %u/%u 次采集:%s%s(码/期望 A %.2f B %.2f,允 ≤ %.1f)"
+               " —— 重采\n",
+               (unsigned)(k + 1u), (unsigned)s_adc_tries_max,
+               ok_a ? "" : "A 路峰峰与解调幅值对不上;",
+               ok_b ? "" : "B 路峰峰与解调幅值对不上;",
+               (double)ratio_a, (double)ratio_b,
+               (double)ADC_SAMPLE_PP_RATIO_MAX);
+    }
+
+    /* 连采满仍不自洽 ⇒ **本点判无读数**。
+     * ⛔ 不要在这里"取个中位数凑一个值" —— 那会把 40 倍的假尖峰变成一个
+     *    **看着很正常的假数**,比留空坏得多。 */
+    s_pair.tries   = s_adc_tries_max;
+    s_pair.z_valid = 0u;
+    s_adc_void++;
+    printf("[adc] ⛔ 本点连采 %u 次都不自洽 ⇒ **判无读数**(曲线断一格)。\n"
+           "        排查:另开 SSH 跑 `sudo -E python3 tools/relay_hold.py --watch` 看回路;\n"
+           "        对照:把 `CV_ADC_TRIES=1` 起来(关掉重采,退回旧行为,尖峰会回来)。\n"
+           "        两路幅值与波形仍是那一次采集的真实内容(仅供波形页看),已置 z_valid=0。\n",
+           (unsigned)s_adc_tries_max);
+    return true;
+}
+
 /** @brief 一行采集证据。扫压时每点一行 —— 出问题时第一眼看的就是它。
  *
  *  🔴 **2026-10-14 改:加了 Z / Cs / Cp / D 与 R0。**
@@ -486,17 +608,35 @@ static bool adc_capture_pair(void)
  *     现在这几项是**要看的第一批数**:`Re Z` 与万用表量的栅极电阻对得上,
  *     就说明整条相位通路是通的 —— 这是 §五 验证里最关键的一条自证。
  *     `R0` 一并打出来,是为了让"挡位到底是多少"这件事**有出处**,不靠猜。 */
+/** `码 / (2×幅值)` —— 正常点 ≈ 1.0;几十以上就是这一次采到了坏字。
+ *  判据本体在 `AdcSample_PpConsistent()`;这里只是**同一个式子**的取值版,
+ *  因为它要同时给出 true/false,没法顺手把比值带出来。 */
+static double pp_ratio(float pp_codes, float mag_codes)
+{
+    double exp_pp = 2.0 * (double)mag_codes;
+
+    return (exp_pp > 0.0) ? ((double)pp_codes / exp_pp) : 0.0;
+}
+
 static void adc_log_pair(const char *tag, float bias_v)
 {
     uint32_t div = MeasureConfig_GetSampleDiv();
 
+    /* 🆕 尾部两项是 2026-10-15 加的**自洽证据**:
+     *    `码/期望` 正常 ≈ 1.0(实测中位 1.02/1.04),几十以上就是这一次采到坏字;
+     *    `采 N 次` 就是这个点重采了几次才过判据。尖峰再冒出来时,
+     *    第一眼看这两项就能分清"设备真变了"和"采集又采错了"。 */
     printf("[adc] %-8s 偏压 %7.3f V | A/INA tick%+d 幅值 %7.4f V 峰峰 %5.0f 码 | "
-           "B/INB tick%+d 幅值 %7.4f V 峰峰 %5.0f 码 | OTR %u\n",
+           "B/INB tick%+d 幅值 %7.4f V 峰峰 %5.0f 码 | OTR %u | "
+           "码/期望 %.2f / %.2f | 采 %u 次\n",
            tag, (double)bias_v,
            (int)AdcSample_PortATick(div), (double)s_pair.mag_a_v, (double)s_pair.pp_a,
            (int)AdcSample_PortBTickHw(div, AdcSample_PortATick(div)),
            (double)s_pair.mag_b_v, (double)s_pair.pp_b,
-           (unsigned)s_pair.otr);
+           (unsigned)s_pair.otr,
+           pp_ratio(s_pair.pp_a, s_pair.mag_a_codes),
+           pp_ratio(s_pair.pp_b, s_pair.mag_b_codes),
+           (unsigned)((s_pair.tries != 0u) ? s_pair.tries : 1u));
 
     if (s_pair.z_valid) {
         printf("[adc] %-8s Z = %9.3f %+.3f j Ω (R0 = %.0f Ω,挡位 0x%X) | "
@@ -881,16 +1021,16 @@ static void sweep_start(uint32_t mask, uint32_t stop_tenths)
     printf("[proto] 扫压开始:%s,%.2f V → %.2f V,%u 点/腿,每点 %u ms\n"
            "        %s**逐腿**切换继电器,每条腿各测各的。\n"
            "        读数:Cs/Cp/D 由同一个复数 Z 出(未标定)\n"
-           "        🆕 挡位:第 1 点用**当前**挡位 0x%X(%.0f Ω),"
-           "第 2 点起按 |Z| 自动换(迟滞 %.2f 十倍程)。\n"
-           "           ⇒ 扫压期间挡位归自动管,手动那 4 颗按钮会被盖掉。\n",
+           "        挡位 0x%X(%.0f Ω):%s\n",
            (mask == 0x07u) ? "CISS+COSS+CRSS" : path_name(first),
            (double)SWEEP_START_VOLTS, (double)stop_volts,
            (unsigned)s_sweep_total, (unsigned)s_dwell_ms,
            (mask == 0x07u) ? "三条腿" : "一条腿",
            (unsigned)(cv_reg_read(CV_REG_RANGE_SEL) & CV_RANGE_MASK),
            cv_range_ohms(cv_reg_read(CV_REG_RANGE_SEL) & CV_RANGE_MASK),
-           (double)SWEEP_GEAR_MARGIN);
+           sweep_auto_gear_enabled()
+               ? "🔁 扫压期间**自动换挡已开启**,手动那 4 颗按钮会被盖掉"
+               : "🔒 **扫压期间固定不变**(自动换挡默认关闭,要开见 SWEEP_AUTO_GEAR_FLAG)");
 }
 
 static void sweep_finish(void)
@@ -930,6 +1070,17 @@ static void sweep_finish(void)
         "状态:扫压结束(偏压已归 0,Cs/Cp/D 未标定)");
     printf("[proto] 扫压结束:%s,共 %u 点已下发到 DAC\n",
            path_name(s_sweep_leg), (unsigned)s_sweep_index);
+
+    /* 🆕 自洽判据的账本(2026-10-15)。三个数一起看才有意义:
+     *    · `拒收` 高、`判无效` 为 0 ⇒ 毛刺勤,但重采每次都救回来了(**现状**)。
+     *    · `判无效` 不为 0         ⇒ 有整点失守 —— 曲线会断格,去看 ⛔ 那几行。
+     *    · 三个都是 0              ⇒ 这一轮干净(或 `CV_ADC_TRIES=1` 关掉了判据,
+     *                                那种情况下**尖峰会回到曲线上**,别误读成"好了")。 */
+    printf("[proto] 采集自洽账本:实际采 %u 次,判据拒收 %u 次,"
+           "重采救回 %u 点,判无效 %u 点(CV_ADC_TRIES=%u)\n",
+           (unsigned)s_adc_points, (unsigned)s_adc_rej,
+           (unsigned)s_adc_rescued, (unsigned)s_adc_void,
+           (unsigned)s_adc_tries_max);
 }
 
 /**
@@ -975,6 +1126,10 @@ static void sweep_autoscale(void)
     uint32_t cur, pick;
 
     if (s_auto_gear_off != 0u) {
+        return;
+    }
+    /* 🔴 **默认关闭** —— 挡位固定。理由与开关文件见 `SWEEP_AUTO_GEAR_FLAG`。 */
+    if (!sweep_auto_gear_enabled()) {
         return;
     }
     /* ⚠️ `|Z|` 不可信就别据它换挡 —— 那等于拿噪声去选量程。
@@ -1164,6 +1319,10 @@ void DisplayProtocol_Init(void)
     s_adc_points        = 0u;
     s_adc_fail          = 0u;
     s_adc_notice        = 0;
+    s_adc_rej           = 0u;
+    s_adc_rescued       = 0u;
+    s_adc_void          = 0u;
+    s_adc_tries_max     = ADC_SAMPLE_TRIES_MAX;
     (void)memset(&s_pair, 0, sizeof(s_pair));
 
     env = getenv("CV_UI_DEMO");
@@ -1177,6 +1336,23 @@ void DisplayProtocol_Init(void)
         if ((v >= (long)SWEEP_DWELL_MS_MIN) && (v <= (long)SWEEP_DWELL_MS_MAX)) {
             s_dwell_ms = (uint32_t)v;
         }
+    }
+
+    /* 🆕 自洽判据的**重采次数**(2026-10-15)。范围 [1,16]:
+     *   1   = 关掉重采,退回旧行为 —— **用来做 A/B 对照**:同一个点连扫两轮,
+     *        带 `CV_ADC_TRIES=1` 那轮尖峰应该回来,默认那轮不该有。
+     *        这是证明"判据真的在起作用"最省事的办法(而不是只看代码)。
+     *   >1  = 第 1 次不自洽就重采,最多采这么多次。
+     * ⚠️ 上界 16 不是随手定的:一次采集 ~6 ms,扫压驻留 300 ms,
+     *    16 次 = 96 ms ≈ 三分之一个驻留 —— 再大就会把扫压拖慢到看得见。 */
+    env = getenv("CV_ADC_TRIES");
+    if ((env != NULL) && (env[0] != '\0')) {
+        long v = strtol(env, NULL, 10);
+        if ((v >= 1) && (v <= 16)) {
+            s_adc_tries_max = (uint32_t)v;
+        }
+        printf("[proto] 采集自洽判据:每点最多采 %u 次(CV_ADC_TRIES=%s)\n",
+               (unsigned)s_adc_tries_max, env);
     }
 
     env = getenv("CV_UI_DEMO_PAGE");
