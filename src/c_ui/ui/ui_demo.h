@@ -18,12 +18,6 @@ extern "C" {
 #define UI_DEMO_SWEEP_PATH_COUNT  3u
 #define UI_DEMO_SWEEP_MAX_POINTS  201u
 
-#define UI_DEMO_AI_QUALITY_ANOMALY   0u
-#define UI_DEMO_AI_QUALITY_UNCERTAIN 1u
-#define UI_DEMO_AI_QUALITY_TRUSTED   2u
-#define UI_DEMO_AI_QUALITY_ERROR     3u
-#define UI_DEMO_AI_QUALITY_WAITING   4u
-
 uint32_t UI_Demo_Init(void);
 uint32_t UI_Demo_GetClickCount(void);
 uint32_t UI_Demo_GetLastButton(void);
@@ -127,10 +121,16 @@ void UI_Demo_UpdateSweepPoint(uint32_t path,
                               const char *capacitance_text,
                               uint32_t valid);
 void UI_Demo_SetSweepInspectionReady(void);
-void UI_Demo_SetAIModelUrl(const char *model_url);
-void UI_Demo_SetAIQualityState(uint32_t state,
-                               uint32_t top_class,
-                               float clean_probability);
+
+/* 🆕 2026-10-17:结果汇总 > 数据传输页的二维码载荷。
+   URL 由 `app/cv_qr_live.c` 生成(ACV1 + SCV1,照搬前序工程)。
+   - @p url 为空 / 超长 ⇒ 等价于 `UI_Demo_ClearTransferPayload()`,回 DEMO 码;
+   - 只在这里改状态并置脏位,真正的 QR 编码推迟到 `UI_UpdateTransferQRCode()`
+     (在结果页刷新时调用),避免每 80 ms 重排一次二维码。 */
+void UI_Demo_SetTransferPayload(const char *url,
+                                uint32_t acv1_nodes,
+                                uint32_t scv1_points);
+void UI_Demo_ClearTransferPayload(void);
 
 /* AI模块只读复制当前扫压数据，不取得UI内部缓存的写权限。 */
 uint32_t UI_Demo_CopySweepPath(uint32_t path,

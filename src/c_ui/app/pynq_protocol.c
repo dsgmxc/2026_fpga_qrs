@@ -118,6 +118,7 @@
  *    (经 `RelayView_ApplyPath()` / `RelayView_ApplyCode()`),不再是只读。
  *    顶栏仍只显示回读真值。见 `relay_view.c` 文件头。 */
 #include "relay_view.h"
+#include "cv_qr_live.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -1016,6 +1017,7 @@ static void sweep_start(uint32_t mask, uint32_t stop_tenths)
     s_auto_gear_off    = 0u;                /* 🆕 新的一轮,重新允许自动换挡 */
 
     UI_Demo_ClearSweep(3u);                 /* 3 ≥ 3 = 清全部三路 */
+    CV_QR_Live_Reset();                     /* 上一轮的二维码立刻作废 */
     sweep_begin_leg(first);                 /* ← 切继电器 + 开第一条腿的曲线 */
 
     printf("[proto] 扫压开始:%s,%.2f V → %.2f V,%u 点/腿,每点 %u ms\n"
@@ -1065,6 +1067,8 @@ static void sweep_finish(void)
     (void)bias_apply(0.0f);
 
     UI_Demo_SetSweepInspectionReady();
+    /* 三路都完整才生成二维码;单路/多点中止会清空传输页(见 cv_qr_live.c)。 */
+    CV_QR_Live_OnSweepComplete();
     UI_Demo_SetStatusText(s_demo_enabled ?
         "状态:扫压结束(演示读数,偏压已归 0)" :
         "状态:扫压结束(偏压已归 0,Cs/Cp/D 未标定)");
@@ -1547,6 +1551,7 @@ bool DisplayProtocol_RequestReset(void)
     }
 
     UI_Demo_ClearSweep(3u);
+    CV_QR_Live_Reset();
     UI_Demo_ClearAllResults();
     /* 🆕 结果页那两张「调试曲线」也得清 —— `ClearAllResults()` 只管读数卡片
      *    和结果快照,`g_result_wave[]` 不在它管的范围里。不清的话复位之后
@@ -1823,6 +1828,9 @@ bool DisplayProtocol_RequestSweepStop(void)
      *   而重新发起会自己写第一点。 */
     (void)bias_apply(0.0f);
     UI_Demo_SetSweepInspectionReady();      /* 已经拿到的点仍可查看 */
+    /* 中止时若三路都已扫完(只是用户在最后一条腿上点了停止)仍可生成;
+     * 否则 `CV_QR_Live_OnSweepComplete()` 会清空传输页并打日志。 */
+    CV_QR_Live_OnSweepComplete();
     UI_Demo_SetStatusText("状态:扫压已停止(偏压已归 0)");
     return true;
 }

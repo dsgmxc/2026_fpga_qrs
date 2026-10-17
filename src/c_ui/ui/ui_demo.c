@@ -52,16 +52,12 @@ LV_FONT_DECLARE(ui_font_cn_28);
 #define UI_SWEEP_GESTURE_UPDATE_MS 30u
 #define UI_SWEEP_DOUBLE_TAP_MS    350u
 #define UI_SWEEP_TAP_MOVE_LIMIT_PX 12
-#define UI_SWEEP_SMALL_ANIMATION_MS  140u
 #define UI_SWEEP_CHART_REFRESH_MS     80u
-#define UI_SWEEP_PAGE_SWIPE_TRIGGER 100
-#define UI_SWEEP_PAGE_SWIPE_MAX_MS 700u
-#define UI_SWEEP_ENGINEERING_BUTTON_WIDTH 164
-#define UI_SWEEP_ENGINEERING_BUTTON_HEIGHT 40
-#define UI_SWEEP_ENGINEERING_BUTTON_GAP 12
-#define UI_ENGINEERING_PARAMETER_COUNT 6u
-#define UI_ENGINEERING_QR_SIZE     288
-#define UI_ENGINEERING_MODEL_URL_CAPACITY 3072u
+#define UI_SWEEP_PARAMETER_COUNT   6u
+#define UI_TRANSFER_QR_SIZE        288
+#define UI_TRANSFER_URL_CAPACITY   3072u
+#define UI_RESULT_PROBE_HINT \
+    "按住曲线查看该点数值 · 左右滑动连续查看"
 
 #define UI_BIAS_MIN_TENTHS        1u
 #define UI_BIAS_MAX_TENTHS        1000u
@@ -155,20 +151,24 @@ static lv_obj_t *g_sweep_progress_bar;
 static lv_obj_t *g_sweep_progress_indicator;
 static lv_obj_t *g_sweep_control_panel;
 static lv_obj_t *g_sweep_settings_button;
-static lv_obj_t *g_sweep_engineering_button;
 static lv_timer_t *g_sweep_chart_refresh_timer;
 static lv_obj_t *g_sweep_curve_page;
-static lv_obj_t *g_sweep_engineering_page;
-static lv_obj_t *g_engineering_analysis_value_label;
-static lv_obj_t *g_engineering_quality_label;
-static lv_obj_t *g_engineering_parameter_value_labels[
-    UI_ENGINEERING_PARAMETER_COUNT];
-static lv_obj_t *g_engineering_slider_track;
-static lv_obj_t *g_engineering_slider_knob;
-static lv_obj_t *g_engineering_qrcode;
-static lv_obj_t *g_engineering_qr_mode_label;
-static lv_obj_t *g_engineering_qr_status_label;
-static lv_obj_t *g_engineering_qr_model_label;
+/* 结果页「扫压结果」页签上的分析电压控件(自 2026-10-17 从独立参数页搬来) */
+static lv_obj_t *g_results_analysis_value_label;
+static lv_obj_t *g_results_parameter_value_labels[UI_SWEEP_PARAMETER_COUNT];
+static lv_obj_t *g_results_analysis_track;
+static lv_obj_t *g_results_analysis_knob;
+static lv_obj_t *g_results_probe_label;
+/* 结果页「数据传输」页签的实测数据二维码 */
+static lv_obj_t *g_results_transfer_qrcode;
+static lv_obj_t *g_results_transfer_status_label;
+static lv_obj_t *g_results_transfer_payload_label;
+static lv_obj_t *g_results_transfer_model_label;
+static char g_transfer_url[UI_TRANSFER_URL_CAPACITY];
+static uint32_t g_transfer_acv1_nodes;
+static uint32_t g_transfer_scv1_points;
+static uint8_t g_transfer_has_payload;
+static uint8_t g_transfer_qr_dirty;
 /* 🆕 2026-10-06「系统复位」页的测量参数控件与常驻状态行(见 UI_ShowInitialize) */
 static lv_obj_t *g_init_status_label;        /* 复位按钮正下方的常驻一行        */
 /* 🔴 **档位数一律走这两个宏**(2026-10-08)。**
@@ -252,20 +252,20 @@ static int32_t g_sweep_full_y_min_log_milli =
 static int32_t g_sweep_full_y_max_log_milli =
     UI_SWEEP_DEFAULT_Y_MAX_LOG_MILLI;
 static UI_SweepGestureState g_sweep_gesture;
-static UI_SweepPageSwipeState g_sweep_back_swipe;
-static uint8_t g_sweep_engineering_page_active;
-static uint8_t g_sweep_subpage_animating;
 static uint8_t g_sweep_chart_dirty;
-static uint8_t g_engineering_analysis_initialized;
-static uint8_t g_engineering_ai_model_ready;
-static uint32_t g_engineering_quality_state;
-static uint32_t g_engineering_quality_class;
-static float g_engineering_quality_clean_probability;
+static uint8_t g_sweep_analysis_initialized;
 static float g_latest_rg_ohm;
 static uint8_t g_latest_rg_valid;
-static char g_engineering_ai_model_url[UI_ENGINEERING_MODEL_URL_CAPACITY];
+/* 探针归属:0 = 扫压页,1 = 结果页「扫压结果」。
+   两张图共用一份探针数据,但只允许**当前操作的那张图**画十字线。 */
+static lv_obj_t *g_sweep_probe_chart;
+static uint32_t g_sweep_probe_owner;
+/* 结果页图表 / 摘要:真正的定义在结果页那一节,但触摸回调与复位函数
+   比它更早,这里先做文件作用域声明。 */
+static lv_obj_t *g_results_chart;
+static lv_obj_t *g_results_summary_label;
 
-static const char g_engineering_demo_url[] =
+static const char g_transfer_demo_url[] =
     "https://fox4327.github.io/ai-cv2spice-web/";
 
 static const uint32_t g_sweep_series_colors[] =
@@ -357,15 +357,13 @@ static void UI_ApplySweepViewport(void);
 static void UI_ResetSweepViewport(void);
 static void UI_ResetSweepInterpolation(uint32_t path);
 static void UI_BuildSweepInterpolation(uint32_t path);
-static void UI_SetSweepEngineeringPage(bool show, bool animated);
-static void UI_UpdateSweepEngineeringButton(bool animate_appearance);
 static void UI_RequestSweepChartRefresh(void);
 static void UI_SweepChartRefreshTimer(lv_timer_t *timer);
-static void UI_UpdateEngineeringPage(void);
-static void UI_UpdateEngineeringVoltageRange(void);
-static void UI_UpdateEngineeringQRCode(void);
-static void UI_UpdateEngineeringQualityLabel(void);
-static bool UI_IsSweepEngineeringReady(void);
+static void UI_UpdateSweepAnalysisCard(void);
+static void UI_UpdateSweepAnalysisRange(void);
+static void UI_UpdateTransferQRCode(void);
+static bool UI_IsSweepDataComplete(void);
+static void UI_ResultsSweepTouchEvent(lv_event_t *event);
 static void UI_BackEvent(lv_event_t *event);
 
 static void UI_RecordAction(uint32_t action_code)
@@ -1312,7 +1310,7 @@ static bool UI_ParseNonnegativeDecimal(const char *text, float *value)
     return true;
 }
 
-static void UI_UpdateEngineeringSlider(void)
+static void UI_UpdateSweepAnalysisSlider(void)
 {
     lv_coord_t track_width;
     lv_coord_t knob_width;
@@ -1320,14 +1318,14 @@ static void UI_UpdateEngineeringSlider(void)
     lv_coord_t knob_x;
     uint32_t span;
 
-    if ((g_engineering_slider_track == NULL) ||
-        (g_engineering_slider_knob == NULL))
+    if ((g_results_analysis_track == NULL) ||
+        (g_results_analysis_knob == NULL))
     {
         return;
     }
 
-    track_width = lv_obj_get_width(g_engineering_slider_track);
-    knob_width = lv_obj_get_width(g_engineering_slider_knob);
+    track_width = lv_obj_get_width(g_results_analysis_track);
+    knob_width = lv_obj_get_width(g_results_analysis_knob);
     travel = track_width - knob_width;
     span = (g_ui_analysis_voltage_max_tenths > UI_BIAS_MIN_TENTHS) ?
            (g_ui_analysis_voltage_max_tenths - UI_BIAS_MIN_TENTHS) : 0u;
@@ -1339,10 +1337,10 @@ static void UI_UpdateEngineeringSlider(void)
              (g_ui_analysis_voltage_tenths - UI_BIAS_MIN_TENTHS)) /
             span);
     }
-    lv_obj_set_x(g_engineering_slider_knob, knob_x);
+    lv_obj_set_x(g_results_analysis_knob, knob_x);
 }
 
-static void UI_UpdateEngineeringVoltageRange(void)
+static void UI_UpdateSweepAnalysisRange(void)
 {
     uint32_t path;
     uint32_t maximum_tenths = UI_BIAS_MAX_TENTHS;
@@ -1388,11 +1386,11 @@ static void UI_UpdateEngineeringVoltageRange(void)
         maximum_tenths = UI_BIAS_MIN_TENTHS;
     }
     g_ui_analysis_voltage_max_tenths = maximum_tenths;
-    if ((g_engineering_analysis_initialized == 0u) &&
-        UI_IsSweepEngineeringReady())
+    if ((g_sweep_analysis_initialized == 0u) &&
+        UI_IsSweepDataComplete())
     {
         g_ui_analysis_voltage_tenths = g_ui_sweep_end_tenths;
-        g_engineering_analysis_initialized = 1u;
+        g_sweep_analysis_initialized = 1u;
     }
     if (g_ui_analysis_voltage_tenths > maximum_tenths)
     {
@@ -1404,7 +1402,7 @@ static void UI_UpdateEngineeringVoltageRange(void)
     }
 }
 
-static bool UI_IsSweepEngineeringReady(void)
+static bool UI_IsSweepDataComplete(void)
 {
     uint32_t path;
 
@@ -1423,27 +1421,27 @@ static bool UI_IsSweepEngineeringReady(void)
     return true;
 }
 
-static void UI_UpdateEngineeringPage(void)
+static void UI_UpdateSweepAnalysisCard(void)
 {
-    static const char *const units[UI_ENGINEERING_PARAMETER_COUNT] =
+    static const char *const units[UI_SWEEP_PARAMETER_COUNT] =
         {"pF", "pF", "pF", "ohm", "nC", "uJ"};
     EngineeringParametersResult result;
     uint8_t available_curves[3];
-    float values[UI_ENGINEERING_PARAMETER_COUNT];
-    uint8_t valid[UI_ENGINEERING_PARAMETER_COUNT];
-    uint32_t decimals[UI_ENGINEERING_PARAMETER_COUNT] =
+    float values[UI_SWEEP_PARAMETER_COUNT];
+    uint8_t valid[UI_SWEEP_PARAMETER_COUNT];
+    uint32_t decimals[UI_SWEEP_PARAMETER_COUNT] =
         {1u, 1u, 1u, 2u, 2u, 3u};
     uint32_t index;
 
-    if (g_engineering_analysis_value_label != NULL)
+    if (g_results_analysis_value_label != NULL)
     {
         lv_label_set_text_fmt(
-            g_engineering_analysis_value_label,
+            g_results_analysis_value_label,
             "%lu.%lu V",
             (unsigned long)(g_ui_analysis_voltage_tenths / 10u),
             (unsigned long)(g_ui_analysis_voltage_tenths % 10u));
     }
-    UI_UpdateEngineeringSlider();
+    UI_UpdateSweepAnalysisSlider();
 
     for (index = 0u; index < 3u; ++index)
     {
@@ -1469,11 +1467,11 @@ static void UI_UpdateEngineeringPage(void)
     valid[4] = result.qoss_valid;
     valid[5] = result.eoss_valid;
 
-    for (index = 0u; index < UI_ENGINEERING_PARAMETER_COUNT; ++index)
+    for (index = 0u; index < UI_SWEEP_PARAMETER_COUNT; ++index)
     {
         char value_text[28];
 
-        if (g_engineering_parameter_value_labels[index] == NULL)
+        if (g_results_parameter_value_labels[index] == NULL)
         {
             continue;
         }
@@ -1490,10 +1488,10 @@ static void UI_UpdateEngineeringPage(void)
         {
             (void)lv_snprintf(value_text, sizeof(value_text), "--");
         }
-        lv_label_set_text(g_engineering_parameter_value_labels[index],
+        lv_label_set_text(g_results_parameter_value_labels[index],
                           value_text);
         lv_obj_set_style_text_color(
-            g_engineering_parameter_value_labels[index],
+            g_results_parameter_value_labels[index],
             lv_color_hex((valid[index] != 0u) ?
                          UI_COLOR_TEXT : UI_COLOR_TEXT_MUTED),
             LV_PART_MAIN);
@@ -1503,14 +1501,17 @@ static void UI_UpdateEngineeringPage(void)
 static void UI_UpdateSweepProbeLabel(void)
 {
     static const char *const names[] = {"CISS", "COSS", "CRSS"};
+    lv_obj_t *label;
+    char position[20];
     char voltage[20];
     char cs[20];
     char cp[20];
     char dissipation[20];
     uint32_t path;
 
-    if ((g_sweep_progress_label == NULL) ||
-        (g_sweep_probe_valid == 0u))
+    label = (g_sweep_probe_owner == 1u) ?
+            g_results_probe_label : g_sweep_progress_label;
+    if ((label == NULL) || (g_sweep_probe_valid == 0u))
     {
         return;
     }
@@ -1532,12 +1533,21 @@ static void UI_UpdateSweepProbeLabel(void)
         (void)lv_snprintf(cp, sizeof(cp), "--");
         (void)lv_snprintf(dissipation, sizeof(dissipation), "--");
     }
+    if (g_sweep_probe_interpolated != 0u)
+    {
+        (void)lv_snprintf(position, sizeof(position), "INTP");
+    }
+    else
+    {
+        (void)lv_snprintf(position, sizeof(position), "#%lu/%lu",
+                          (unsigned long)(g_sweep_probe_index + 1u),
+                          (unsigned long)g_sweep_total_points[path]);
+    }
 
     lv_label_set_text_fmt(
-        g_sweep_progress_label,
-        "%s  VBIAS=%sV  Cs=%spF  Cp=%spF  D=%s%s",
-        names[path], voltage, cs, cp, dissipation,
-        (g_sweep_probe_interpolated != 0u) ? "  INTP" : "");
+        label,
+        "%s  %s  VBIAS=%sV  Cs=%spF  Cp=%spF  D=%s",
+        names[path], position, voltage, cs, cp, dissipation);
 }
 
 static void UI_ResetSweepProbe(void)
@@ -1554,10 +1564,19 @@ static void UI_ResetSweepProbe(void)
     g_sweep_probe_interpolated = 0u;
     g_sweep_probe_valid = 0u;
     g_sweep_probe_tracking = 0u;
-    if ((was_valid != 0u) && (g_sweep_chart != NULL))
+    if ((was_valid != 0u) && (g_sweep_probe_chart != NULL))
     {
-        lv_obj_invalidate(g_sweep_chart);
+        lv_obj_invalidate(g_sweep_probe_chart);
     }
+    if ((g_sweep_probe_owner == 1u) && (g_results_probe_label != NULL))
+    {
+        lv_label_set_text(g_results_probe_label, UI_RESULT_PROBE_HINT);
+        lv_obj_set_style_text_color(g_results_probe_label,
+                                    lv_color_hex(UI_COLOR_TEXT_MUTED),
+                                    LV_PART_MAIN);
+    }
+    g_sweep_probe_chart = NULL;
+    g_sweep_probe_owner = 0u;
 }
 
 /* 把当前对数视口施加到**指定**图表上。
@@ -1902,173 +1921,9 @@ static void UI_UpdateSweepGesture(const LCD_TouchState *touch_state)
     UI_ApplySweepViewport();
 }
 
-static void UI_SweepSmallAnimationReady(lv_anim_t *animation)
-{
-    (void)animation;
-    g_sweep_subpage_animating = 0u;
-}
-
-static void UI_StartSweepSmallObjectAnimation(lv_obj_t *object,
-                                               lv_coord_t start_x,
-                                               lv_coord_t end_x,
-                                               bool notify_ready)
-{
-    lv_anim_t animation;
-
-    if (object == NULL)
-    {
-        return;
-    }
-    lv_anim_del(object, NULL);
-    lv_anim_init(&animation);
-    lv_anim_set_var(&animation, object);
-    lv_anim_set_exec_cb(&animation, (lv_anim_exec_xcb_t)lv_obj_set_x);
-    lv_anim_set_values(&animation, start_x, end_x);
-    lv_anim_set_time(&animation, UI_SWEEP_SMALL_ANIMATION_MS);
-    lv_anim_set_path_cb(&animation, lv_anim_path_ease_out);
-    if (notify_ready)
-    {
-        lv_anim_set_ready_cb(&animation, UI_SweepSmallAnimationReady);
-    }
-    lv_anim_start(&animation);
-}
-
-static void UI_StartSweepHeaderAnimation(void)
-{
-    const lv_coord_t title_x = 84;
-
-    if ((g_ui_current_page != UI_PAGE_SWEEP) ||
-        (g_header_title_label == NULL))
-    {
-        g_sweep_subpage_animating = 0u;
-        return;
-    }
-
-    g_sweep_subpage_animating = 1u;
-    UI_StartSweepSmallObjectAnimation(g_header_title_label,
-                                      title_x + 16,
-                                      title_x,
-                                      true);
-}
-
-static void UI_SetSweepEngineeringPage(bool show, bool animated)
-{
-    if ((g_sweep_curve_page == NULL) ||
-        (g_sweep_engineering_page == NULL))
-    {
-        return;
-    }
-    if (animated &&
-        ((g_sweep_engineering_page_active != 0u) == show))
-    {
-        return;
-    }
-
-    if (g_header_title_label != NULL)
-    {
-        lv_anim_del(g_header_title_label, NULL);
-    }
-    lv_obj_set_x(g_sweep_curve_page, 0);
-    lv_obj_set_x(g_sweep_engineering_page, 0);
-    g_sweep_engineering_page_active = show ? 1u : 0u;
-
-    if ((g_ui_current_page == UI_PAGE_SWEEP) &&
-        (g_header_title_label != NULL))
-    {
-        lv_label_set_text(g_header_title_label,
-                          show ? "参数页面" : "扫压测量");
-    }
-    if (show)
-    {
-        UI_UpdateEngineeringPage();
-        if ((g_ui_current_page == UI_PAGE_SWEEP) &&
-            (g_header_operation_label != NULL))
-        {
-            lv_label_set_text(g_header_operation_label,
-                              (g_engineering_ai_model_ready != 0u) ?
-                              "MODEL QR" : "DEMO QR");
-        }
-    }
-    else if ((g_ui_current_page == UI_PAGE_SWEEP) &&
-             (g_header_operation_label != NULL) &&
-             (g_sweep_inspection_ready != 0u))
-    {
-        lv_label_set_text(g_header_operation_label, "扫压完成");
-    }
-
-    if (show)
-    {
-        lv_obj_add_flag(g_sweep_curve_page, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_clear_flag(g_sweep_engineering_page, LV_OBJ_FLAG_HIDDEN);
-    }
-    else
-    {
-        lv_obj_add_flag(g_sweep_engineering_page, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_clear_flag(g_sweep_curve_page, LV_OBJ_FLAG_HIDDEN);
-    }
-    g_sweep_subpage_animating = 0u;
-    UI_UpdateSweepEngineeringButton(false);
-    if (!show && (g_sweep_chart_dirty != 0u))
-    {
-        UI_RebuildSweepChart();
-    }
-    if (animated)
-    {
-        UI_StartSweepHeaderAnimation();
-    }
-}
-
-static void UI_EngineeringBackSwipeEvent(lv_event_t *event)
-{
-    lv_event_code_t code;
-    lv_indev_t *input_device;
-    lv_point_t point;
-
-    if ((event == NULL) ||
-        (g_sweep_engineering_page_active == 0u) ||
-        (g_sweep_subpage_animating != 0u))
-    {
-        return;
-    }
-    code = lv_event_get_code(event);
-    input_device = lv_indev_get_act();
-    if (input_device == NULL)
-    {
-        return;
-    }
-    lv_indev_get_point(input_device, &point);
-
-    if (code == LV_EVENT_PRESSED)
-    {
-        g_sweep_back_swipe.active = 1u;
-        g_sweep_back_swipe.start_point = point;
-        g_sweep_back_swipe.start_tick = lv_tick_get();
-        return;
-    }
-    if (g_sweep_back_swipe.active == 0u)
-    {
-        return;
-    }
-    if ((code == LV_EVENT_RELEASED) || (code == LV_EVENT_PRESS_LOST))
-    {
-        int32_t delta_x = (int32_t)point.x -
-                          (int32_t)g_sweep_back_swipe.start_point.x;
-        int32_t delta_y = (int32_t)point.y -
-                          (int32_t)g_sweep_back_swipe.start_point.y;
-        uint32_t elapsed = lv_tick_elaps(g_sweep_back_swipe.start_tick);
-
-        g_sweep_back_swipe.active = 0u;
-        if ((code == LV_EVENT_RELEASED) &&
-            (delta_x >= UI_SWEEP_PAGE_SWIPE_TRIGGER) &&
-            (delta_x > (2 * abs(delta_y))) &&
-            (elapsed <= UI_SWEEP_PAGE_SWIPE_MAX_MS))
-        {
-            UI_SetSweepEngineeringPage(false, true);
-        }
-    }
-}
-
 static bool UI_SelectInterpolatedSweepProbe(
+    lv_obj_t *chart,
+    uint32_t owner,
     const lv_point_t *touch_point,
     bool lock_current_path)
 {
@@ -2086,8 +1941,8 @@ static bool UI_SelectInterpolatedSweepProbe(
     uint8_t probe_model_valid;
     bool found = false;
 
-    if ((touch_point == NULL) || (g_sweep_chart == NULL) ||
-        !UI_GetSweepPlotArea(g_sweep_chart, &plot_area) ||
+    if ((touch_point == NULL) || (chart == NULL) ||
+        !UI_GetSweepPlotArea(chart, &plot_area) ||
         (touch_point->x < plot_area.x1) ||
         (touch_point->x > plot_area.x2) ||
         ((!lock_current_path) &&
@@ -2136,7 +1991,7 @@ static bool UI_SelectInterpolatedSweepProbe(
         }
         if (!SweepInterpolation_Evaluate(&g_sweep_cs_curve[path],
                                          voltage, &cs) ||
-            !UI_SweepValueToPixel(g_sweep_chart, voltage, cs,
+            !UI_SweepValueToPixel(chart, voltage, cs,
                                   &curve_point))
         {
             if (lock_current_path)
@@ -2197,14 +2052,21 @@ static bool UI_SelectInterpolatedSweepProbe(
         g_sweep_probe_model_valid = probe_model_valid;
         g_sweep_probe_interpolated = 1u;
         g_sweep_probe_valid = 1u;
+        g_sweep_probe_chart = chart;
+        g_sweep_probe_owner = owner;
         UI_UpdateSweepProbeLabel();
-        lv_obj_invalidate(g_sweep_chart);
+        lv_obj_invalidate(chart);
     }
     return true;
 }
 
-static bool UI_SelectSweepProbe(const lv_point_t *touch_point,
-                                bool lock_current_path)
+/* prefer_raw = true:先按原始采样点吸附(结果页按下的瞬间),失败再退回插值。
+   扫压页用 false,保留原有的「完成后直接走插值」行为。 */
+static bool UI_SelectSweepProbe(lv_obj_t *chart,
+                                uint32_t owner,
+                                const lv_point_t *touch_point,
+                                bool lock_current_path,
+                                bool prefer_raw)
 {
     lv_area_t plot_area;
     uint32_t path_offset;
@@ -2214,7 +2076,7 @@ static bool UI_SelectSweepProbe(const lv_point_t *touch_point,
     uint32_t start_path;
     bool found = false;
 
-    if (g_sweep_inspection_ready != 0u)
+    if ((g_sweep_inspection_ready != 0u) && !prefer_raw)
     {
         uint32_t path;
         bool interpolation_available = false;
@@ -2239,13 +2101,14 @@ static bool UI_SelectSweepProbe(const lv_point_t *touch_point,
         }
         if (interpolation_available)
         {
-            return UI_SelectInterpolatedSweepProbe(touch_point,
-                                                    lock_current_path);
+            return UI_SelectInterpolatedSweepProbe(chart, owner,
+                                                   touch_point,
+                                                   lock_current_path);
         }
     }
 
-    if ((touch_point == NULL) || (g_sweep_chart == NULL) ||
-        !UI_GetSweepPlotArea(g_sweep_chart, &plot_area) ||
+    if ((touch_point == NULL) || (chart == NULL) ||
+        !UI_GetSweepPlotArea(chart, &plot_area) ||
         (touch_point->x < plot_area.x1) ||
         (touch_point->x > plot_area.x2) ||
         ((!lock_current_path) &&
@@ -2284,7 +2147,7 @@ static bool UI_SelectSweepProbe(const lv_point_t *touch_point,
             int32_t delta_y;
             uint32_t distance;
 
-            if (!UI_SweepPointToPixel(g_sweep_chart, path, index,
+            if (!UI_SweepPointToPixel(chart, path, index,
                                       &data_point))
             {
                 continue;
@@ -2321,6 +2184,12 @@ static bool UI_SelectSweepProbe(const lv_point_t *touch_point,
          (best_distance > (UI_SWEEP_PROBE_HIT_RADIUS *
                            UI_SWEEP_PROBE_HIT_RADIUS))))
     {
+        if (prefer_raw && (g_sweep_inspection_ready != 0u))
+        {
+            return UI_SelectInterpolatedSweepProbe(chart, owner,
+                                                   touch_point,
+                                                   lock_current_path);
+        }
         return false;
     }
 
@@ -2339,10 +2208,60 @@ static bool UI_SelectSweepProbe(const lv_point_t *touch_point,
             g_sweep_model_valid[best_path][best_index];
         g_sweep_probe_interpolated = 0u;
         g_sweep_probe_valid = 1u;
+        g_sweep_probe_chart = chart;
+        g_sweep_probe_owner = owner;
         UI_UpdateSweepProbeLabel();
-        lv_obj_invalidate(g_sweep_chart);
+        lv_obj_invalidate(chart);
     }
     return true;
+}
+
+/* 结果页「扫压结果」的触摸读数:按下先吸附原始点,滑动时沿曲线插值。
+   结果页不做捏合缩放 —— 缩放只在扫压页,视口由 UI_ApplyChartViewport() 同步。 */
+static void UI_ResultsSweepTouchEvent(lv_event_t *event)
+{
+    lv_event_code_t code;
+    lv_indev_t *input_device;
+    lv_point_t touch_point;
+
+    if (event == NULL)
+    {
+        return;
+    }
+    code = lv_event_get_code(event);
+    if ((code == LV_EVENT_RELEASED) || (code == LV_EVENT_PRESS_LOST))
+    {
+        g_sweep_probe_tracking = 0u;
+        return;
+    }
+    if ((code != LV_EVENT_PRESSED) && (code != LV_EVENT_PRESSING))
+    {
+        return;
+    }
+    input_device = lv_indev_get_act();
+    if (input_device == NULL)
+    {
+        return;
+    }
+    lv_indev_get_point(input_device, &touch_point);
+
+    if (code == LV_EVENT_PRESSED)
+    {
+        g_sweep_probe_tracking =
+            UI_SelectSweepProbe(g_results_chart, 1u, &touch_point,
+                                false, true) ? 1u : 0u;
+        if (g_sweep_probe_tracking != 0u)
+        {
+            lv_obj_set_style_text_color(g_results_probe_label,
+                                        lv_color_hex(UI_COLOR_TEXT),
+                                        LV_PART_MAIN);
+        }
+    }
+    else if (g_sweep_probe_tracking != 0u)
+    {
+        (void)UI_SelectSweepProbe(g_results_chart, 1u, &touch_point,
+                                  true, false);
+    }
 }
 
 static void UI_SweepChartTouchEvent(lv_event_t *event)
@@ -2433,7 +2352,8 @@ static void UI_SweepChartTouchEvent(lv_event_t *event)
         g_sweep_touch_press_point = touch_point;
         g_sweep_single_touch_moved = 0u;
         g_sweep_probe_tracking =
-            UI_SelectSweepProbe(&touch_point, false) ? 1u : 0u;
+            UI_SelectSweepProbe(g_sweep_chart, 0u, &touch_point,
+                                false, false) ? 1u : 0u;
     }
     else
     {
@@ -2448,7 +2368,8 @@ static void UI_SweepChartTouchEvent(lv_event_t *event)
         }
         if (g_sweep_probe_tracking != 0u)
         {
-            (void)UI_SelectSweepProbe(&touch_point, true);
+            (void)UI_SelectSweepProbe(g_sweep_chart, 0u, &touch_point,
+                                      true, false);
         }
     }
 }
@@ -2473,6 +2394,11 @@ static void UI_SweepChartProbeDrawEvent(lv_event_t *event)
     }
 
     chart = lv_event_get_target(event);
+    /* 两张图共用一份探针数据,只让**当前操作的那张**画十字线。 */
+    if (chart != g_sweep_probe_chart)
+    {
+        return;
+    }
     draw_context = lv_event_get_draw_ctx(event);
     if ((draw_context == NULL) ||
         !UI_GetSweepPlotArea(chart, &plot_area) ||
@@ -2542,76 +2468,6 @@ static void UI_SetSweepDrawerOpen(bool open)
             lv_obj_move_foreground(g_sweep_settings_button);
         }
     }
-
-    UI_UpdateSweepEngineeringButton(false);
-}
-
-static void UI_UpdateSweepEngineeringButton(bool animate_appearance)
-{
-    bool drawer_closed;
-    bool should_show;
-    lv_coord_t target_x;
-
-    if (g_sweep_engineering_button == NULL)
-    {
-        return;
-    }
-
-    drawer_closed = (g_sweep_control_panel == NULL) ||
-                    lv_obj_has_flag(g_sweep_control_panel,
-                                    LV_OBJ_FLAG_HIDDEN);
-    should_show = (g_ui_current_page == UI_PAGE_SWEEP) &&
-                  (g_sweep_inspection_ready != 0u) &&
-                  UI_IsSweepEngineeringReady() &&
-                  (g_sweep_engineering_page_active == 0u) &&
-                  drawer_closed;
-    if (!should_show)
-    {
-        lv_anim_del(g_sweep_engineering_button, NULL);
-        lv_obj_add_flag(g_sweep_engineering_button, LV_OBJ_FLAG_HIDDEN);
-        return;
-    }
-
-    target_x = (lv_coord_t)LCD_PIXEL_WIDTH - 82 -
-               UI_SWEEP_ENGINEERING_BUTTON_GAP -
-               UI_SWEEP_ENGINEERING_BUTTON_WIDTH;
-    if (lv_obj_has_flag(g_sweep_engineering_button, LV_OBJ_FLAG_HIDDEN))
-    {
-        lv_obj_clear_flag(g_sweep_engineering_button, LV_OBJ_FLAG_HIDDEN);
-        if (animate_appearance)
-        {
-            lv_obj_set_x(g_sweep_engineering_button,
-                         (lv_coord_t)LCD_PIXEL_WIDTH);
-            UI_StartSweepSmallObjectAnimation(
-                g_sweep_engineering_button,
-                (lv_coord_t)LCD_PIXEL_WIDTH,
-                target_x,
-                false);
-        }
-        else
-        {
-            lv_obj_set_x(g_sweep_engineering_button, target_x);
-        }
-    }
-    else
-    {
-        lv_obj_set_x(g_sweep_engineering_button, target_x);
-    }
-    lv_obj_move_foreground(g_sweep_engineering_button);
-}
-
-static void UI_SweepEngineeringButtonEvent(lv_event_t *event)
-{
-    if ((event == NULL) ||
-        (lv_event_get_code(event) != LV_EVENT_CLICKED) ||
-        (g_sweep_inspection_ready == 0u) ||
-        !UI_IsSweepEngineeringReady())
-    {
-        return;
-    }
-
-    UI_RecordAction(322u);
-    UI_SetSweepEngineeringPage(true, true);
 }
 
 static void UI_SweepDrawerEvent(lv_event_t *event)
@@ -2772,17 +2628,20 @@ static lv_obj_t *UI_PrepareRootScreen(void)
     g_sweep_progress_indicator = NULL;
     g_sweep_control_panel = NULL;
     g_sweep_settings_button = NULL;
-    g_sweep_engineering_button = NULL;
     g_sweep_curve_page = NULL;
-    g_sweep_engineering_page = NULL;
-    g_engineering_analysis_value_label = NULL;
-    g_engineering_quality_label = NULL;
-    g_engineering_slider_track = NULL;
-    g_engineering_slider_knob = NULL;
-    g_engineering_qrcode = NULL;
-    g_engineering_qr_mode_label = NULL;
-    g_engineering_qr_status_label = NULL;
-    g_engineering_qr_model_label = NULL;
+    g_results_analysis_value_label = NULL;
+    g_results_analysis_track = NULL;
+    g_results_analysis_knob = NULL;
+    g_results_probe_label = NULL;
+    g_results_summary_label = NULL;
+    (void)memset(g_results_parameter_value_labels, 0,
+                 sizeof(g_results_parameter_value_labels));
+    g_results_transfer_qrcode = NULL;
+    g_results_transfer_status_label = NULL;
+    g_results_transfer_payload_label = NULL;
+    g_results_transfer_model_label = NULL;
+    g_sweep_probe_chart = NULL;
+    g_sweep_probe_owner = 0u;
     g_keypad_value_label = NULL;
     g_keypad_note_label = NULL;
     /* ⚠️ 两个数组**长度不同**(5 与 4),原来这条循环写死 `< 4u` ——
@@ -2868,7 +2727,6 @@ static void UI_ActivatePage(UI_Page page)
     if (g_header_title_label != NULL)
     {
         lv_anim_del(g_header_title_label, NULL);
-        g_sweep_subpage_animating = 0u;
         lv_label_set_text(g_header_title_label, page_titles[(uint32_t)page]);
         if (page == UI_PAGE_HOME)
         {
@@ -2934,14 +2792,6 @@ static void UI_BackEvent(lv_event_t *event)
     if ((event == NULL) ||
         (lv_event_get_code(event) != LV_EVENT_CLICKED))
     {
-        return;
-    }
-
-    if ((g_ui_current_page == UI_PAGE_SWEEP) &&
-        (g_sweep_engineering_page_active != 0u))
-    {
-        UI_RecordAction(101u);
-        UI_SetSweepEngineeringPage(false, true);
         return;
     }
 
@@ -3012,7 +2862,6 @@ static void UI_SimpleActionEvent(lv_event_t *event)
         if (command_queued)
         {
             g_sweep_inspection_ready = 0u;
-            UI_SetSweepEngineeringPage(false, false);
             UI_SetSweepDrawerOpen(false);
         }
     }
@@ -4047,7 +3896,7 @@ static void UI_BiasKeypadEvent(lv_event_t *event)
         if (g_keypad_target == UI_BIAS_TARGET_ANALYSIS)
         {
             g_ui_analysis_voltage_tenths = bias_tenths;
-            UI_UpdateEngineeringPage();
+            UI_UpdateSweepAnalysisCard();
         }
         else if (g_keypad_target == UI_BIAS_TARGET_SWEEP)
         {
@@ -4530,13 +4379,12 @@ static lv_obj_t *UI_CreateSweepSubpageContainer(lv_obj_t *parent,
     return container;
 }
 
-static void UI_EngineeringVoltageStepEvent(lv_event_t *event)
+static void UI_SweepAnalysisStepEvent(lv_event_t *event)
 {
     uint32_t increment;
 
     if ((event == NULL) ||
-        (lv_event_get_code(event) != LV_EVENT_CLICKED) ||
-        (g_sweep_subpage_animating != 0u))
+        (lv_event_get_code(event) != LV_EVENT_CLICKED))
     {
         return;
     }
@@ -4553,10 +4401,10 @@ static void UI_EngineeringVoltageStepEvent(lv_event_t *event)
     {
         --g_ui_analysis_voltage_tenths;
     }
-    UI_UpdateEngineeringPage();
+    UI_UpdateSweepAnalysisCard();
 }
 
-static void UI_EngineeringSliderEvent(lv_event_t *event)
+static void UI_SweepAnalysisSliderEvent(lv_event_t *event)
 {
     lv_event_code_t code;
     lv_indev_t *input_device;
@@ -4565,8 +4413,7 @@ static void UI_EngineeringSliderEvent(lv_event_t *event)
     int32_t relative_x;
     uint32_t span;
 
-    if ((event == NULL) || (g_engineering_slider_track == NULL) ||
-        (g_sweep_subpage_animating != 0u))
+    if ((event == NULL) || (g_results_analysis_track == NULL))
     {
         return;
     }
@@ -4581,13 +4428,13 @@ static void UI_EngineeringSliderEvent(lv_event_t *event)
         return;
     }
     lv_indev_get_point(input_device, &point);
-    width = lv_obj_get_width(g_engineering_slider_track);
+    width = lv_obj_get_width(g_results_analysis_track);
     if (width <= 1)
     {
         return;
     }
     relative_x = (int32_t)point.x -
-                 (int32_t)g_engineering_slider_track->coords.x1;
+                 (int32_t)g_results_analysis_track->coords.x1;
     if (relative_x < 0)
     {
         relative_x = 0;
@@ -4606,114 +4453,97 @@ static void UI_EngineeringSliderEvent(lv_event_t *event)
                         (uint32_t)(width - 1) / 2u) /
                        (uint32_t)(width - 1));
     }
-    UI_UpdateEngineeringPage();
+    UI_UpdateSweepAnalysisCard();
 }
 
-static void UI_UpdateEngineeringQRCode(void)
+static void UI_UpdateTransferQRCode(void)
 {
-    const char *qr_data = (g_engineering_ai_model_ready != 0u) ?
-                          g_engineering_ai_model_url :
-                          g_engineering_demo_url;
+    const char *qr_data;
     lv_res_t result;
 
-    if (g_engineering_qr_mode_label != NULL)
+    /* QR 编码很贵(每次都要重排整张码),只在载荷真的变了时重画。 */
+    if (g_transfer_qr_dirty == 0u)
     {
-        lv_label_set_text(g_engineering_qr_mode_label,
-                          (g_engineering_ai_model_ready != 0u) ?
-                          "MODEL QR" : "DEMO QR");
+        return;
     }
-    if (g_engineering_qr_status_label != NULL)
+    g_transfer_qr_dirty = 0u;
+
+    qr_data = (g_transfer_has_payload != 0u) ?
+              g_transfer_url : g_transfer_demo_url;
+    if (g_results_transfer_status_label != NULL)
     {
-        lv_label_set_text(g_engineering_qr_status_label,
-                          (g_engineering_ai_model_ready != 0u) ?
-                          "SCAN QR TO GET SPICE" :
-                          "WAIT FOR 3-PATH SWEEP");
+        lv_label_set_text(g_results_transfer_status_label,
+                          (g_transfer_has_payload != 0u) ?
+                          "数据就绪,可扫码传输" : "等待三回路扫压");
         lv_obj_set_style_text_color(
-            g_engineering_qr_status_label,
-            lv_color_hex((g_engineering_ai_model_ready != 0u) ?
+            g_results_transfer_status_label,
+            lv_color_hex((g_transfer_has_payload != 0u) ?
                          UI_COLOR_GREEN : UI_COLOR_ORANGE),
             LV_PART_MAIN);
     }
-    if (g_engineering_qr_model_label != NULL)
+    if (g_results_transfer_payload_label != NULL)
     {
-        lv_label_set_text(g_engineering_qr_model_label,
-                          (g_engineering_ai_model_ready != 0u) ?
-                          "LIVE / MEASURED / PHYSICAL" :
-                          "DEMO / MODEL UNSET");
+        if (g_transfer_has_payload != 0u)
+        {
+            lv_label_set_text_fmt(
+                g_results_transfer_payload_label,
+                "ACV1 %lu 节点 · SCV1 %lu 点 · URL %lu B",
+                (unsigned long)g_transfer_acv1_nodes,
+                (unsigned long)g_transfer_scv1_points,
+                (unsigned long)strlen(g_transfer_url));
+        }
+        else
+        {
+            lv_label_set_text(g_results_transfer_payload_label,
+                              "ACV1 -- · SCV1 -- · URL --");
+        }
     }
-    if (g_engineering_qrcode == NULL)
+    if (g_results_transfer_model_label != NULL)
+    {
+        lv_label_set_text(g_results_transfer_model_label,
+                          (g_transfer_has_payload != 0u) ?
+                          "LIVE / MEASURED / PHYSICAL" :
+                          "DEMO / NO DATA");
+    }
+    if (g_results_transfer_qrcode == NULL)
     {
         return;
     }
 
-    result = lv_qrcode_update(g_engineering_qrcode, qr_data,
+    result = lv_qrcode_update(g_results_transfer_qrcode, qr_data,
                               (uint32_t)strlen(qr_data));
     if (result == LV_RES_OK)
     {
-        lv_obj_clear_flag(g_engineering_qrcode, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(g_results_transfer_qrcode, LV_OBJ_FLAG_HIDDEN);
     }
     else
     {
-        lv_obj_add_flag(g_engineering_qrcode, LV_OBJ_FLAG_HIDDEN);
-        if (g_engineering_qr_status_label != NULL)
+        lv_obj_add_flag(g_results_transfer_qrcode, LV_OBJ_FLAG_HIDDEN);
+        if (g_results_transfer_status_label != NULL)
         {
-            lv_label_set_text(g_engineering_qr_status_label,
+            lv_label_set_text(g_results_transfer_status_label,
                               "QR RENDER ERROR");
-            lv_obj_set_style_text_color(g_engineering_qr_status_label,
+            lv_obj_set_style_text_color(g_results_transfer_status_label,
                                         lv_color_hex(UI_COLOR_RED),
                                         LV_PART_MAIN);
         }
     }
 }
 
-static void UI_UpdateEngineeringQualityLabel(void)
+/* 结果页「扫压结果」的工程参数卡:3 列 × 2 行,每张 318×38。
+   名称左、数值右对齐;强调色条只占 4 px,把高度留给文字。 */
+static lv_obj_t *UI_CreateResultsParameterCard(lv_obj_t *parent,
+                                               const char *name,
+                                               lv_coord_t x,
+                                               lv_coord_t y,
+                                               uint32_t accent_color)
 {
-    const char *text = "质量:等待扫压";
-    uint32_t color = UI_COLOR_TEXT_MUTED;
-
-    if (g_engineering_quality_label == NULL)
-    {
-        return;
-    }
-    switch (g_engineering_quality_state)
-    {
-        case UI_DEMO_AI_QUALITY_TRUSTED:
-            text = "质量:可信";
-            color = UI_COLOR_GREEN;
-            break;
-        case UI_DEMO_AI_QUALITY_UNCERTAIN:
-            text = "质量:不确定";
-            color = UI_COLOR_ORANGE;
-            break;
-        case UI_DEMO_AI_QUALITY_ANOMALY:
-            text = "质量:异常";
-            color = UI_COLOR_RED;
-            break;
-        case UI_DEMO_AI_QUALITY_ERROR:
-            text = "质量:检测失败";
-            color = UI_COLOR_TEXT_MUTED;
-            break;
-        case UI_DEMO_AI_QUALITY_WAITING:
-        default:
-            break;
-    }
-    lv_label_set_text(g_engineering_quality_label, text);
-    lv_obj_set_style_text_color(g_engineering_quality_label,
-                                lv_color_hex(color), LV_PART_MAIN);
-}
-
-static lv_obj_t *UI_CreateEngineeringParameterCard(lv_obj_t *parent,
-                                                    const char *name,
-                                                    lv_coord_t x,
-                                                    lv_coord_t y,
-                                                    uint32_t accent_color)
-{
-    lv_obj_t *card = UI_CreatePanel(parent, x, y, 270, 94,
-                                    UI_COLOR_SURFACE_LIGHT, 14);
+    lv_obj_t *card = UI_CreatePanel(parent, x, y, 318, 38,
+                                    UI_COLOR_SURFACE_LIGHT, 8);
     lv_obj_t *accent = lv_obj_create(card);
 
     lv_obj_set_pos(accent, 0, 0);
-    lv_obj_set_size(accent, 5, 94);
+    lv_obj_set_size(accent, 4, 38);
     lv_obj_clear_flag(accent, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_bg_color(accent, lv_color_hex(accent_color),
                               LV_PART_MAIN);
@@ -4722,170 +4552,11 @@ static lv_obj_t *UI_CreateEngineeringParameterCard(lv_obj_t *parent,
     lv_obj_set_style_radius(accent, 0, LV_PART_MAIN);
     lv_obj_set_style_pad_all(accent, 0, LV_PART_MAIN);
     UI_CreateText(card, name, &lv_font_montserrat_16,
-                  UI_COLOR_TEXT_MUTED, 18, 12, 220, 20,
+                  UI_COLOR_TEXT_MUTED, 14, 9, 86, 22,
                   LV_TEXT_ALIGN_LEFT);
     return UI_CreateText(card, "--", &lv_font_montserrat_24,
-                         UI_COLOR_TEXT, 18, 42, 234, 34,
-                         LV_TEXT_ALIGN_LEFT);
-}
-
-static void UI_CreateSweepEngineeringPage(lv_obj_t *screen)
-{
-    static const char *const parameter_names[
-        UI_ENGINEERING_PARAMETER_COUNT] =
-        {"CISS", "COSS", "CRSS", "Rg", "Qoss", "Eoss"};
-    static const uint32_t parameter_colors[
-        UI_ENGINEERING_PARAMETER_COUNT] =
-        {UI_COLOR_BLUE, UI_COLOR_GREEN, UI_COLOR_ORANGE,
-         UI_COLOR_PURPLE, UI_COLOR_CYAN, UI_COLOR_RED};
-    lv_obj_t *left_panel;
-    lv_obj_t *right_panel;
-    lv_obj_t *analysis_button;
-    lv_obj_t *qr_background;
-    lv_obj_t *back_zone;
-    uint32_t index;
-
-    g_sweep_engineering_page = UI_CreateSweepSubpageContainer(
-        screen, (lv_coord_t)LCD_PIXEL_WIDTH);
-    left_panel = UI_CreatePanel(g_sweep_engineering_page,
-                                12, 6, 610, 536,
-                                UI_COLOR_SURFACE, 16);
-    right_panel = UI_CreatePanel(g_sweep_engineering_page,
-                                 634, 6, 378, 536,
-                                 UI_COLOR_SURFACE, 16);
-    lv_obj_set_style_border_color(left_panel,
-                                  lv_color_hex(UI_COLOR_BLUE),
-                                  LV_PART_MAIN);
-    lv_obj_set_style_border_color(right_panel,
-                                  lv_color_hex(UI_COLOR_PURPLE),
-                                  LV_PART_MAIN);
-
-    UI_CreateText(left_panel, "参数电压", &ui_font_cn_28,
-                  UI_COLOR_TEXT, 24, 14, 180, 38,
-                  LV_TEXT_ALIGN_LEFT);
-    g_engineering_quality_label =
-        UI_CreateText(left_panel, "质量:等待扫压", &ui_font_cn_20,
-                      UI_COLOR_TEXT_MUTED, 210, 20, 360, 28,
-                      LV_TEXT_ALIGN_RIGHT);
-    UI_UpdateEngineeringQualityLabel();
-    UI_CreateButton(left_panel, "-0.1", UI_COLOR_SURFACE_LIGHT,
-                    24, 62, 78, 58,
-                    UI_EngineeringVoltageStepEvent,
-                    (void *)(uintptr_t)0u);
-    analysis_button = UI_CreateButton(
-        left_panel, "0.1 V", UI_COLOR_BLUE,
-        116, 62, 378, 58,
-        UI_BiasOpenEvent,
-        (void *)(uintptr_t)UI_BIAS_TARGET_ANALYSIS);
-    g_engineering_analysis_value_label =
-        lv_obj_get_child(analysis_button, 0);
-    lv_obj_set_style_text_font(g_engineering_analysis_value_label,
-                               &lv_font_montserrat_24, LV_PART_MAIN);
-    UI_CreateButton(left_panel, "+0.1", UI_COLOR_SURFACE_LIGHT,
-                    508, 62, 78, 58,
-                    UI_EngineeringVoltageStepEvent,
-                    (void *)(uintptr_t)1u);
-
-    g_engineering_slider_track = UI_CreatePanel(
-        left_panel, 30, 142, 550, 18,
-        UI_COLOR_BORDER, 9);
-    lv_obj_add_flag(g_engineering_slider_track,
-                    LV_OBJ_FLAG_OVERFLOW_VISIBLE);
-    lv_obj_add_flag(g_engineering_slider_track,
-                    LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_PRESS_LOCK);
-    lv_obj_add_event_cb(g_engineering_slider_track,
-                        UI_EngineeringSliderEvent,
-                        LV_EVENT_PRESSED, NULL);
-    lv_obj_add_event_cb(g_engineering_slider_track,
-                        UI_EngineeringSliderEvent,
-                        LV_EVENT_PRESSING, NULL);
-    g_engineering_slider_knob = lv_obj_create(
-        g_engineering_slider_track);
-    lv_obj_set_pos(g_engineering_slider_knob, 0, -5);
-    lv_obj_set_size(g_engineering_slider_knob, 28, 28);
-    lv_obj_clear_flag(g_engineering_slider_knob,
-                      LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_set_style_bg_color(g_engineering_slider_knob,
-                              lv_color_hex(UI_COLOR_CYAN),
-                              LV_PART_MAIN);
-    lv_obj_set_style_bg_opa(g_engineering_slider_knob,
-                            LV_OPA_COVER, LV_PART_MAIN);
-    lv_obj_set_style_border_color(g_engineering_slider_knob,
-                                  lv_color_hex(0xffffffu),
-                                  LV_PART_MAIN);
-    lv_obj_set_style_border_width(g_engineering_slider_knob, 2,
-                                  LV_PART_MAIN);
-    lv_obj_set_style_radius(g_engineering_slider_knob,
-                            LV_RADIUS_CIRCLE, LV_PART_MAIN);
-    lv_obj_set_style_pad_all(g_engineering_slider_knob, 0,
-                             LV_PART_MAIN);
-
-    for (index = 0u; index < UI_ENGINEERING_PARAMETER_COUNT; ++index)
-    {
-        lv_coord_t column = (lv_coord_t)(index % 2u);
-        lv_coord_t row = (lv_coord_t)(index / 2u);
-
-        g_engineering_parameter_value_labels[index] =
-            UI_CreateEngineeringParameterCard(
-                left_panel, parameter_names[index],
-                24 + column * 286,
-                184 + row * 108,
-                parameter_colors[index]);
-    }
-
-    UI_CreateText(right_panel, "AI-CV2SPICE", &lv_font_montserrat_24,
-                  UI_COLOR_TEXT, 20, 16, 338, 34,
-                  LV_TEXT_ALIGN_CENTER);
-    g_engineering_qr_mode_label =
-        UI_CreateText(right_panel, "DEMO QR", &lv_font_montserrat_16,
-                      UI_COLOR_PURPLE, 20, 48, 338, 24,
-                      LV_TEXT_ALIGN_CENTER);
-    qr_background = UI_CreatePanel(right_panel,
-                                   25, 74, 328, 328,
-                                   0xffffffu, 8);
-    lv_obj_set_style_border_color(qr_background,
-                                  lv_color_hex(0xffffffu),
-                                  LV_PART_MAIN);
-    g_engineering_qrcode = lv_qrcode_create(
-        qr_background, UI_ENGINEERING_QR_SIZE,
-        lv_color_hex(0x000000u), lv_color_hex(0xffffffu));
-    lv_obj_set_pos(g_engineering_qrcode, 20, 20);
-    g_engineering_qr_status_label =
-        UI_CreateText(right_panel,
-                      "WAIT FOR 3-PATH SWEEP",
-                      &lv_font_montserrat_16, UI_COLOR_ORANGE,
-                      20, 420, 338, 28,
-                      LV_TEXT_ALIGN_CENTER);
-    g_engineering_qr_model_label =
-        UI_CreateText(right_panel,
-                      "DEMO / MODEL UNSET",
-                      &lv_font_montserrat_16, UI_COLOR_TEXT_MUTED,
-                      20, 458, 338, 24,
-                      LV_TEXT_ALIGN_CENTER);
-    UI_UpdateEngineeringQRCode();
-
-    back_zone = lv_obj_create(g_sweep_engineering_page);
-    lv_obj_set_pos(back_zone, 0, 0);
-    lv_obj_set_size(back_zone, 28,
-                    (lv_coord_t)LCD_PIXEL_HEIGHT -
-                    UI_COMMON_HEADER_HEIGHT);
-    lv_obj_clear_flag(back_zone, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_add_flag(back_zone,
-                    LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_PRESS_LOCK);
-    lv_obj_set_style_bg_opa(back_zone, LV_OPA_TRANSP, LV_PART_MAIN);
-    lv_obj_set_style_border_width(back_zone, 0, LV_PART_MAIN);
-    lv_obj_set_style_pad_all(back_zone, 0, LV_PART_MAIN);
-    lv_obj_add_event_cb(back_zone, UI_EngineeringBackSwipeEvent,
-                        LV_EVENT_PRESSED, NULL);
-    lv_obj_add_event_cb(back_zone, UI_EngineeringBackSwipeEvent,
-                        LV_EVENT_PRESSING, NULL);
-    lv_obj_add_event_cb(back_zone, UI_EngineeringBackSwipeEvent,
-                        LV_EVENT_RELEASED, NULL);
-    lv_obj_add_event_cb(back_zone, UI_EngineeringBackSwipeEvent,
-                        LV_EVENT_PRESS_LOST, NULL);
-
-    UI_UpdateEngineeringPage();
-    lv_obj_add_flag(g_sweep_engineering_page, LV_OBJ_FLAG_HIDDEN);
+                         UI_COLOR_TEXT, 104, 5, 200, 28,
+                         LV_TEXT_ALIGN_RIGHT);
 }
 
 /* ===========================================================================
@@ -4893,9 +4564,9 @@ static void UI_CreateSweepEngineeringPage(lv_obj_t *screen)
  *
  *   [单点结果] 最近一次点测的读数(CISS / COSS / CRSS / RG 四张卡片)
  *   [单点波形] 单点测量过程中采到的 电压 / 电流 波形(调试用)
- *   [扫压结果] C-V 曲线(与扫压页同源)+ 扫压摘要
+ *   [扫压结果] C-V 曲线(与扫压页同源)+ 触摸读数 + 6 张工程参数卡
  *   [扫压波形] 扫压全过程的 电压 / 电流 包络线(调试用)
- *   [数据导出] ⏸ 先占位 —— 导出通道与格式未定,本页不写实现
+ *   [数据传输] 实测数据二维码(ACV1 + SCV1,照搬前序工程)
  *
  * 定位:**投影视图** —— 自己不产生数据,进入页面时把已有数据重画一遍。
  * 因此「在测量页 / 扫压页测完 → 退回首页 → 点进结果页」看到的
@@ -5404,6 +5075,9 @@ static void UI_ResultsRefresh(void)
     }
 
     UI_ResultsCopyChart();
+    UI_UpdateSweepAnalysisRange();
+    UI_UpdateSweepAnalysisCard();
+    UI_UpdateTransferQRCode();
     UI_ResultWaveRefresh();
     UI_ResultTabApply();
 }
@@ -5564,7 +5238,7 @@ static void UI_ShowResults(void)
 {
     static const char *const tab_names[UI_RESULT_TAB_COUNT] =
     {
-        "单点结果", "单点波形", "扫压结果", "扫压波形", "数据导出"
+        "单点结果", "单点波形", "扫压结果", "扫压波形", "数据传输"
     };
     static const char *const route_names[] =
         {"CISS", "COSS", "CRSS", "RG"};
@@ -5653,24 +5327,24 @@ static void UI_ShowResults(void)
                       &ui_font_cn_20, UI_COLOR_TEXT_MUTED,
                       8, 552, 960, 24, LV_TEXT_ALIGN_LEFT);
 
-    /* ================= 子页 2:扫压结果 ================= */
+    /* ================= 子页 2:扫压结果(曲线 + 触摸读数 + 参数卡) ================= */
     sweep_value_page = UI_CreateResultSubpage(screen);
     g_result_subpages[2] = sweep_value_page;
     {
+        static const char *const legend_names[] =
+            {"CISS", "COSS", "CRSS"};
         lv_obj_t *chart_panel = UI_CreatePanel(sweep_value_page,
                                                UI_PAGE_MARGIN, 124,
-                                               content_width, 380,
+                                               content_width, 286,
                                                UI_COLOR_SURFACE_LIGHT, 14);
 
         UI_CreateText(chart_panel, "C-V 曲线(与扫压页同源)", &ui_font_cn_20,
-                      UI_COLOR_TEXT_MUTED, 16, 4, 340, 24,
+                      UI_COLOR_TEXT_MUTED, 16, 4, 250, 24,
                       LV_TEXT_ALIGN_LEFT);
 
         for (index = 0u; index < 3u; ++index)
         {
-            static const char *const legend_names[] =
-                {"CISS", "COSS", "CRSS"};
-            lv_coord_t item_x = 380 + (lv_coord_t)index * 130;
+            lv_coord_t item_x = 280 + (lv_coord_t)index * 110;
             lv_obj_t *line = lv_obj_create(chart_panel);
 
             lv_obj_set_pos(line, item_x, 14);
@@ -5684,13 +5358,18 @@ static void UI_ShowResults(void)
             lv_obj_set_style_pad_all(line, 0, LV_PART_MAIN);
             UI_CreateText(chart_panel, legend_names[index],
                           &lv_font_montserrat_16, UI_COLOR_TEXT_MUTED,
-                          item_x + 32, 4, 90, 24, LV_TEXT_ALIGN_LEFT);
+                          item_x + 32, 4, 70, 24, LV_TEXT_ALIGN_LEFT);
         }
+        /* 摘要移到面板右上角,把屏下空间让给读数行与参数卡。 */
+        g_results_summary_label =
+            UI_CreateText(chart_panel, "尚无扫压数据", &ui_font_cn_20,
+                          UI_COLOR_TEXT_MUTED, 610, 4, 350, 24,
+                          LV_TEXT_ALIGN_RIGHT);
 
         g_results_chart = lv_chart_create(chart_panel);
-        lv_obj_set_pos(g_results_chart, 64, 34);
-        /* 高度留出底部 34 px 给 X 轴刻度文字 —— 少留就会被面板裁掉(已踩) */
-        lv_obj_set_size(g_results_chart, content_width - 80, 316);
+        lv_obj_set_pos(g_results_chart, 64, 32);
+        /* 高度留出底部给 X 轴刻度文字 —— 少留就会被面板裁掉(已踩) */
+        lv_obj_set_size(g_results_chart, content_width - 80, 226);
         lv_chart_set_type(g_results_chart, LV_CHART_TYPE_SCATTER);
         lv_chart_set_point_count(g_results_chart, UI_SWEEP_RENDER_POINTS);
         lv_chart_set_range(g_results_chart, LV_CHART_AXIS_PRIMARY_X,
@@ -5721,12 +5400,24 @@ static void UI_ShowResults(void)
         lv_obj_set_style_pad_left(g_results_chart, 5, LV_PART_TICKS);
         lv_obj_set_style_pad_bottom(g_results_chart, 4, LV_PART_TICKS);
         lv_obj_clear_flag(g_results_chart, LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_clear_flag(g_results_chart, LV_OBJ_FLAG_CLICKABLE);
+        /* 结果页只做「按住 / 滑动读数」,不做捏合缩放。 */
+        lv_obj_add_flag(g_results_chart,
+                        LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_PRESS_LOCK);
         /* 🔴 必须挂上和扫压页**同一个**绘制回调:
            对数轴的刻度文字(0.10 / 1.0 / 10 / 100)是自绘的,
            LVGL 自带的整数刻度只会把 log-milli 原值(1000/2000/3000)印出来。 */
         lv_obj_add_event_cb(g_results_chart, UI_SweepChartDrawEvent,
                             LV_EVENT_DRAW_PART_BEGIN, NULL);
+        lv_obj_add_event_cb(g_results_chart, UI_SweepChartProbeDrawEvent,
+                            LV_EVENT_DRAW_POST, NULL);
+        lv_obj_add_event_cb(g_results_chart, UI_ResultsSweepTouchEvent,
+                            LV_EVENT_PRESSED, NULL);
+        lv_obj_add_event_cb(g_results_chart, UI_ResultsSweepTouchEvent,
+                            LV_EVENT_PRESSING, NULL);
+        lv_obj_add_event_cb(g_results_chart, UI_ResultsSweepTouchEvent,
+                            LV_EVENT_RELEASED, NULL);
+        lv_obj_add_event_cb(g_results_chart, UI_ResultsSweepTouchEvent,
+                            LV_EVENT_PRESS_LOST, NULL);
 
         for (index = 0u; index < 3u; ++index)
         {
@@ -5738,10 +5429,85 @@ static void UI_ShowResults(void)
                                    LV_CHART_POINT_NONE);
         }
     }
-    g_results_summary_label =
-        UI_CreateText(sweep_value_page, "尚无扫压数据", &ui_font_cn_20,
-                      UI_COLOR_TEXT_MUTED, UI_PAGE_MARGIN, 512,
-                      content_width, 28, LV_TEXT_ALIGN_LEFT);
+
+    g_results_probe_label =
+        UI_CreateText(sweep_value_page, UI_RESULT_PROBE_HINT,
+                      &ui_font_cn_20, UI_COLOR_TEXT_MUTED,
+                      UI_PAGE_MARGIN, 412, content_width, 28,
+                      LV_TEXT_ALIGN_LEFT);
+
+    /* 分析电压行:步进 0.1 V / 直接输入 / 滑条 */
+    UI_CreateButton(sweep_value_page, "-0.1", UI_COLOR_SURFACE_LIGHT,
+                    UI_PAGE_MARGIN, 444, 78, 44,
+                    UI_SweepAnalysisStepEvent,
+                    (void *)(uintptr_t)0u);
+    {
+        lv_obj_t *analysis_button = UI_CreateButton(
+            sweep_value_page, "0.1 V", UI_COLOR_BLUE,
+            UI_PAGE_MARGIN + 86, 444, 200, 44,
+            UI_BiasOpenEvent,
+            (void *)(uintptr_t)UI_BIAS_TARGET_ANALYSIS);
+
+        g_results_analysis_value_label = lv_obj_get_child(analysis_button, 0);
+        lv_obj_set_style_text_font(g_results_analysis_value_label,
+                                   &lv_font_montserrat_24, LV_PART_MAIN);
+    }
+    UI_CreateButton(sweep_value_page, "+0.1", UI_COLOR_SURFACE_LIGHT,
+                    UI_PAGE_MARGIN + 294, 444, 78, 44,
+                    UI_SweepAnalysisStepEvent,
+                    (void *)(uintptr_t)1u);
+    g_results_analysis_track = UI_CreatePanel(
+        sweep_value_page, 420, 457, 400, 18,
+        UI_COLOR_BORDER, 9);
+    lv_obj_add_flag(g_results_analysis_track, LV_OBJ_FLAG_OVERFLOW_VISIBLE);
+    lv_obj_add_flag(g_results_analysis_track,
+                    LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_PRESS_LOCK);
+    lv_obj_add_event_cb(g_results_analysis_track,
+                        UI_SweepAnalysisSliderEvent,
+                        LV_EVENT_PRESSED, NULL);
+    lv_obj_add_event_cb(g_results_analysis_track,
+                        UI_SweepAnalysisSliderEvent,
+                        LV_EVENT_PRESSING, NULL);
+    g_results_analysis_knob = lv_obj_create(g_results_analysis_track);
+    lv_obj_set_pos(g_results_analysis_knob, 0, -5);
+    lv_obj_set_size(g_results_analysis_knob, 28, 28);
+    lv_obj_clear_flag(g_results_analysis_knob,
+                      LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(g_results_analysis_knob,
+                              lv_color_hex(UI_COLOR_CYAN), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(g_results_analysis_knob,
+                            LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_border_color(g_results_analysis_knob,
+                                  lv_color_hex(0xffffffu), LV_PART_MAIN);
+    lv_obj_set_style_border_width(g_results_analysis_knob, 2, LV_PART_MAIN);
+    lv_obj_set_style_radius(g_results_analysis_knob,
+                            LV_RADIUS_CIRCLE, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(g_results_analysis_knob, 0, LV_PART_MAIN);
+    UI_CreateText(sweep_value_page, "分析电压", &ui_font_cn_20,
+                  UI_COLOR_TEXT_MUTED, 836, 451, 160, 28,
+                  LV_TEXT_ALIGN_LEFT);
+
+    /* 6 张工程参数卡:3 列 × 2 行 */
+    {
+        static const char *const names[UI_SWEEP_PARAMETER_COUNT] =
+            {"CISS", "COSS", "CRSS", "Rg", "Qoss", "Eoss"};
+        static const uint32_t colors[UI_SWEEP_PARAMETER_COUNT] =
+            {UI_COLOR_BLUE, UI_COLOR_GREEN, UI_COLOR_ORANGE,
+             UI_COLOR_PURPLE, UI_COLOR_CYAN, UI_COLOR_RED};
+
+        for (index = 0u; index < UI_SWEEP_PARAMETER_COUNT; ++index)
+        {
+            lv_coord_t column = (lv_coord_t)(index % 3u);
+            lv_coord_t row = (lv_coord_t)(index / 3u);
+
+            g_results_parameter_value_labels[index] =
+                UI_CreateResultsParameterCard(
+                    sweep_value_page, names[index],
+                    UI_PAGE_MARGIN + column * (318 + 11),
+                    496 + row * 44,
+                    colors[index]);
+        }
+    }
 
     /* ================= 子页 3:扫压波形(电压/电流包络) ================= */
     g_result_subpages[3] = UI_CreateResultSubpage(screen);
@@ -5754,28 +5520,61 @@ static void UI_ShowResults(void)
                       &ui_font_cn_20, UI_COLOR_TEXT_MUTED,
                       8, 552, 960, 24, LV_TEXT_ALIGN_LEFT);
 
-    /* ================= 子页 4:数据导出(占位,不实现) ================= */
+    /* ================= 子页 4:数据传输(实测数据二维码) ================= */
     export_page = UI_CreateResultSubpage(screen);
     g_result_subpages[4] = export_page;
     {
         lv_obj_t *panel = UI_CreatePanel(export_page,
                                          UI_PAGE_MARGIN, 124,
-                                         content_width, 380,
+                                         content_width, 452,
                                          UI_COLOR_SURFACE_LIGHT, 16);
+        lv_obj_t *qr_background;
 
         lv_obj_set_style_border_color(panel, lv_color_hex(UI_COLOR_BORDER),
                                       LV_PART_MAIN);
-        UI_CreateText(panel, "数据导出", &ui_font_cn_28, UI_COLOR_TEXT,
-                      0, 90, content_width - 48, 44, LV_TEXT_ALIGN_CENTER);
-        UI_CreateText(panel, "导出通道与文件格式尚未确定,本页先只占位",
-                      &ui_font_cn_20, UI_COLOR_TEXT_MUTED,
-                      0, 152, content_width - 48, 30, LV_TEXT_ALIGN_CENTER);
+        lv_obj_set_style_border_width(panel, 1, LV_PART_MAIN);
+
+        qr_background = UI_CreatePanel(panel, 36, 64, 328, 328,
+                                       0xffffffu, 8);
+        lv_obj_set_style_border_color(qr_background,
+                                      lv_color_hex(0xffffffu), LV_PART_MAIN);
+        g_results_transfer_qrcode = lv_qrcode_create(
+            qr_background, UI_TRANSFER_QR_SIZE,
+            lv_color_hex(0x000000u), lv_color_hex(0xffffffu));
+        lv_obj_set_pos(g_results_transfer_qrcode, 20, 20);
+        UI_CreateText(panel, "扫码后留在本机", &ui_font_cn_20,
+                      UI_COLOR_TEXT_MUTED, 36, 404, 328, 26,
+                      LV_TEXT_ALIGN_CENTER);
+
+        UI_CreateText(panel, "实测数据二维码", &ui_font_cn_28,
+                      UI_COLOR_TEXT, 390, 24, 546, 40,
+                      LV_TEXT_ALIGN_LEFT);
         UI_CreateText(panel,
-                      "定下来之后再补:导出内容(单点读数 / C-V 原始点 / 波形)、"
-                      "存放位置、文件名规则",
+                      "手机扫码打开 AI-CV2SPICE,生成 LTspice 模型与完整曲线",
                       &ui_font_cn_20, UI_COLOR_TEXT_MUTED,
-                      40, 196, content_width - 128, 60, LV_TEXT_ALIGN_CENTER);
+                      390, 70, 546, 30, LV_TEXT_ALIGN_LEFT);
+        UI_CreateText(panel, "https://fox4327.github.io/ai-cv2spice-web/",
+                      &lv_font_montserrat_16, UI_COLOR_CYAN,
+                      390, 104, 546, 24, LV_TEXT_ALIGN_LEFT);
+        g_results_transfer_status_label =
+            UI_CreateText(panel, "等待三回路扫压", &ui_font_cn_20,
+                          UI_COLOR_ORANGE, 390, 148, 546, 30,
+                          LV_TEXT_ALIGN_LEFT);
+        g_results_transfer_payload_label =
+            UI_CreateText(panel, "ACV1 -- · SCV1 -- · URL --",
+                          &ui_font_cn_20, UI_COLOR_TEXT,
+                          390, 186, 546, 28, LV_TEXT_ALIGN_LEFT);
+        g_results_transfer_model_label =
+            UI_CreateText(panel, "DEMO / NO DATA", &lv_font_montserrat_16,
+                          UI_COLOR_TEXT_MUTED, 390, 222, 546, 24,
+                          LV_TEXT_ALIGN_LEFT);
+        UI_CreateText(panel,
+                      "数据全部放在 URL 片段中,不经任何服务器;\n"
+                      "扫码方需要能访问上面的静态解码页。",
+                      &ui_font_cn_20, UI_COLOR_TEXT_MUTED,
+                      390, 270, 546, 70, LV_TEXT_ALIGN_LEFT);
     }
+    g_transfer_qr_dirty = 1u;
 
     g_result_tab = 0u;
     {   /* ⚠️ 仅供**演示 / 自动化截图**:CV_UI_RESULT_TAB 指定进页时停在哪个页签,
@@ -5789,6 +5588,36 @@ static void UI_ShowResults(void)
     }
     g_results_built = 1u;
     UI_ActivatePage(UI_PAGE_RESULTS);
+
+    /* ⚠️ 仅供演示 / 自动化截图:`CV_UI_DEMO_PROBE=<电压>` 让结果页
+       一进来就显示一次探针读数。正常运行时变量不设,零影响。 */
+    {
+        const char *env = getenv("CV_UI_DEMO_PROBE");
+
+        if ((env != NULL) && (env[0] != '\0'))
+        {
+            float probe_voltage = strtof(env, NULL);
+            float probe_cs;
+            lv_point_t probe_point;
+
+            if ((probe_voltage > 0.0f) && isfinite(probe_voltage) &&
+                (g_results_chart != NULL) &&
+                SweepInterpolation_Evaluate(&g_sweep_cs_curve[0],
+                                            probe_voltage, &probe_cs) &&
+                UI_SweepValueToPixel(g_results_chart, probe_voltage,
+                                     probe_cs, &probe_point))
+            {
+                (void)UI_SelectSweepProbe(g_results_chart, 1u, &probe_point,
+                                          false, true);
+                if (g_results_probe_label != NULL)
+                {
+                    lv_obj_set_style_text_color(
+                        g_results_probe_label,
+                        lv_color_hex(UI_COLOR_TEXT), LV_PART_MAIN);
+                }
+            }
+        }
+    }
 }
 
 static void UI_ShowSweep(void)
@@ -5815,11 +5644,9 @@ static void UI_ShowSweep(void)
     {
         UI_SetSweepDrawerOpen(false);
         UI_ActivatePage(UI_PAGE_SWEEP);
-        UI_SetSweepEngineeringPage(false, false);
         return;
     }
     g_sweep_curve_page = UI_CreateSweepSubpageContainer(screen, 0);
-    UI_CreateSweepEngineeringPage(screen);
     chart_panel = UI_CreatePanel(g_sweep_curve_page,
                                  8,
                                  6,
@@ -6069,26 +5896,11 @@ static void UI_ShowSweep(void)
                         40,
                         UI_SweepDrawerEvent,
                         (void *)(uintptr_t)1u);
-    g_sweep_engineering_button =
-        UI_CreateButton(g_sweep_curve_page,
-                        "参数页面 >",
-                        UI_COLOR_BLUE,
-                        (lv_coord_t)LCD_PIXEL_WIDTH,
-                        12,
-                        UI_SWEEP_ENGINEERING_BUTTON_WIDTH,
-                        UI_SWEEP_ENGINEERING_BUTTON_HEIGHT,
-                        UI_SweepEngineeringButtonEvent,
-                        NULL);
-    lv_obj_set_style_radius(g_sweep_engineering_button,
-                            UI_SWEEP_ENGINEERING_BUTTON_HEIGHT / 2,
-                            LV_PART_MAIN);
-    lv_obj_add_flag(g_sweep_engineering_button, LV_OBJ_FLAG_HIDDEN);
     UI_RebuildSweepChart();
     UI_SetSweepDrawerOpen(false);
 
     g_page_built[UI_PAGE_SWEEP] = 1u;
     UI_ActivatePage(UI_PAGE_SWEEP);
-    UI_SetSweepEngineeringPage(false, false);
 }
 
 uint32_t UI_Demo_Init(void)
@@ -6144,17 +5956,20 @@ uint32_t UI_Demo_Init(void)
     g_sweep_progress_indicator = NULL;
     g_sweep_control_panel = NULL;
     g_sweep_settings_button = NULL;
-    g_sweep_engineering_button = NULL;
     g_sweep_curve_page = NULL;
-    g_sweep_engineering_page = NULL;
-    g_engineering_analysis_value_label = NULL;
-    g_engineering_quality_label = NULL;
-    g_engineering_slider_track = NULL;
-    g_engineering_slider_knob = NULL;
-    g_engineering_qrcode = NULL;
-    g_engineering_qr_mode_label = NULL;
-    g_engineering_qr_status_label = NULL;
-    g_engineering_qr_model_label = NULL;
+    g_results_analysis_value_label = NULL;
+    g_results_analysis_track = NULL;
+    g_results_analysis_knob = NULL;
+    g_results_probe_label = NULL;
+    g_results_summary_label = NULL;
+    (void)memset(g_results_parameter_value_labels, 0,
+                 sizeof(g_results_parameter_value_labels));
+    g_results_transfer_qrcode = NULL;
+    g_results_transfer_status_label = NULL;
+    g_results_transfer_payload_label = NULL;
+    g_results_transfer_model_label = NULL;
+    g_sweep_probe_chart = NULL;
+    g_sweep_probe_owner = 0u;
     g_keypad_value_label = NULL;
     g_keypad_note_label = NULL;
     g_results_chart = NULL;
@@ -6170,8 +5985,6 @@ uint32_t UI_Demo_Init(void)
     (void)memset(g_sweep_path_buttons, 0, sizeof(g_sweep_path_buttons));
     (void)memset(g_all_result_labels, 0, sizeof(g_all_result_labels));
     (void)memset(g_sweep_series, 0, sizeof(g_sweep_series));
-    (void)memset(g_engineering_parameter_value_labels, 0,
-                 sizeof(g_engineering_parameter_value_labels));
     (void)memset(g_sweep_voltage, 0, sizeof(g_sweep_voltage));
     (void)memset(g_sweep_capacitance, 0, sizeof(g_sweep_capacitance));
     (void)memset(g_sweep_parallel_capacitance, 0,
@@ -6200,12 +6013,12 @@ uint32_t UI_Demo_Init(void)
     g_sweep_probe_valid = 0u;
     g_sweep_probe_tracking = 0u;
     g_sweep_inspection_ready = 0u;
-    g_engineering_analysis_initialized = 0u;
-    g_engineering_ai_model_ready = 0u;
-    g_engineering_quality_state = UI_DEMO_AI_QUALITY_WAITING;
-    g_engineering_quality_class = 0u;
-    g_engineering_quality_clean_probability = 0.0f;
-    g_engineering_ai_model_url[0] = '\0';
+    g_sweep_analysis_initialized = 0u;
+    g_transfer_url[0] = '\0';
+    g_transfer_acv1_nodes = 0u;
+    g_transfer_scv1_points = 0u;
+    g_transfer_has_payload = 0u;
+    g_transfer_qr_dirty = 1u;
     g_sweep_last_tap_valid = 0u;
     g_sweep_single_touch_moved = 0u;
     g_sweep_last_tap_tick = 0u;
@@ -6218,10 +6031,6 @@ uint32_t UI_Demo_Init(void)
     g_sweep_full_y_min_log_milli = UI_SWEEP_DEFAULT_Y_MIN_LOG_MILLI;
     g_sweep_full_y_max_log_milli = UI_SWEEP_DEFAULT_Y_MAX_LOG_MILLI;
     (void)memset(&g_sweep_gesture, 0, sizeof(g_sweep_gesture));
-    (void)memset(&g_sweep_back_swipe, 0,
-                 sizeof(g_sweep_back_swipe));
-    g_sweep_engineering_page_active = 0u;
-    g_sweep_subpage_animating = 0u;
     g_sweep_chart_dirty = 0u;
     g_latest_rg_ohm = 0.0f;
     g_latest_rg_valid = 0u;
@@ -6426,8 +6235,7 @@ static void UI_RequestSweepChartRefresh(void)
 {
     g_sweep_chart_dirty = 1u;
     if ((g_sweep_chart_refresh_timer == NULL) &&
-        (g_ui_current_page == UI_PAGE_SWEEP) &&
-        (g_sweep_engineering_page_active == 0u))
+        (g_ui_current_page == UI_PAGE_SWEEP))
     {
         UI_RebuildSweepChart();
     }
@@ -6437,9 +6245,7 @@ static void UI_SweepChartRefreshTimer(lv_timer_t *timer)
 {
     (void)timer;
     if ((g_sweep_chart_dirty == 0u) ||
-        (g_ui_current_page != UI_PAGE_SWEEP) ||
-        (g_sweep_engineering_page_active != 0u) ||
-        (g_sweep_subpage_animating != 0u))
+        (g_ui_current_page != UI_PAGE_SWEEP))
     {
         return;
     }
@@ -6616,10 +6422,8 @@ void UI_Demo_UpdateResistance(const char *resistance_text, uint32_t valid)
             g_latest_rg_ohm = resistance;
             g_latest_rg_valid = 1u;
             UI_ResultRecord(3u, resistance_text, NULL, NULL, valid);
-            if (g_sweep_engineering_page_active != 0u)
-            {
-                UI_UpdateEngineeringPage();
-            }
+            /* 结果页的 Rg 参数卡与曲线摘要立即跟上。 */
+            UI_UpdateSweepAnalysisCard();
         }
     }
     if ((g_single_result_label == NULL) ||
@@ -6710,11 +6514,8 @@ void UI_Demo_ClearSweep(uint32_t path_or_all)
         UI_ResetSweepInterpolation(path);
     }
     g_sweep_inspection_ready = 0u;
-    g_engineering_analysis_initialized = 0u;
-    UI_Demo_SetAIQualityState(UI_DEMO_AI_QUALITY_WAITING, 0u, 0.0f);
-    g_sweep_back_swipe.active = 0u;
-    UI_SetSweepEngineeringPage(false, false);
-    UI_UpdateSweepEngineeringButton(false);
+    g_sweep_analysis_initialized = 0u;
+    UI_UpdateSweepAnalysisCard();
     g_sweep_last_tap_valid = 0u;
     g_sweep_single_touch_moved = 0u;
     g_sweep_x_min_log_milli = UI_SWEEP_X_MIN_LOG_MILLI;
@@ -6754,11 +6555,8 @@ void UI_Demo_BeginSweep(uint32_t path, uint32_t total_points,
                  sizeof(g_sweep_valid[path]));
     UI_ResetSweepInterpolation(path);
     g_sweep_inspection_ready = 0u;
-    g_engineering_analysis_initialized = 0u;
-    UI_Demo_SetAIQualityState(UI_DEMO_AI_QUALITY_WAITING, 0u, 0.0f);
-    g_sweep_back_swipe.active = 0u;
-    UI_SetSweepEngineeringPage(false, false);
-    UI_UpdateSweepEngineeringButton(false);
+    g_sweep_analysis_initialized = 0u;
+    UI_UpdateSweepAnalysisCard();
     g_sweep_last_tap_valid = 0u;
     g_sweep_single_touch_moved = 0u;
     g_sweep_x_min_log_milli = UI_SWEEP_X_MIN_LOG_MILLI;
@@ -6860,13 +6658,13 @@ void UI_Demo_SetSweepInspectionReady(void)
             UI_BuildSweepInterpolation(path);
         }
     }
-    UI_UpdateEngineeringVoltageRange();
+    UI_UpdateSweepAnalysisRange();
     g_sweep_inspection_ready = 1u;
     g_sweep_gesture.active = 0u;
     g_sweep_gesture.block_single_touch = 0u;
     UI_RebuildSweepChart();
-    UI_UpdateEngineeringPage();
-    UI_UpdateSweepEngineeringButton(true);
+    UI_UpdateSweepAnalysisCard();
+    UI_ResultsRefresh();
     if (g_sweep_progress_label == NULL)
     {
         return;
@@ -6879,54 +6677,45 @@ void UI_Demo_SetSweepInspectionReady(void)
     {
         lv_label_set_text(
             g_sweep_progress_label,
-            UI_IsSweepEngineeringReady() ?
-            "扫压完成  参数页面 >" :
+            UI_IsSweepDataComplete() ?
+            "扫压完成  结果汇总 > 扫压结果" :
             "当前回路完成  等待其他回路");
     }
 }
 
-void UI_Demo_SetAIModelUrl(const char *model_url)
+/* 传输页数据入口:URL 由 cv_qr_live.c 生成。空 URL = 回到 DEMO 二维码。 */
+void UI_Demo_SetTransferPayload(const char *url,
+                                uint32_t acv1_nodes,
+                                uint32_t scv1_points)
 {
     size_t length = 0u;
 
-    if (model_url != NULL)
+    if (url != NULL)
     {
-        length = strlen(model_url);
+        length = strlen(url);
     }
-    if ((model_url == NULL) || (length == 0u) ||
-        (length >= sizeof(g_engineering_ai_model_url)))
+    if ((url == NULL) || (length == 0u) ||
+        (length >= sizeof(g_transfer_url)))
     {
-        g_engineering_ai_model_ready = 0u;
-        g_engineering_ai_model_url[0] = '\0';
+        UI_Demo_ClearTransferPayload();
+        return;
     }
-    else
-    {
-        (void)memcpy(g_engineering_ai_model_url, model_url, length + 1u);
-        g_engineering_ai_model_ready = 1u;
-    }
-
-    UI_UpdateEngineeringQRCode();
-    if ((g_sweep_engineering_page_active != 0u) &&
-        (g_header_operation_label != NULL))
-    {
-        lv_label_set_text(g_header_operation_label,
-                          (g_engineering_ai_model_ready != 0u) ?
-                          "MODEL QR" : "DEMO QR");
-    }
+    (void)memcpy(g_transfer_url, url, length + 1u);
+    g_transfer_acv1_nodes = acv1_nodes;
+    g_transfer_scv1_points = scv1_points;
+    g_transfer_has_payload = 1u;
+    g_transfer_qr_dirty = 1u;
+    UI_UpdateTransferQRCode();
 }
 
-void UI_Demo_SetAIQualityState(uint32_t state,
-                               uint32_t top_class,
-                               float clean_probability)
+void UI_Demo_ClearTransferPayload(void)
 {
-    if (state > UI_DEMO_AI_QUALITY_WAITING)
-    {
-        state = UI_DEMO_AI_QUALITY_ERROR;
-    }
-    g_engineering_quality_state = state;
-    g_engineering_quality_class = top_class;
-    g_engineering_quality_clean_probability = clean_probability;
-    UI_UpdateEngineeringQualityLabel();
+    g_transfer_url[0] = '\0';
+    g_transfer_acv1_nodes = 0u;
+    g_transfer_scv1_points = 0u;
+    g_transfer_has_payload = 0u;
+    g_transfer_qr_dirty = 1u;
+    UI_UpdateTransferQRCode();
 }
 
 uint32_t UI_Demo_CopySweepPath(uint32_t path,
