@@ -1,0 +1,4 @@
+[qr] ACV1 12 节点 / SCV1 141 点 / URL 1223 B / CRC acv1=0xa78b18cf scv1=0xaee88716 / 0.1000-100.0000 V
+[qr] Rg 未知,回退 3.60 Ω(与前序一致)
+[qr] ACV1 12 节点 / SCV1 141 点 / URL 1223 B / CRC acv1=0xa78b18cf scv1=0xaee88716 / 0.1000-100.0000 V
+[board_run] 退出码 0 · 0.2 s

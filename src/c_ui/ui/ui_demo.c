@@ -4870,7 +4870,7 @@ static void UI_ResultsCopyChart(void)
             }
         }
         lv_label_set_text_fmt(g_results_summary_label,
-                              "每路点数 %lu    有效曲线 %lu/3    最近一次 RG %s",
+                              "每路点数 %lu · 有效曲线 %lu/3 · RG %s",
                               (unsigned long)best,
                               (unsigned long)drawn,
                               (g_latest_rg_valid != 0u) ? "已测" : "--");
