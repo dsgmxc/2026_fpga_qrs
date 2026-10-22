@@ -6349,6 +6349,17 @@ void UI_Demo_UpdateSingleCapacitance(uint32_t path,
         return;
     }
 
+    /* 🔴 「全部」模式:测量页显示的是三张卡(g_all_result_labels[0..2]),
+     *    单卡 label 被隐藏。协议层的三腿序列是**逐腿**调用本函数
+     *    (path = 0/1/2),不会调 UI_Demo_UpdateAllCapacitance ⇒ 原实现
+     *    下面那句 `path != g_ui_single_path` 会把三腿全部挡掉,卡片永远是 --。
+     *    这里按当前页面模式转交,而不是让协议层去猜 UI 处于哪个布局。 */
+    if ((g_ui_single_path == UI_DISPLAY_PATH_ALL) && (path < 3u))
+    {
+        UI_Demo_UpdateAllCapacitance(path, cs_text, cp_text, d_text, valid);
+        return;
+    }
+
     /* 先记进结果页快照 —— 结果页与测量页共用同一份来源,不重复解析 */
     UI_ResultRecord(path, cs_text, cp_text, d_text, valid);
 
