@@ -165,7 +165,7 @@ static void demo_emit_point(uint32_t path)
         UI_Demo_UpdateResistance("12.43", 1u);
         return;
     }
-    UI_Demo_UpdateSingleCapacitance(path, cs_text, cp_text, d_text, 1u);
+    UI_Demo_UpdateSingleCapacitance(path, cs_text, cp_text, d_text, 1u, voltage);
     UI_Demo_UpdateAllCapacitance(path, cs_text, cp_text, d_text, 1u);
     demo_emit_point_waveform(path, 1.0f);
 }

@@ -800,7 +800,8 @@ static void point_measure(void)
      *    已经指向它。⛔ 别把"三张卡一起填"加回来:那会让三条曲线重合,
      *    而 L5 判据恰恰是**三条曲线形状必须不同**。 */
     if (path < 3u) {
-        UI_Demo_UpdateSingleCapacitance(path, cs_text, cp_text, d_text, valid);
+        UI_Demo_UpdateSingleCapacitance(path, cs_text, cp_text, d_text, valid,
+                                        volts);
     } else {
         /* ---- RG:栅极电阻 ------------------------------------------------
          * `Rg = Re(Z) + 0.7` —— 前序 `periodic_measurement.c:549` 逐字如此,

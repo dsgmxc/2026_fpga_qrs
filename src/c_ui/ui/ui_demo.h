@@ -63,11 +63,15 @@ void UI_Demo_SetActualGear(const char *gear_text, uint32_t gear_code);
    直接返回,不叠加。所以调用方要自己按值去重,别每轮都来敲门。
    ⚠️ 文案必须落在 `ui_font_cn_20` / `ui_font_cn_28` 的子集内(缺字不报错)。 */
 void UI_Demo_ShowAlert(const char *title, const char *body);
+/* 🆕 2026-10-23:@p bias_v 是该点**实际**偏压(Vds,V),只用于查器件标准曲线;
+   结果页「单点结果」用它把四张卡的标准值放在实测值下面。
+   传 <= 0 或非有限值时,标准值显示 "--"(不猜)。 */
 void UI_Demo_UpdateSingleCapacitance(uint32_t path,
                                       const char *cs_text,
                                       const char *cp_text,
                                       const char *d_text,
-                                      uint32_t valid);
+                                      uint32_t valid,
+                                      float bias_v);
 void UI_Demo_UpdateAllCapacitance(uint32_t path,
                                   const char *cs_text,
                                   const char *cp_text,

@@ -15,6 +15,8 @@
 /* 🆕 2026-10-06:「系统复位」页新增的测量参数控件(激励频率 / 采样率 / 相位)。
  *    这是本文件相对前序工程的**唯一新增依赖** —— 界面控件调用它,其余四页未动。 */
 #include "measure_config.h"
+/* 🆕 2026-10-23:器件标准曲线(TK9J90T 十颗中位)。只读查表,不参与测量链。 */
+#include "ref_model.h"
 
 LV_FONT_DECLARE(ui_font_cn_20);
 LV_FONT_DECLARE(ui_font_cn_28);
@@ -271,6 +273,22 @@ static const char g_transfer_demo_url[] =
 static const uint32_t g_sweep_series_colors[] =
     {0xd65ab1u, 0xe5225bu, 0x8c971du};
 
+/* ---- 参考曲线(2026-10-23) ------------------------------------------------
+ * 实测=实线(上面那组颜色);标准=同色系的**浅色虚线**,两者同屏时靠
+ * 「实/虚 + 深/浅」双重区分,不靠记颜色。
+ * 两张图(扫压页 / 结果页)共用一个开关,由 UI_RefreshReferenceControls() 同步。 */
+static const uint32_t g_ref_curve_colors[3] =
+    {0xffbfe8u, 0xffb3c1u, 0xd9e48au};
+
+static uint32_t g_ref_model;            /* RefModel_Count() 的索引,目前恒为 0 */
+static uint8_t  g_ref_curve_enabled;    /* 0 = 只画实测;1 = 叠加标准虚线 */
+static lv_obj_t *g_ref_selector_button; /* 「器件型号」按钮 */
+static lv_obj_t *g_ref_toggle_button;   /* 「叠加:开/关」按钮(只在结果页) */
+static lv_obj_t *g_ref_toggle_label;
+static lv_obj_t *g_ref_legend;          /* 结果页图例里的「标准」示例 */
+static lv_obj_t *g_ref_sweep_legend;    /* 扫压页图例里的「标准」示例(只显示、不可点) */
+static lv_obj_t *g_ref_model_overlay;   /* 型号选择弹层(lv_layer_top) */
+
 static const UI_Action g_single_path_actions[] =
 {
     {210u, "当前选择:CISS"},
@@ -351,6 +369,11 @@ static void UI_DrawSweepLogGrid(lv_obj_t *chart,
                                 lv_draw_ctx_t *draw_context);
 static void UI_SweepChartDrawEvent(lv_event_t *event);
 static void UI_SweepChartProbeDrawEvent(lv_event_t *event);
+/* 🆕 2026-10-23:标准曲线叠加(两张图共用一个 DRAW_POST 回调) */
+static void UI_ReferenceDrawEvent(lv_event_t *event);
+static void UI_RefreshReferenceControls(void);
+static void UI_RefToggleEvent(lv_event_t *event);
+static void UI_RefSelectorEvent(lv_event_t *event);
 static void UI_SweepChartTouchEvent(lv_event_t *event);
 static void UI_ResetSweepProbe(void);
 static void UI_ApplySweepViewport(void);
@@ -699,6 +722,42 @@ static lv_obj_t *UI_CreateButton(lv_obj_t *parent,
     lv_obj_align(label, LV_ALIGN_CENTER, 0, 0);
 
     return button;
+}
+
+/* 「标准曲线」图例:三段小短横 + 文字。
+   实测是整条实线、标准是断续短划 —— 不靠颜色深浅区分(色彩在 A9 上偏差大),
+   靠**线型**区分,灰阶屏上也能一眼看出。两张图共用同一个样子。 */
+static lv_obj_t *UI_CreateReferenceLegend(lv_obj_t *parent,
+                                          lv_coord_t x,
+                                          lv_coord_t y)
+{
+    lv_obj_t *legend = lv_obj_create(parent);
+    uint32_t index;
+
+    lv_obj_set_pos(legend, x, y);
+    lv_obj_set_size(legend, 82, 28);
+    lv_obj_clear_flag(legend, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_opa(legend, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_border_width(legend, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(legend, 0, LV_PART_MAIN);
+    for (index = 0u; index < 3u; ++index)
+    {
+        lv_obj_t *dash = lv_obj_create(legend);
+
+        lv_obj_set_pos(dash, (lv_coord_t)index * 7, 11);
+        lv_obj_set_size(dash, 5, 4);
+        lv_obj_clear_flag(dash, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_style_bg_color(dash, lv_color_hex(0xdfe9f3u),
+                                  LV_PART_MAIN);
+        lv_obj_set_style_bg_opa(dash, LV_OPA_COVER, LV_PART_MAIN);
+        lv_obj_set_style_border_width(dash, 0, LV_PART_MAIN);
+        lv_obj_set_style_radius(dash, 0, LV_PART_MAIN);
+        lv_obj_set_style_pad_all(dash, 0, LV_PART_MAIN);
+    }
+    UI_CreateText(legend, "标准", &ui_font_cn_20,
+                  UI_COLOR_TEXT_MUTED, 24, 3, 58, 24,
+                  LV_TEXT_ALIGN_LEFT);
+    return legend;
 }
 
 static void UI_FormatSweepLogTick(int32_t log_milli,
@@ -1144,6 +1203,191 @@ static bool UI_SweepPointToPixel(lv_obj_t *chart,
                                 g_sweep_voltage[path][index],
                                 g_sweep_capacitance[path][index],
                                 point);
+}
+
+/* --------------------------------------------------------------------------
+ * 标准曲线叠加(2026-10-23)
+ *
+ * 为什么用 DRAW_POST 而不是再加三条 lv_chart series:
+ *   · 参考曲线是**固定 201 点**,与实测点数无关;塞进 UI_SWEEP_RENDER_POINTS
+ *     的数组要自己造 x/y 并对齐,换视口时还得重算。
+ *   · 实测曲线是实线、标准是**虚线**,lv_chart 的 series 只能画实线。
+ *
+ * ⚠️ 虚线**不能**靠 `lv_draw_line_dsc_t.dash_width/dash_gap` —— LVGL 8.2 的
+ *    软件渲染器只在 `draw_line_hor` / `draw_line_ver` 里看这两个字段,
+ *    斜线走 `draw_line_skew`,那里**根本不看**(`lv_draw_sw_line.c` 278 行起
+ *    全文无 dash)。标准曲线几乎全是斜线,照那样写会画成实线。
+ *    ⇒ 自己按**像素弧长**切 5 px 实 / 4 px 空,相位跨段连续,
+ *      所以必须关掉 dsc 里的 dash,否则水平/垂直的短段会被二次切割。
+ *
+ * 裁剪:点落在当前视口外时 UI_SweepValueToPixel() 返回 false,折线在此断开;
+ *       缩放后进入视口的点会自然接上(断线时虚线相位归零)。
+ *       像素间距 < 2 px 的点跳过 —— 201 个点挤在几个像素里时少几条指令,
+ *       但不影响虚线相位(相位按走过的像素累计)。
+ * ------------------------------------------------------------------------ */
+static lv_coord_t UI_RoundCoord(float value)
+{
+    return (lv_coord_t)((value >= 0.0f) ? (value + 0.5f) : (value - 0.5f));
+}
+
+/* 沿 from→to 走一遍,只画落在"实"相位上的子段;@p phase 是跨段累计的
+   弧长相位(0..9 px),调用方在断线时置 0。 */
+static void UI_DrawDashedSegment(lv_draw_ctx_t *draw_context,
+                                 const lv_draw_line_dsc_t *line,
+                                 const lv_point_t *from,
+                                 const lv_point_t *to,
+                                 float *phase)
+{
+    const float dash_on = 5.0f;
+    const float dash_off = 4.0f;
+    const float period = dash_on + dash_off;
+    float dx;
+    float dy;
+    float length;
+
+    if ((draw_context == NULL) || (line == NULL) || (from == NULL) ||
+        (to == NULL) || (phase == NULL))
+    {
+        return;
+    }
+
+    dx = (float)to->x - (float)from->x;
+    dy = (float)to->y - (float)from->y;
+    length = sqrtf(dx * dx + dy * dy);
+    if (length < 0.5f)
+    {
+        return;
+    }
+
+    {
+        float travelled = 0.0f;
+
+        while (travelled < length)
+        {
+            float phase_now = fmodf(*phase, period);
+            float span;
+            uint8_t drawing = (phase_now < dash_on) ? 1u : 0u;
+
+            span = drawing ? (dash_on - phase_now) : (period - phase_now);
+            if (span < 0.5f)
+            {
+                span = 0.5f;    /* 相位正好压在边界上时防止原地打转 */
+            }
+            if (span > (length - travelled))
+            {
+                span = length - travelled;
+            }
+
+            if (drawing != 0u)
+            {
+                lv_point_t a;
+                lv_point_t b;
+                float t0 = travelled / length;
+                float t1 = (travelled + span) / length;
+
+                a.x = UI_RoundCoord((float)from->x + (dx * t0));
+                a.y = UI_RoundCoord((float)from->y + (dy * t0));
+                b.x = UI_RoundCoord((float)from->x + (dx * t1));
+                b.y = UI_RoundCoord((float)from->y + (dy * t1));
+                lv_draw_line(draw_context, line, &a, &b);
+            }
+
+            travelled += span;
+            *phase += span;
+        }
+    }
+}
+
+static void UI_DrawReferenceCurves(lv_obj_t *chart, lv_draw_ctx_t *draw_context)
+{
+    uint32_t leg;
+
+    if ((chart == NULL) || (draw_context == NULL) ||
+        (g_ref_curve_enabled == 0u) || (RefModel_Count() == 0u))
+    {
+        return;
+    }
+
+    for (leg = 0u; leg < 3u; ++leg)
+    {
+        uint32_t count = RefModel_PointCount(g_ref_model, leg);
+        lv_draw_line_dsc_t line;
+        lv_point_t previous;
+        uint8_t have_previous = 0u;
+        float dash_phase = 0.0f;
+        uint32_t index;
+
+        if (count == 0u)
+        {
+            continue;
+        }
+
+        lv_draw_line_dsc_init(&line);
+        line.color = lv_color_hex(g_ref_curve_colors[leg]);
+        line.width = 2;
+        line.opa = (lv_opa_t)235u;
+        /* 必须为 0:切段后可能产生水平/垂直短段,那边 LVGL 会再切一次 */
+        line.dash_width = 0;
+        line.dash_gap = 0;
+
+        for (index = 0u; index < count; ++index)
+        {
+            float vds;
+            float cs;
+            lv_point_t point;
+
+            if (!RefModel_CurvePoint(g_ref_model, leg, index, &vds, &cs))
+            {
+                break;
+            }
+            if (!UI_SweepValueToPixel(chart, vds, cs, &point))
+            {
+                /* 出视口 / 非正数 —— 断线,等下一个有效点重新起笔;
+                   虚线相位也归零,否则下一段会带着上一段的残相 */
+                have_previous = 0u;
+                dash_phase = 0.0f;
+                continue;
+            }
+
+            if (have_previous == 0u)
+            {
+                previous = point;
+                have_previous = 1u;
+                continue;
+            }
+
+            {
+                int32_t dx = (int32_t)point.x - (int32_t)previous.x;
+                int32_t dy = (int32_t)point.y - (int32_t)previous.y;
+
+                if ((dx * dx + dy * dy) >= 4)
+                {
+                    UI_DrawDashedSegment(draw_context, &line,
+                                         &previous, &point, &dash_phase);
+                    previous = point;
+                }
+            }
+        }
+    }
+}
+
+static void UI_ReferenceDrawEvent(lv_event_t *event)
+{
+    lv_obj_t *chart;
+
+    if ((event == NULL) ||
+        (lv_event_get_code(event) != LV_EVENT_DRAW_POST))
+    {
+        return;
+    }
+
+    chart = lv_event_get_target(event);
+    if ((chart != g_sweep_chart) && (chart != g_results_chart))
+    {
+        return;
+    }
+
+    UI_DrawReferenceCurves(chart, lv_event_get_draw_ctx(event));
 }
 
 static void UI_FormatSweepFixed(float value,
@@ -4604,8 +4848,10 @@ typedef struct
     char     cs[24];    /* RG 回路用这一格存电阻文本 */
     char     cp[24];
     char     d[24];
+    float    bias_v;    /* 🆕 该点实际偏压(Vds,V)—— 只用来查标准曲线 */
     uint8_t  have;      /* 0 = 从未收到过该回路的数据 */
     uint8_t  valid;     /* 后端给的有效性标志 */
+    uint8_t  have_bias; /* 0 = 不知道偏压 ⇒ 标准值显示 "--",不猜 */
 } UI_ResultSnapshot;
 
 typedef struct
@@ -4625,6 +4871,8 @@ static UI_WaveBuffer     g_result_wave[UI_WAVE_KIND_COUNT];
 
 static lv_obj_t *g_result_cards[UI_RESULT_ROUTE_COUNT];
 static lv_obj_t *g_result_value_labels[UI_RESULT_ROUTE_COUNT][3];
+/* 🆕 2026-10-23:每一行实测值的正下方一行标准值(浅灰,一一对应) */
+static lv_obj_t *g_result_ref_labels[UI_RESULT_ROUTE_COUNT][3];
 static lv_obj_t *g_result_state_labels[UI_RESULT_ROUTE_COUNT];
 
 static lv_obj_t *g_result_tab_buttons[UI_RESULT_TAB_COUNT];
@@ -4649,6 +4897,24 @@ static const char *const g_wave_waiting_text[UI_WAVE_KIND_COUNT] =
 static uint8_t g_results_built;
 
 static void UI_ResultTabApply(void);
+
+/* 记录该点的实际偏压。只影响标准值查表,不影响任何实测数。
+   ⚠️ 必须在 UI_ResultRecord() 之前或之后都行 —— 那边不碰 bias 字段。 */
+static void UI_ResultSetBias(uint32_t route, float bias_v)
+{
+    if (route >= UI_RESULT_ROUTE_COUNT)
+    {
+        return;
+    }
+    if (!isfinite(bias_v) || (bias_v <= 0.0f))
+    {
+        g_result_snapshot[route].have_bias = 0u;
+        g_result_snapshot[route].bias_v = 0.0f;
+        return;
+    }
+    g_result_snapshot[route].bias_v = bias_v;
+    g_result_snapshot[route].have_bias = 1u;
+}
 
 /*
  * 记录一次读数。三条路径都从这里进,保证结果页与源页面永远同源。
@@ -4869,11 +5135,13 @@ static void UI_ResultsCopyChart(void)
                 drawn++;
             }
         }
+        /* 🔴 摘要栏 2026-10-23 收窄:右边要让位给「器件型号」与「叠加」开关两个控件。
+           字数必须压在这条 166 px 的标签里,别再加字。 */
         lv_label_set_text_fmt(g_results_summary_label,
-                              "每路点数 %lu · 有效曲线 %lu/3 · RG %s",
+                              "%lu点 %lu/3 RG%s",
                               (unsigned long)best,
                               (unsigned long)drawn,
-                              (g_latest_rg_valid != 0u) ? "已测" : "--");
+                              (g_latest_rg_valid != 0u) ? "✓" : "--");
     }
 }
 
@@ -5072,6 +5340,76 @@ static void UI_ResultsRefresh(void)
                                       (line < 2u) ? " pF" : "");
             }
         }
+
+        /* ---- 标准值:紧贴每一行实测值的下面,格式与行号一一对应 ---- */
+        if (route == 3u)
+        {
+            float rg_ohm;
+
+            for (line = 0u; line < 3u; ++line)
+            {
+                lv_obj_t *ref = g_result_ref_labels[route][line];
+
+                if (ref == NULL)
+                {
+                    continue;
+                }
+                if ((line == 2u) && RefModel_Rg(g_ref_model, &rg_ohm))
+                {
+                    lv_label_set_text_fmt(ref, "标准 %.3f Ω",
+                                          (double)rg_ohm);
+                }
+                else
+                {
+                    lv_label_set_text(ref, "");
+                }
+            }
+        }
+        else
+        {
+            static const char *const ref_keys[] = {"Cs", "Cp", "D "};
+            float ref_cs = 0.0f;
+            float ref_cp = 0.0f;
+            float ref_d = 0.0f;
+            uint8_t ref_ok = 0u;
+
+            if ((snap->have_bias != 0u) &&
+                RefModel_At(g_ref_model, route, snap->bias_v,
+                            &ref_cs, &ref_cp, &ref_d))
+            {
+                ref_ok = 1u;
+            }
+
+            for (line = 0u; line < 3u; ++line)
+            {
+                lv_obj_t *ref = g_result_ref_labels[route][line];
+
+                if (ref == NULL)
+                {
+                    continue;
+                }
+                if (ref_ok == 0u)
+                {
+                    lv_label_set_text(ref, "标准 --");
+                    continue;
+                }
+                if (line == 0u)
+                {
+                    lv_label_set_text_fmt(ref, "标准 %s %.3f pF",
+                                          ref_keys[line], (double)ref_cs);
+                }
+                else if (line == 1u)
+                {
+                    lv_label_set_text_fmt(ref, "标准 %s %.3f pF",
+                                          ref_keys[line], (double)ref_cp);
+                }
+                else
+                {
+                    lv_label_set_text_fmt(ref, "标准 %s %.5f",
+                                          ref_keys[line], (double)ref_d);
+                }
+            }
+        }
     }
 
     UI_ResultsCopyChart();
@@ -5080,6 +5418,199 @@ static void UI_ResultsRefresh(void)
     UI_UpdateTransferQRCode();
     UI_ResultWaveRefresh();
     UI_ResultTabApply();
+}
+
+/* --------------------------------------------------------------------------
+ * 标准曲线控件:型号选择 + 显示开关(2026-10-23)
+ *
+ * 设计约束:
+ *   · **不做下拉控件** —— `app/lv_conf.h` 里 LV_USE_DROPDOWN = 0,而且没有启用
+ *     默认主题,LVGL 自带的下拉列表会是**透明底**,压在图上根本看不清。
+ *     这里用自建弹层(UI_CreatePanel + UI_CreateButton),风格与全工程一致。
+ *   · 型号只有一项时也**如实弹出列表** —— 让用户看见"确实选了它",
+ *     而不是点一下什么都没发生。多型号时只加 RefModel 表,这里不用改。
+ * ------------------------------------------------------------------------ */
+static void UI_RefreshReferenceControls(void)
+{
+    if (g_ref_selector_button != NULL)
+    {
+        lv_obj_t *label = lv_obj_get_child(g_ref_selector_button, 0);
+        const char *name = RefModel_Name(g_ref_model);
+
+        if (label != NULL)
+        {
+            lv_label_set_text(label, (name != NULL) ? name : "无型号");
+        }
+    }
+
+    if (g_ref_toggle_label != NULL)
+    {
+        lv_label_set_text(g_ref_toggle_label,
+                          (g_ref_curve_enabled != 0u) ?
+                          "叠加:开" : "叠加:关");
+    }
+    if (g_ref_toggle_button != NULL)
+    {
+        lv_obj_set_style_bg_color(
+            g_ref_toggle_button,
+            lv_color_hex((g_ref_curve_enabled != 0u) ?
+                         UI_COLOR_CYAN : UI_COLOR_SURFACE_LIGHT),
+            LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_set_style_bg_color(g_ref_toggle_button,
+                                  lv_color_hex(UI_COLOR_PRESSED),
+                                  LV_PART_MAIN | LV_STATE_PRESSED);
+    }
+
+    if ((g_ref_legend != NULL) || (g_ref_sweep_legend != NULL))
+    {
+        lv_obj_t *const legends[2] = {g_ref_legend, g_ref_sweep_legend};
+        uint32_t index;
+
+        for (index = 0u; index < 2u; ++index)
+        {
+            if (legends[index] == NULL)
+            {
+                continue;
+            }
+            if (g_ref_curve_enabled != 0u)
+            {
+                lv_obj_clear_flag(legends[index], LV_OBJ_FLAG_HIDDEN);
+            }
+            else
+            {
+                lv_obj_add_flag(legends[index], LV_OBJ_FLAG_HIDDEN);
+            }
+        }
+    }
+
+    /* 两张图都要重画:参考线在 DRAW_POST 里画,改标志不会自动让旧帧失效 */
+    if (g_sweep_chart != NULL)
+    {
+        lv_chart_refresh(g_sweep_chart);
+    }
+    if (g_results_chart != NULL)
+    {
+        lv_chart_refresh(g_results_chart);
+    }
+    UI_ResultsRefresh();
+}
+
+static void UI_RefToggleEvent(lv_event_t *event)
+{
+    if ((event == NULL) ||
+        (lv_event_get_code(event) != LV_EVENT_CLICKED))
+    {
+        return;
+    }
+
+    g_ref_curve_enabled = (g_ref_curve_enabled != 0u) ? 0u : 1u;
+    UI_RefreshReferenceControls();
+}
+
+static void UI_RefOverlayClose(void)
+{
+    if (g_ref_model_overlay != NULL)
+    {
+        lv_obj_del(g_ref_model_overlay);
+        g_ref_model_overlay = NULL;
+    }
+}
+
+static void UI_RefOverlayBackgroundEvent(lv_event_t *event)
+{
+    if ((event != NULL) &&
+        (lv_event_get_code(event) == LV_EVENT_CLICKED))
+    {
+        UI_RefOverlayClose();
+    }
+}
+
+static void UI_RefModelOptionEvent(lv_event_t *event)
+{
+    uint32_t model;
+
+    if ((event == NULL) ||
+        (lv_event_get_code(event) != LV_EVENT_CLICKED))
+    {
+        return;
+    }
+
+    model = (uint32_t)(uintptr_t)lv_event_get_user_data(event);
+    if (model < RefModel_Count())
+    {
+        g_ref_model = model;
+    }
+    UI_RefOverlayClose();
+    UI_RefreshReferenceControls();
+}
+
+static void UI_RefSelectorEvent(lv_event_t *event)
+{
+    lv_obj_t *overlay;
+    lv_obj_t *panel;
+    lv_coord_t panel_height;
+    uint32_t count;
+    uint32_t index;
+
+    if ((event == NULL) ||
+        (lv_event_get_code(event) != LV_EVENT_CLICKED) ||
+        (g_ref_model_overlay != NULL))
+    {
+        return;
+    }
+
+    count = RefModel_Count();
+    if (count == 0u)
+    {
+        return;
+    }
+    panel_height = 74 + (lv_coord_t)count * 56 + 48;
+
+    overlay = lv_obj_create(lv_layer_top());
+    lv_obj_set_pos(overlay, 0, 0);
+    lv_obj_set_size(overlay, (lv_coord_t)LCD_PIXEL_WIDTH,
+                    (lv_coord_t)LCD_PIXEL_HEIGHT);
+    lv_obj_clear_flag(overlay, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_color(overlay, lv_color_hex(0x000000u), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(overlay, (lv_opa_t)150u, LV_PART_MAIN);
+    lv_obj_set_style_border_width(overlay, 0, LV_PART_MAIN);
+    lv_obj_set_style_radius(overlay, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(overlay, 0, LV_PART_MAIN);
+    lv_obj_add_event_cb(overlay, UI_RefOverlayBackgroundEvent,
+                        LV_EVENT_CLICKED, NULL);
+    g_ref_model_overlay = overlay;
+
+    panel = UI_CreatePanel(overlay,
+                           ((lv_coord_t)LCD_PIXEL_WIDTH - 380) / 2,
+                           190,
+                           380,
+                           panel_height,
+                           UI_COLOR_SURFACE_LIGHT,
+                           16);
+    UI_CreateText(panel, "器件型号", &ui_font_cn_28, UI_COLOR_TEXT,
+                  18, 12, 240, 36, LV_TEXT_ALIGN_LEFT);
+    UI_CreateText(panel, "标准曲线来自 10 颗同型号器件", &ui_font_cn_20,
+                  UI_COLOR_TEXT_MUTED, 18, 48, 344, 26, LV_TEXT_ALIGN_LEFT);
+
+    for (index = 0u; index < count; ++index)
+    {
+        const char *name = RefModel_Name(index);
+
+        if (name == NULL)
+        {
+            break;
+        }
+        UI_CreateButton(panel, name,
+                        (index == g_ref_model) ?
+                        UI_COLOR_PRESSED : UI_COLOR_SURFACE,
+                        18, 82 + (lv_coord_t)index * 56,
+                        344, 46,
+                        UI_RefModelOptionEvent,
+                        (void *)(uintptr_t)index);
+    }
+
+    UI_CreateText(panel, "点空白处关闭", &ui_font_cn_20, UI_COLOR_TEXT_MUTED,
+                  18, panel_height - 38, 344, 26, LV_TEXT_ALIGN_CENTER);
 }
 
 /* 协议层用的导出包装。
@@ -5287,10 +5818,12 @@ static void UI_ShowResults(void)
 
     for (index = 0u; index < UI_RESULT_ROUTE_COUNT; ++index)
     {
+        /* 🆕 2026-10-23:卡片加高到 236 —— 每行实测值下面多一行标准值。
+           行距 56 的分配:实测 y=52/108/164,标准 y=80/136/192,末行压到 218。 */
         lv_obj_t *card = UI_CreatePanel(
             point_value_page,
             UI_PAGE_MARGIN + (lv_coord_t)index * (card_width + card_gap),
-            124, card_width, 168, UI_COLOR_SURFACE_LIGHT, 14);
+            124, card_width, 236, UI_COLOR_SURFACE_LIGHT, 14);
 
         g_result_cards[index] = card;
         lv_obj_set_style_border_width(card, 1, LV_PART_MAIN);
@@ -5306,14 +5839,24 @@ static void UI_ShowResults(void)
         {
             g_result_value_labels[index][line] =
                 UI_CreateText(card, "--", &ui_font_cn_20, UI_COLOR_TEXT,
-                              14, 56 + (lv_coord_t)line * 32,
+                              14, 52 + (lv_coord_t)line * 56,
+                              card_width - 28, 28, LV_TEXT_ALIGN_LEFT);
+            g_result_ref_labels[index][line] =
+                UI_CreateText(card, "", &ui_font_cn_20,
+                              UI_COLOR_TEXT_MUTED,
+                              14, 80 + (lv_coord_t)line * 56,
                               card_width - 28, 28, LV_TEXT_ALIGN_LEFT);
         }
     }
     UI_CreateText(point_value_page,
-                  "数据来源:测量页最近一次写回的读数;未测过的回路显示 --",
+                  "数据来源:测量页最近一次写回的读数;标准值按该点偏压查表",
                   &ui_font_cn_20, UI_COLOR_TEXT_MUTED,
-                  UI_PAGE_MARGIN, 306, content_width, 28,
+                  UI_PAGE_MARGIN, 372, content_width, 28,
+                  LV_TEXT_ALIGN_LEFT);
+    UI_CreateText(point_value_page,
+                  "Cs 可直接对照; Cp/D 标准值不含线阻,实测值含线阻",
+                  &ui_font_cn_20, UI_COLOR_TEXT_MUTED,
+                  UI_PAGE_MARGIN, 400, content_width, 28,
                   LV_TEXT_ALIGN_LEFT);
 
     /* ================= 子页 1:单点波形 ================= */
@@ -5338,17 +5881,23 @@ static void UI_ShowResults(void)
                                                content_width, 286,
                                                UI_COLOR_SURFACE_LIGHT, 14);
 
-        UI_CreateText(chart_panel, "C-V 曲线(与扫压页同源)", &ui_font_cn_20,
-                      UI_COLOR_TEXT_MUTED, 16, 4, 250, 24,
+        /* 🔴 2026-10-23 顶行重排:标题收窄 → 图例 → 标准图例 → 型号 → 叠加 → 摘要。
+           面板宽 976,各段 x 已排满(14+110 / 128+3×82 / 380+82 / 466+210 /
+           680+110 / 796+166 = 962),再加控件之前先看这里还剩多少。
+           ⚠️ 型号按钮 210 px 是量出来的下限:「TK9J90T 标准(10 颗)」在
+           ui_font_cn_20 里宽 185.75 px,按钮文字区 = 宽 - 20 = 190。
+           再窄就会折成两行、被 34 px 的按钮高度裁掉。 */
+        UI_CreateText(chart_panel, "C-V 曲线", &ui_font_cn_20,
+                      UI_COLOR_TEXT_MUTED, 14, 6, 110, 28,
                       LV_TEXT_ALIGN_LEFT);
 
         for (index = 0u; index < 3u; ++index)
         {
-            lv_coord_t item_x = 280 + (lv_coord_t)index * 110;
+            lv_coord_t item_x = 128 + (lv_coord_t)index * 82;
             lv_obj_t *line = lv_obj_create(chart_panel);
 
-            lv_obj_set_pos(line, item_x, 14);
-            lv_obj_set_size(line, 26, 4);
+            lv_obj_set_pos(line, item_x, 17);
+            lv_obj_set_size(line, 20, 4);
             lv_obj_clear_flag(line, LV_OBJ_FLAG_SCROLLABLE);
             lv_obj_set_style_bg_color(
                 line, lv_color_hex(g_sweep_series_colors[index]), LV_PART_MAIN);
@@ -5358,18 +5907,38 @@ static void UI_ShowResults(void)
             lv_obj_set_style_pad_all(line, 0, LV_PART_MAIN);
             UI_CreateText(chart_panel, legend_names[index],
                           &lv_font_montserrat_16, UI_COLOR_TEXT_MUTED,
-                          item_x + 32, 4, 70, 24, LV_TEXT_ALIGN_LEFT);
+                          item_x + 25, 6, 56, 28, LV_TEXT_ALIGN_LEFT);
         }
-        /* 摘要移到面板右上角,把屏下空间让给读数行与参数卡。 */
+
+        /* 「标准」= 三段小短横,和实测的整条实线一眼能分开 */
+        g_ref_legend = UI_CreateReferenceLegend(chart_panel, 380, 6);
+
+        {
+            const char *model_name = RefModel_Name(g_ref_model);
+
+            g_ref_selector_button = UI_CreateButton(
+                chart_panel,
+                (model_name != NULL) ? model_name : "器件型号",
+                UI_COLOR_SURFACE, 466, 4, 210, 34,
+                UI_RefSelectorEvent, NULL);
+        }
+        g_ref_toggle_button = UI_CreateButton(
+            chart_panel, "叠加:关", UI_COLOR_SURFACE_LIGHT,
+            680, 4, 110, 34, UI_RefToggleEvent, NULL);
+        g_ref_toggle_label = lv_obj_get_child(g_ref_toggle_button, 0);
+
+        /* 摘要收窄到 166 px,文案已同步压缩(见 UI_ResultsCopyChart) */
         g_results_summary_label =
             UI_CreateText(chart_panel, "尚无扫压数据", &ui_font_cn_20,
-                          UI_COLOR_TEXT_MUTED, 610, 4, 350, 24,
+                          UI_COLOR_TEXT_MUTED, 796, 6, 166, 28,
                           LV_TEXT_ALIGN_RIGHT);
 
         g_results_chart = lv_chart_create(chart_panel);
-        lv_obj_set_pos(g_results_chart, 64, 32);
+        /* 2026-10-23:顶行长到 44 px(放得下 34 px 的按钮),图往下让 12 px;
+           底边仍在 258,底部 X 刻度文字的空间一个像素没少。 */
+        lv_obj_set_pos(g_results_chart, 64, 44);
         /* 高度留出底部给 X 轴刻度文字 —— 少留就会被面板裁掉(已踩) */
-        lv_obj_set_size(g_results_chart, content_width - 80, 226);
+        lv_obj_set_size(g_results_chart, content_width - 80, 214);
         lv_chart_set_type(g_results_chart, LV_CHART_TYPE_SCATTER);
         lv_chart_set_point_count(g_results_chart, UI_SWEEP_RENDER_POINTS);
         lv_chart_set_range(g_results_chart, LV_CHART_AXIS_PRIMARY_X,
@@ -5408,6 +5977,9 @@ static void UI_ShowResults(void)
            LVGL 自带的整数刻度只会把 log-milli 原值(1000/2000/3000)印出来。 */
         lv_obj_add_event_cb(g_results_chart, UI_SweepChartDrawEvent,
                             LV_EVENT_DRAW_PART_BEGIN, NULL);
+        /* 标准曲线先画,探针十字线后画 —— 十字线要压在虚线上 */
+        lv_obj_add_event_cb(g_results_chart, UI_ReferenceDrawEvent,
+                            LV_EVENT_DRAW_POST, NULL);
         lv_obj_add_event_cb(g_results_chart, UI_SweepChartProbeDrawEvent,
                             LV_EVENT_DRAW_POST, NULL);
         lv_obj_add_event_cb(g_results_chart, UI_ResultsSweepTouchEvent,
@@ -5589,6 +6161,19 @@ static void UI_ShowResults(void)
     g_results_built = 1u;
     UI_ActivatePage(UI_PAGE_RESULTS);
 
+    /* ⚠️ 仅供演示 / 自动化截图:`CV_UI_REF_CURVE=1` 让标准曲线默认打开。
+       正常运行时变量不设,零影响。 */
+    {
+        const char *env = getenv("CV_UI_REF_CURVE");
+
+        if ((env != NULL) && (env[0] != '\0') &&
+            (strtoul(env, NULL, 0) != 0ul))
+        {
+            g_ref_curve_enabled = 1u;
+        }
+    }
+    UI_RefreshReferenceControls();
+
     /* ⚠️ 仅供演示 / 自动化截图:`CV_UI_DEMO_PROBE=<电压>` 让结果页
        一进来就显示一次探针读数。正常运行时变量不设,零影响。 */
     {
@@ -5693,6 +6278,14 @@ static void UI_ShowSweep(void)
                       item_x + 42, 4, 76, 20,
                       LV_TEXT_ALIGN_LEFT);
     }
+    /* 扫压页没有自己的开关(与结果页共用),但必须让用户知道
+       图上那些浅色短划是什么 —— 否则虚线看起来像实测数据抖动。 */
+    g_ref_sweep_legend = UI_CreateReferenceLegend(chart_panel,
+                                                  chart_width - 96, 4);
+    if (g_ref_curve_enabled == 0u)
+    {
+        lv_obj_add_flag(g_ref_sweep_legend, LV_OBJ_FLAG_HIDDEN);
+    }
     g_sweep_chart = lv_chart_create(chart_panel);
     lv_obj_set_pos(g_sweep_chart, 64, 42);
     lv_obj_set_size(g_sweep_chart, chart_width - 82, 402);
@@ -5743,6 +6336,9 @@ static void UI_ShowSweep(void)
     lv_obj_clear_flag(g_sweep_chart, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_event_cb(g_sweep_chart, UI_SweepChartDrawEvent,
                         LV_EVENT_DRAW_PART_BEGIN, NULL);
+    /* 2026-10-23:标准曲线(与结果页共用同一个开关与同一个回调) */
+    lv_obj_add_event_cb(g_sweep_chart, UI_ReferenceDrawEvent,
+                        LV_EVENT_DRAW_POST, NULL);
     lv_obj_add_event_cb(g_sweep_chart, UI_SweepChartProbeDrawEvent,
                         LV_EVENT_DRAW_POST, NULL);
     lv_obj_add_event_cb(g_sweep_chart, UI_SweepChartTouchEvent,
@@ -6342,12 +6938,17 @@ void UI_Demo_UpdateSingleCapacitance(uint32_t path,
                                      const char *cs_text,
                                      const char *cp_text,
                                      const char *d_text,
-                                     uint32_t valid)
+                                     uint32_t valid,
+                                     float bias_v)
 {
     if ((cs_text == NULL) || (cp_text == NULL) || (d_text == NULL))
     {
         return;
     }
+
+    /* 🆕 2026-10-23:先记偏压 —— 结果页的标准值按这个电压查。
+       放在「全部」分支之前,转交给 UI_Demo_UpdateAllCapacitance 时不会被清掉。 */
+    UI_ResultSetBias(path, bias_v);
 
     /* 🔴 「全部」模式:测量页显示的是三张卡(g_all_result_labels[0..2]),
      *    单卡 label 被隐藏。协议层的三腿序列是**逐腿**调用本函数
