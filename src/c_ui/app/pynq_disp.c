@@ -5,21 +5,45 @@
  * 接口在 `port/BSP/LVGL/lv_port_disp.h`(与前序版只差 `Init` 收两个地址)。
  *
  * ────────────────────────────────────────────────────────────────────────
- * 【架构:direct_mode + 两块整屏 DDR 缓冲】
+ * 【架构:LVGL 分块缓冲 + 180° 软件旋转 + 两块整屏 DDR 帧缓存】
  *
- *   LVGL 直接往**前台/后台这两块 DDR 帧缓存**里画(direct_mode = 1),
- *   flush 回调只做两件事:帧末请求 PL 换址、把刚改过的矩形同步到新后台。
- *   ⇒ 没有额外的拷贝缓冲,一帧只写一次屏。
+ *   LVGL 往一块**缓存 RAM** 里的分块缓冲画画(每块最多 `DRAW_BUF_ROWS` 行);
+ *   每画完一块:
+ *     · LVGL 自己把这块**原地旋转 180°**并把矩形坐标映射到面板朝向
+ *       (`lv_refr.c: draw_buf_rotate_180`);
+ *     · 本文件的 flush 把这**一块**按行拷进后台帧缓存;
+ *     · 到帧末最后一块:请求 PL 在 VBlank 换址,再把失效矩形从新前台补到新后台。
  *
- *   为什么必须是两块:**换址只在 VBlank 生效**,屏幕上永远在扫其中一块。
- *   只有一块的话,PS 画到一半就会被扫出去(撕裂)。
+ *   屏上永远在看其中一块帧缓存。只有一块的话,PS 画到一半就会被扫出去(撕裂)。
+ * ────────────────────────────────────────────────────────────────────────
+ *
+ * 🔴 【为什么不用 direct_mode 了】(2026-10-24,面板翻装)
+ *   direct_mode 下 LVGL 的 `buf_area` 是**整屏**,而 flush 仍是
+ *   **每个失效区各调一次**。若此时开 `sw_rotate`,`draw_buf_rotate_180`
+ *   会把**整个帧缓存**原地翻转 —— 一个失效区翻一次,两个区就翻回原样;
+ *   而且每帧要在 1.2 MB 非缓存内存上逐像素交换,帧率直接崩。
+ *   ⇒ 改用分块缓冲:旋转只作用在几行大小的一块(缓存 RAM 里,快),
+ *     坐标由 LVGL 一并算好,flush 只管"拷哪块、拷到哪"。
+ *   代价:比 direct_mode 多一次"缓存 → 非缓存"的拷贝,但**拷贝量等于
+ *   失效区面积**,与 direct_mode 直接画进 DDR 的写入量相同。
+ *
+ * 🔴 【帧缓存里存的是**面板朝向**(已旋转 180)的图像】
+ *   ⇒ `sync_invalid_areas()` 拷贝失效矩形前**必须先镜像坐标**
+ *     (`mirror_area`),不能拿 LVGL 的逻辑坐标直接拷。
+ *     拿错的话表现是"局部刷新时另一角落闪回两帧前的内容",极难归因。
+ *
+ * 🔴 【触摸不需要在这里镜像】
+ *   LVGL 8.2 的 `lv_indev.c:332` 会按 `drv->rotated` 自己翻转指针坐标
+ *   (头文件里那句 "Does not update coordinates for you!" 是旧注释)。
+ *   但 `ui_demo.c` 的多指手势走的是 `LV_PortIndev_GetTouchState()` 的
+ *   **原始缓存**,不经过 LVGL ⇒ 那份缓存在 `pynq_indev.c` 里单独镜像,
+ *   保证两处看到的是同一套逻辑坐标。开关是 `CV_PANEL_ROTATE_180`。
  * ────────────────────────────────────────────────────────────────────────
  *
  * 🔴 【为什么一定要做"矩形同步" SyncInvalidAreas】
- *   direct_mode + full_refresh = 0 时,LVGL **只重画失效区域**,
- *   其余像素指望缓冲里还是上一帧的样子。
- *   可换址之后,**新后台**是更早的那一帧 —— 不补的话,界面会一块块
- *   "退回到两帧前"。这个 bug 平时看不出来(只有局部刷新时才显形),
+ *   full_refresh = 0 时,LVGL **只重画失效区域**,其余像素指望缓冲里还是
+ *   上一帧的样子。可换址之后,**新后台**是更早的那一帧 —— 不补的话,
+ *   界面会一块块"退回到两帧前"。这个 bug 平时看不出来(只有局部刷新时才显形),
  *   一动界面就"局部花",非常难归因。
  *   ⇒ 每帧把本次失效的矩形从新前台 memcpy 到新后台。
  *
@@ -45,6 +69,7 @@
 #include "pynq_regs.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "lvgl.h"
@@ -60,6 +85,16 @@
 /* 每像素字节数。从 cv_regs 的帧缓存尺寸推,不写死 2 —— 写死的话以后换
  * RGB888 面板会出现"行内错位但整幅还在"的鬼影,极难归因。 */
 #define BYTES_PER_PIXEL     (CV_FB_FRAME_BYTES / (CV_PANEL_W * CV_PANEL_H))
+
+/* 分块缓冲的行数:64 行 × 1024 px × 2 B = 128 KB,约 1/10 屏
+ * (LVGL 推荐的下限;再小会让每帧的 flush 次数和开销显著上升)。 */
+#define DRAW_BUF_ROWS       64
+
+/* flush 里按行 memcpy,像素大小必须与帧缓存的 16 位/像素一致。
+ * 忘了这条而在 lv_conf.h 里改 LV_COLOR_DEPTH,这里直接编译失败,
+ * 而不是在屏上出现"半幅图像"。 */
+_Static_assert(sizeof(lv_color_t) == 2,
+               "帧缓存按 16 bit/像素映射(cv_regs.py 的 RGB565),lv_color_t 不是 2 字节");
 
 /* 私有错误码(前序的 DMA2D 一档换成本项目的 COPY) */
 enum {
@@ -78,10 +113,12 @@ enum {
 static lv_disp_draw_buf_t s_draw_buf;
 static lv_disp_drv_t      s_disp_drv;
 
+static lv_color_t *s_draw_mem;       /* 分块缓冲(cached RAM,malloc) */
+
 static uint16_t *s_fb[2];            /* 映射后的 CPU 虚拟地址 */
 static uint32_t  s_fb_phys[2];       /* 物理地址(给 PL 写的那个) */
 static int       s_front = 0;        /* 当前前台 = 屏幕上正在扫的那块 */
-static int       s_back  = 1;        /* 当前后台 = LVGL 正在画的那块 */
+static int       s_back  = 1;        /* 当前后台 = 本帧正在往里写的那块 */
 
 static uint32_t s_flush_count;
 static uint32_t s_flush_error_count;
@@ -94,17 +131,37 @@ static uint32_t s_last_error;
 /* 小工具                                                              */
 /* ------------------------------------------------------------------ */
 
-/** 判断某个地址落在哪块帧缓存里。认不出返回 -1。 */
-static int fb_index_of(const void *p)
+/**
+ * @brief 面板朝向 ↔ LVGL 逻辑坐标的 180° 镜像。
+ *
+ * LVGL 的坐标是"内容朝向";帧缓存里存的是"面板朝向"。
+ * 180° 旋转下,一个矩形 (x1,y1)-(x2,y2) 映射成
+ * (W-1-x2, H-1-y2)-(W-1-x1, H-1-y1) —— 两个角都要换。
+ */
+static void mirror_area(const lv_area_t *in, lv_area_t *out)
 {
-    uintptr_t a = (uintptr_t)p;
-    for (int i = 0; i < 2; i++) {
-        uintptr_t base = (uintptr_t)s_fb[i];
-        if (a >= base && a < base + CV_FB_FRAME_BYTES) {
-            return i;
-        }
+    out->x1 = (lv_coord_t)(CV_PANEL_W - 1 - in->x2);
+    out->x2 = (lv_coord_t)(CV_PANEL_W - 1 - in->x1);
+    out->y1 = (lv_coord_t)(CV_PANEL_H - 1 - in->y2);
+    out->y2 = (lv_coord_t)(CV_PANEL_H - 1 - in->y1);
+}
+
+/**
+ * @brief 把 flush 拿到的一块(已由 LVGL 旋转好)拷进后台帧缓存。
+ *
+ * `px_map` 是**紧密排列**的 area 宽 × area 高(无行填充),而帧缓存是
+ * 整屏宽 ⇒ 必须逐行拷,不能一次 memcpy。
+ */
+static void copy_chunk_to_back(const lv_area_t *area, const lv_color_t *px_map)
+{
+    const int width = area->x2 - area->x1 + 1;
+    const size_t row_bytes = (size_t)width * sizeof(lv_color_t);
+    uint16_t *fb = s_fb[s_back];
+
+    for (int y = area->y1; y <= area->y2; y++) {
+        memcpy(&fb[(size_t)y * CV_PANEL_W + (size_t)area->x1], px_map, row_bytes);
+        px_map += width;
     }
-    return -1;
 }
 
 /**
@@ -141,6 +198,9 @@ static void copy_rect(int src_idx, int dst_idx,
  * 用到 LVGL 内部结构 `inv_areas` / `inv_area_joined` / `inv_p` ——
  * 这是前序的做法,也是 LVGL 8.2 里唯一能拿到"这一轮画了哪些矩形"的地方。
  * ⚠️ 因此本文件**绑死 LVGL 8.2**:升 LVGL 版本时这里要先看。
+ *
+ * ⚠️ `inv_areas` 是 **LVGL 逻辑坐标**;帧缓存里是**面板朝向**。
+ *    ⇒ 每条都要先 `mirror_area()` 再拷。少这一步的表现见文件头。
  */
 static void sync_invalid_areas(int front_idx, int back_idx)
 {
@@ -150,10 +210,13 @@ static void sync_invalid_areas(int front_idx, int back_idx)
     }
 
     for (uint32_t i = 0; i < disp->inv_p && i < LV_INV_BUF_SIZE; i++) {
+        lv_area_t panel_area;
+
         if (disp->inv_area_joined[i]) {
             continue;                  /* 已经被合并进更早的矩形,跳过 */
         }
-        copy_rect(front_idx, back_idx, &disp->inv_areas[i]);
+        mirror_area(&disp->inv_areas[i], &panel_area);
+        copy_rect(front_idx, back_idx, &panel_area);
         s_cpu_copy_count++;
     }
 }
@@ -163,7 +226,7 @@ static void sync_invalid_areas(int front_idx, int back_idx)
 /* ------------------------------------------------------------------ */
 static void disp_flush(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *px_map)
 {
-    if (drv == NULL || area == NULL) {
+    if (drv == NULL || area == NULL || px_map == NULL) {
         s_last_error = LV_PORT_DISP_ERROR_AREA;
         s_flush_error_count++;
         if (drv != NULL) {
@@ -173,7 +236,8 @@ static void disp_flush(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *px
     }
 
     /* 区域越界:LVGL 不该给这种值,给了就是我们的 res 设错了。
-     * **不要**照着画 —— 越界写会踩坏别的内存。 */
+     * **不要**照着画 —— 越界写会踩坏别的内存。
+     * ⚠️ 这里拿到的是**已旋转**的坐标(LVGL 先旋转再调 flush),仍在面板范围内。 */
     if (area->x1 < 0 || area->y1 < 0 ||
         area->x2 >= CV_PANEL_W || area->y2 >= CV_PANEL_H) {
         s_last_error = LV_PORT_DISP_ERROR_AREA;
@@ -182,26 +246,19 @@ static void disp_flush(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *px
         return;
     }
 
-    /* direct_mode 下一轮刷新会分多次调 flush(每个失效区一次),
-     * 但**只有最后一次**代表"这一帧画完了"。前序也是只认最后一次。 */
+    /* 每一块都要落进后台帧缓存 —— 非 direct_mode 下,屏上看不见 LVGL
+     * 正在画的那块缓存 RAM,不拷就等于没画。 */
+    copy_chunk_to_back(area, px_map);
+
+    /* 一轮刷新会分多次调 flush(每块一次),**只有最后一次**代表"这帧画完了"。
+     * 前序也是只认最后一次。 */
     if (!lv_disp_flush_is_last(drv)) {
         lv_disp_flush_ready(drv);
         return;
     }
 
-    /* 本次画的是哪一块?direct_mode 下 flush 时 buf_act 仍指向刚画完的那块
-     * (LVGL 在调用完 flush_cb **之后**才交换 buf_act,见 lv_refr.c:1008)。 */
-    int rendered = fb_index_of(drv->draw_buf->buf_act);
-    if (rendered < 0) {
-        rendered = fb_index_of((const void *)px_map);   /* 兜底 */
-    }
-    if (rendered < 0) {
-        s_last_error = LV_PORT_DISP_ERROR_FRAME;
-        s_flush_error_count++;
-        lv_disp_flush_ready(drv);
-        return;
-    }
-
+    /* 本帧一直往 s_back 里写 ⇒ 换址要换到它;换完它就成了前台。 */
+    const int rendered  = s_back;
     const int next_back = 1 - rendered;
 
     /* ---- 提交:请求 PL 在 VBlank 换到 rendered,并**等它生效** ---- */
@@ -269,29 +326,45 @@ uint32_t LV_PortDisp_Init(uint32_t fb0_phys, uint32_t fb1_phys)
     s_frame_swap_count = s_vblank_fallback_count = 0;
     s_last_error = LV_PORT_DISP_ERROR_NONE;
 
-    /* ---- LVGL 侧:两块整屏缓冲,direct_mode ---- */
-    /* ⚠️ 顺序照前序:buf1 = 后台, buf2 = 前台。
-     *    direct_mode 下 LVGL 先用 buf1 画 ⇒ 首帧画进"后台",正好合逻辑。 */
-    lv_disp_draw_buf_init(&s_draw_buf, (void *)s_fb[s_back], (void *)s_fb[s_front],
-                          CV_PANEL_W * CV_PANEL_H);
+    /* ---- LVGL 侧:一块分块缓冲,非 direct_mode ---- */
+    /* 缓冲必须放**缓存 RAM**(malloc):旋转是在这块上原地做的,
+     * 放在非缓存 DDR 映射里等于每像素两次慢速读写。 */
+    s_draw_mem = (lv_color_t *)malloc((size_t)CV_PANEL_W * DRAW_BUF_ROWS *
+                                      sizeof(lv_color_t));
+    if (s_draw_mem == NULL) {
+        fprintf(stderr, "[disp] 分块缓冲分配失败(%d 行 × %d px)\n",
+                DRAW_BUF_ROWS, CV_PANEL_W);
+        s_last_error = LV_PORT_DISP_ERROR_FRAME;
+        return LV_PORT_DISP_ERROR;
+    }
+    lv_disp_draw_buf_init(&s_draw_buf, s_draw_mem, NULL,
+                          (uint32_t)CV_PANEL_W * DRAW_BUF_ROWS);
 
     lv_disp_drv_init(&s_disp_drv);
     s_disp_drv.hor_res     = CV_PANEL_W;
     s_disp_drv.ver_res     = CV_PANEL_H;
     s_disp_drv.flush_cb    = disp_flush;
     s_disp_drv.draw_buf    = &s_draw_buf;
-    s_disp_drv.direct_mode = 1;
+    s_disp_drv.direct_mode = 0;
     /* full_refresh = 0:只重画失效区。**这正是不做矩形同步就会花屏的原因**。 */
     s_disp_drv.full_refresh = 0;
+
+#if CV_PANEL_ROTATE_180
+    /* 面板是翻过来装的。LVGL 在 flush 前把每块原地旋转 180° 并镜像坐标
+     * (`lv_refr.c: draw_buf_rotate_180`);指针坐标由 `lv_indev.c` 自己镜像。 */
+    s_disp_drv.sw_rotate = 1;
+    s_disp_drv.rotated   = LV_DISP_ROT_180;
+#endif
 
     if (lv_disp_drv_register(&s_disp_drv) == NULL) {
         s_last_error = LV_PORT_DISP_ERROR_REGISTER;
         return LV_PORT_DISP_ERROR;
     }
 
-    printf("[disp] direct_mode 双缓冲就绪:fb0=0x%08X fb1=0x%08X 前台=%d"
-           "(非缓存映射;无 DMA2D,矩形同步走 CPU memcpy)\n",
-           s_fb_phys[0], s_fb_phys[1], s_front);
+    printf("[disp] 双缓冲 + 分块渲染就绪:fb0=0x%08X fb1=0x%08X 前台=%d"
+           " 分块=%d 行 旋转=%s(非缓存映射;无 DMA2D,矩形同步走 CPU memcpy)\n",
+           s_fb_phys[0], s_fb_phys[1], s_front, DRAW_BUF_ROWS,
+           CV_PANEL_ROTATE_180 ? "180°" : "无");
     return LV_PORT_DISP_OK;
 }
 

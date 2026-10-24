@@ -12,7 +12,14 @@
  *     · 消费者(LVGL 回调)= 本文件
  *   分开的好处是触摸的时序问题不会渗进 UI 逻辑 —— 而且 `ui_demo.c`
  *   会反过来调 `LV_PortIndev_GetTouchState()` 拿当前触点做多指手势判断,
- *   所以必须有一份**与 LVGL 看到的一模一样**的缓存。
+ *   所以必须有一份**与 LVGL 逻辑坐标一致**的缓存。
+ *
+ * 🔴 **两套坐标(2026-10-24,面板翻装 180°)**
+ *   · `read_cb` 交给 LVGL 的是**原始(面板朝向)坐标** —— LVGL 8.2 在
+ *     `lv_indev.c:332` 按 `drv->rotated` 自己翻转,我们**不能再翻一次**;
+ *   · `g_touch_state`(给 `ui_demo.c` 的多指手势)不经过 LVGL,
+ *     所以在这里**手动镜像**成逻辑坐标(`CV_PANEL_ROTATE_180`)。
+ *   两处只要有一处漏翻,表现就是"单指能点、双指捏合错位",很难查。
  *
  *   ⚠️ LVGL 的 read_cb 是**在 lv_timer_handler() 里被调的**,必须**非阻塞**。
  *      本文件里一行寄存器读都没有,就是为了这个:寄存器读走 AXI,
@@ -26,6 +33,8 @@
 #include <string.h>
 
 #include "lvgl.h"
+
+#include "pynq_regs.h"     /* CV_PANEL_ROTATE_180 —— 必须与显示驱动用同一个开关 */
 
 /* ------------------------------------------------------------------ */
 /* 给 read_cb 用的缓存(故意做成 volatile:回调与主循环不在同一层)         */
@@ -83,28 +92,46 @@ void LV_PortIndev_Update(const LCD_TouchState *touch_state)
     }
 
     if (touch_state->count != 0) {
+        uint32_t i;
+
         memcpy(&g_touch_state, touch_state, sizeof(g_touch_state));
 
-        /* LVGL 只认一个点 —— 用触点 0。多点手势由 ui_demo.c 自己通过
-         * LV_PortIndev_GetTouchState() 拿完整状态去判。 */
+        for (i = 0u; (i < g_touch_state.count) && (i < LCD_TOUCH_MAX_POINTS); ++i) {
+            const uint16_t raw_x = g_touch_state.point[i].x;
+            const uint16_t raw_y = g_touch_state.point[i].y;
+
+            /* ⚠️ 越界**不夹紧、不缩放**,只计数 + 提示一次。
+             *    夹紧会让"GT911 配置表分辨率写错"变成"能用了但点不准",
+             *    把可修的问题变成一个查不出的问题。
+             *    (镜像公式对越界值是减法,会回绕成一个大数 ⇒ 必须先判再翻) */
+            if (raw_x >= LCD_PIXEL_WIDTH || raw_y >= LCD_PIXEL_HEIGHT) {
+                if (g_out_of_range == 0) {
+                    fprintf(stderr,
+                            "[indev] 触点越界:(%u,%u),面板 %dx%d ⇒ "
+                            "查 GT911 配置表的分辨率字段,不要在软件里缩放\n",
+                            raw_x, raw_y, LCD_PIXEL_WIDTH, LCD_PIXEL_HEIGHT);
+                }
+                g_out_of_range++;
+                g_touch_state.point[i].x = 0;
+                g_touch_state.point[i].y = 0;
+                continue;
+            }
+
+#if CV_PANEL_ROTATE_180
+            /* 面板朝向 → LVGL 逻辑坐标。多指手势直接读这份缓存,
+             * 它必须与 LVGL 内部(已自行翻转)的坐标一致。 */
+            g_touch_state.point[i].x =
+                (uint16_t)(LCD_PIXEL_WIDTH  - 1u - raw_x);
+            g_touch_state.point[i].y =
+                (uint16_t)(LCD_PIXEL_HEIGHT - 1u - raw_y);
+#endif
+        }
+
+        /* LVGL 只认一个点 —— 用触点 0,**原始坐标**:LVGL 会按 drv->rotated
+         * 再翻一次(单指路径在这里翻会翻两遍 ⇒ 点击落在对角)。 */
         g_touch_x = (lv_coord_t)touch_state->point[0].x;
         g_touch_y = (lv_coord_t)touch_state->point[0].y;
         g_touch_pressed = 1;
-
-        /* ⚠️ 越界**不夹紧、不缩放**,只计数 + 提示一次。
-         *    夹紧会让"GT911 配置表分辨率写错"变成"能用了但点不准",
-         *    把可修的问题变成一个查不出的问题。 */
-        if (g_touch_state.point[0].x >= LCD_PIXEL_WIDTH ||
-            g_touch_state.point[0].y >= LCD_PIXEL_HEIGHT) {
-            if (g_out_of_range == 0) {
-                fprintf(stderr,
-                        "[indev] 触点越界:(%u,%u),面板 %dx%d ⇒ "
-                        "查 GT911 配置表的分辨率字段,不要在软件里缩放\n",
-                        g_touch_state.point[0].x, g_touch_state.point[0].y,
-                        LCD_PIXEL_WIDTH, LCD_PIXEL_HEIGHT);
-            }
-            g_out_of_range++;
-        }
     } else {
         /* count == 0 ⇒ 明确释放(PL 只在"新帧且点数 0"时才给它 0) */
         memset(&g_touch_state, 0, sizeof(g_touch_state));

@@ -170,9 +170,22 @@ static void poll_touch(uint32_t poll_ms)
         LV_PortIndev_Update(&st);
         if (st.count != 0 && !arm_release) {
             arm_release = 1;
+#if CV_PANEL_ROTATE_180
+            /* 原始坐标是**面板朝向**(GT911 的坐标系),逻辑坐标才是界面上
+             * 那个位置。两个都打:只打原始坐标的话,日志里"点左上角"会
+             * 显示右下角,排查时容易被当成触摸错位。 */
+            printf("[touch] 按下 原始(%u,%u) → 逻辑(%u,%u) 点数 %u\n",
+                   (unsigned)st.point[0].x, (unsigned)st.point[0].y,
+                   (unsigned)((st.point[0].x < LCD_PIXEL_WIDTH) ?
+                              (LCD_PIXEL_WIDTH - 1u - st.point[0].x) : 0u),
+                   (unsigned)((st.point[0].y < LCD_PIXEL_HEIGHT) ?
+                              (LCD_PIXEL_HEIGHT - 1u - st.point[0].y) : 0u),
+                   (unsigned)st.count);
+#else
             printf("[touch] 按下 (%u,%u) 点数 %u\n",
                    (unsigned)st.point[0].x, (unsigned)st.point[0].y,
                    (unsigned)st.count);
+#endif
         } else if (st.count == 0 && arm_release) {
             arm_release = 0;
             printf("[touch] 抬起\n");
@@ -352,7 +365,7 @@ int main(int argc, char **argv)
     /* ---- 3. LVGL 核心 ---- */
     lv_init();
 
-    /* ---- 4. 显示驱动:两块整屏 DDR 缓冲,direct_mode ---- */
+    /* ---- 4. 显示驱动:两块整屏 DDR 缓冲 + 分块渲染(180° 旋转见 pynq_disp.c) ---- */
     if (LV_PortDisp_Init(fb_phys[0], fb_phys[1]) != LV_PORT_DISP_OK) {
         fprintf(stderr, "初始化失败: 显示驱动(见上面 [disp] 的提示)\n");
         cv_regs_close();

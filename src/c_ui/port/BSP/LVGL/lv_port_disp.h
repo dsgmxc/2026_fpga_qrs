@@ -33,8 +33,10 @@ extern "C" {
  * @param fb1_phys 帧缓存 1 的**物理**基址(64 KB 对齐)
  * @return `LV_PORT_DISP_OK` / `LV_PORT_DISP_ERROR`
  *
- * 采用 **direct_mode**:LVGL 直接往这两块 DDR 帧缓存里画,
- * flush 回调只负责在帧末请求 PL 换址。⇒ 不需要额外的拷贝缓冲。
+ * LVGL 画进一块**分块缓存 RAM**,flush 回调把每一块拷进后台帧缓存,
+ * 帧末请求 PL 在 VBlank 换址。⇒ 显示内容与面板之间多一次拷贝,
+ * 但**旋转 180°(`CV_PANEL_ROTATE_180`)只能这么做** —— 原因见
+ * `app/pynq_disp.c` 文件头(direct_mode 下 LVGL 会整屏翻转)。
  */
 uint32_t LV_PortDisp_Init(uint32_t fb0_phys, uint32_t fb1_phys);
 
