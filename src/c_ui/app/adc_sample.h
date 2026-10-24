@@ -443,6 +443,18 @@ typedef struct
 bool AdcSample_Impedance(float ia, float qa, float ib, float qb,
                          double r0_ohm, uint32_t fe_hz, AdcSampleZ *out);
 
+/**
+ * @brief 由**已有的复数 Z** 重算 Cs / Cp / D(不改 Z 本身,也不改 `cur_ma`)。
+ *
+ * 🆕 2026-10-24:OPEN/SHORT/LOAD 校准把 `Z_m` 反演成 `Z_d` 之后,派生的
+ * 三个量必须跟着重算。⛔ 别在 `calibration.c` 里另抄一份公式 ——
+ * 抄一份就等于留一个"哪天激励频率的 ω 定义改了、这里没改"的口子。
+ *
+ * @param z      输入/输出;`z_re_ohm` / `z_im_ohm` 必须是已修正后的值
+ * @param fe_hz  激励频率(Hz);0 ⇒ 直接返回,不改任何字段
+ */
+void AdcSample_DeriveFromZ(AdcSampleZ *z, uint32_t fe_hz);
+
 /** @brief 最近一次失败的原因(静态字符串,永不为 NULL)。 */
 const char *AdcSample_LastError(void);
 

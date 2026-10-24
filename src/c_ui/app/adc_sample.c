@@ -249,10 +249,38 @@ bool AdcSample_PpConsistent(float pp_codes, float mag_codes, float *out_ratio)
     return ((double)pp_codes <= limit);
 }
 
+void AdcSample_DeriveFromZ(AdcSampleZ *z, uint32_t fe_hz)
+{
+    double w;
+    double mag2;
+
+    if ((z == NULL) || (fe_hz == 0u)) {
+        return;
+    }
+
+    w = ADC_TWO_PI * (double)fe_hz;
+    mag2 = (z->z_re_ohm * z->z_re_ohm) + (z->z_im_ohm * z->z_im_ohm);
+
+    /* 串联等效电容。**容性时 Im Z < 0,所以负号让它为正。**
+     * 若被测件呈感性(Im Z > 0),Cs 会算出负值 —— **不要夹到 0**,
+     * 负号就是"这不是个电容"的信号,夹掉等于把诊断信息扔了。 */
+    z->cs_pf = (z->z_im_ohm != 0.0)
+             ? ((-1e12 / w) / z->z_im_ohm)
+             : 0.0;
+
+    /* 并联等效电容 Cp = Cs/(1 + D²) = −Im Z /(ω·|Z|²) */
+    z->cp_pf = (mag2 > 0.0) ? ((-(z->z_im_ohm) * 1e12) / (w * mag2)) : 0.0;
+
+    /* 损耗因数 D = tanδ = ωCsRs = |Re Z / Im Z| */
+    z->d = (z->z_im_ohm != 0.0)
+         ? fabs(z->z_re_ohm / z->z_im_ohm)
+         : 0.0;
+}
+
 bool AdcSample_Impedance(float ia, float qa, float ib, float qb,
                          double r0_ohm, uint32_t fe_hz, AdcSampleZ *out)
 {
-    double dv_re, dv_im, vb2, w, mag2;
+    double dv_re, dv_im, vb2;
 
     if (out == NULL) {
         set_err("阻抗参数错:out 为空");
@@ -281,27 +309,11 @@ bool AdcSample_Impedance(float ia, float qa, float ib, float qb,
         return false;
     }
 
-    w = ADC_TWO_PI * (double)fe_hz;                 /* ω */
-
     out->z_re_ohm = r0_ohm * ((dv_re * (double)ib) + (dv_im * (double)qb)) / vb2;
     out->z_im_ohm = r0_ohm * ((dv_im * (double)ib) - (dv_re * (double)qb)) / vb2;
 
-    mag2 = (out->z_re_ohm * out->z_re_ohm) + (out->z_im_ohm * out->z_im_ohm);
-
-    /* 串联等效电容。**容性时 Im Z < 0,所以负号让它为正。**
-     * 若被测件呈感性(Im Z > 0),Cs 会算出负值 —— **不要夹到 0**,
-     * 负号就是"这不是个电容"的信号,夹掉等于把诊断信息扔了。 */
-    out->cs_pf = (out->z_im_ohm != 0.0)
-               ? ((-1e12 / w) / out->z_im_ohm)
-               : 0.0;
-
-    /* 并联等效电容 Cp = Cs/(1 + D²) = −Im Z /(ω·|Z|²) */
-    out->cp_pf = (mag2 > 0.0) ? ((-(out->z_im_ohm) * 1e12) / (w * mag2)) : 0.0;
-
-    /* 损耗因数 D = tanδ = ωCsRs = |Re Z / Im Z| */
-    out->d = (out->z_im_ohm != 0.0)
-           ? fabs(out->z_re_ohm / out->z_im_ohm)
-           : 0.0;
+    /* Cs / Cp / D 由同一个 Z 派生 —— 抽成函数,校准反演后复用同一份公式。 */
+    AdcSample_DeriveFromZ(out, fe_hz);
 
     /* 流过被测件的电流 = |VL| / R0。用码算幅值再换算成伏:
      * ⚠️ 这一项**仍然用未标定的 ADC_SAMPLE_VFS_PP**(它不像 Z 那样能约掉),

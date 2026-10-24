@@ -2,6 +2,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
@@ -12,6 +13,7 @@
 #include "engineering_parameters.h"
 #include "lvgl.h"
 #include "sweep_interpolation.h"
+#include "calibration.h"
 /* 🆕 2026-10-06:「系统复位」页新增的测量参数控件(激励频率 / 采样率 / 相位)。
  *    这是本文件相对前序工程的**唯一新增依赖** —— 界面控件调用它,其余四页未动。 */
 #include "measure_config.h"
@@ -77,14 +79,16 @@ typedef enum
     UI_PAGE_INITIALIZE = 1u,
     UI_PAGE_MEASURE = 2u,     /* 原 UI_PAGE_SINGLE ⊕ UI_PAGE_MEASURE_ALL 合并 */
     UI_PAGE_SWEEP = 3u,
-    UI_PAGE_RESULTS = 4u      /* 投影视图:进入时重绘,不持有数据 */
+    UI_PAGE_RESULTS = 4u,     /* 投影视图:进入时重绘,不持有数据 */
+    UI_PAGE_CALIBRATION = 5u  /* 🆕 2026-10-24 三标准校准 */
 } UI_Page;
 
 typedef enum
 {
     UI_BIAS_TARGET_SINGLE = 0u,   /* 合并页:单回路与「全部」共用同一偏压 */
     UI_BIAS_TARGET_SWEEP = 1u,
-    UI_BIAS_TARGET_ANALYSIS = 2u
+    UI_BIAS_TARGET_ANALYSIS = 2u,
+    UI_BIAS_TARGET_CAL = 3u       /* 🆕 校准页:标准板参数 / 校准偏压 */
 } UI_BiasTarget;
 
 #define UI_DISPLAY_PATH_ALL       4u
@@ -128,8 +132,8 @@ static lv_obj_t *g_header_bias_label;
 static lv_obj_t *g_header_path_label;
 static lv_obj_t *g_header_gear_label;        /* 🆕 2026-10-10 顶栏「档位:」栏 */
 static lv_obj_t *g_header_operation_label;
-static lv_obj_t *g_page_containers[5];
-static uint8_t g_page_built[5];
+static lv_obj_t *g_page_containers[6];
+static uint8_t g_page_built[6];
 static lv_obj_t *g_single_path_buttons[5];   /* CISS/COSS/CRSS/RG/全部 */
 static lv_obj_t *g_sweep_path_buttons[4];
 /* 🆕 2026-10-15:测量页的挡位按钮 A/B/C/D(10Ω/100Ω/1kΩ/10kΩ)。
@@ -191,6 +195,17 @@ static lv_obj_t *g_keypad_overlay;
 static lv_obj_t *g_keypad_title_label;
 static lv_obj_t *g_keypad_value_label;
 static lv_obj_t *g_keypad_note_label;
+/* 🆕 2026-10-24 校准页(第 6 页)。全部在 `UI_ShowCalibration()` 里建,
+ * 没进过校准页时保持 NULL —— 协议层每采一点都会调进度函数,必须判空。 */
+#define UI_CAL_FIELD_COUNT  6u
+static lv_obj_t *g_cal_field_buttons[UI_CAL_FIELD_COUNT];
+static lv_obj_t *g_cal_enable_button;
+static lv_obj_t *g_cal_progress_label;
+static lv_obj_t *g_cal_progress_bar;   /* 实际是"已采比例"填充块,见下 */
+static lv_coord_t g_cal_progress_width;
+static lv_obj_t *g_cal_coverage_label;
+static lv_obj_t *g_cal_cells[4][4];
+static CalField  g_cal_edit_field;
 static uint32_t g_ui_click_count;
 static uint32_t g_ui_last_button;
 static uint32_t g_ui_current_page;
@@ -212,7 +227,8 @@ static uint32_t g_ui_display_bias_tenths;
 static uint32_t g_ui_display_path;
 static uint8_t g_ui_immediate_refresh_enabled;
 static UI_BiasTarget g_keypad_target;
-static char g_keypad_buffer[8];
+static char g_keypad_buffer[16];
+static const char *g_keypad_unit = "V";   /* 🆕 校准页字段的单位 */
 static char g_ui_actual_bias[16];
 static char g_ui_actual_path[16];
 static char g_ui_actual_gear[16];            /* 🆕 顶栏「档位:」栏的文字 */
@@ -343,6 +359,9 @@ static const UI_Action g_sweep_stop_action =
     {321u, "状态:停止扫压指令发送完成"};
 
 static void UI_ShowHome(void);
+static void UI_ShowCalibration(void);
+static void UI_CalRefreshEnableButton(void);
+static void UI_CalRefreshCoverage(void);
 static void UI_ShowInitialize(void);
 static void UI_ShowMeasure(void);
 static void UI_ShowSweep(void);
@@ -2888,6 +2907,14 @@ static lv_obj_t *UI_PrepareRootScreen(void)
     g_sweep_probe_owner = 0u;
     g_keypad_value_label = NULL;
     g_keypad_note_label = NULL;
+    g_cal_enable_button = NULL;
+    g_cal_progress_label = NULL;
+    g_cal_progress_bar = NULL;
+    g_cal_progress_width = 0;
+    g_cal_coverage_label = NULL;
+    (void)memset(g_cal_field_buttons, 0, sizeof(g_cal_field_buttons));
+    (void)memset(g_cal_cells, 0, sizeof(g_cal_cells));
+    g_cal_edit_field = CAL_FIELD_CGS;
     /* ⚠️ 两个数组**长度不同**(5 与 4),原来这条循环写死 `< 4u` ——
      *    `g_single_path_buttons[4]`(「全部」那颗)漏在外面。
      *    当前 `UI_PrepareRootScreen()` 只在启动时跑一次,且 `ui_demo.c`
@@ -2939,15 +2966,16 @@ static void UI_ActivatePage(UI_Page page)
 {
     static const char *const page_titles[] =
     {
-        "首页", "系统复位", "单点测量", "扫压测量", "结果汇总"
+        "首页", "系统复位", "单点测量", "扫压测量", "结果汇总", "校准"
     };
     static const char *const page_status[] =
     {
-        "系统就绪", "等待操作", "请选择回路", "等待扫压", "等待测量"
+        "系统就绪", "等待操作", "请选择回路", "等待扫压", "等待测量",
+        "等待采集"
     };
     uint32_t index;
 
-    for (index = 0u; index < 5u; ++index)
+    for (index = 0u; index < 6u; ++index)
     {
         if (g_page_containers[index] == NULL)
         {
@@ -3020,6 +3048,10 @@ static void UI_ActivatePage(UI_Page page)
     {
         UI_ResultsRefresh();
     }
+    else if (page == UI_PAGE_CALIBRATION)
+    {
+        UI_Demo_RefreshCalibrationViews();
+    }
 
     /*
      * 输入定时器可能刚好排在显示刷新定时器之后运行。页面切换完成后
@@ -3048,6 +3080,7 @@ static void UI_SimpleActionEvent(lv_event_t *event)
 {
     const UI_Action *action;
     bool command_queued = true;
+    const char *override_status = NULL;
 
     if ((event == NULL) ||
         (lv_event_get_code(event) != LV_EVENT_CLICKED))
@@ -3113,11 +3146,58 @@ static void UI_SimpleActionEvent(lv_event_t *event)
     {
         command_queued = DisplayProtocol_RequestSweepStop();
     }
+    /* 🆕 2026-10-24:校准页(330 开关 / 331 清空 / 340-342 三种标准采集)。 */
+    else if (action->action_code == 330u)
+    {
+        Calibration_SetEnabled(!Calibration_IsEnabled());
+        UI_CalRefreshEnableButton();
+        UI_CalRefreshCoverage();
+        printf("[cal] 校准总开关 → %s\n",
+               Calibration_IsEnabled() ? "开" : "关");
+    }
+    else if (action->action_code == 331u)
+    {
+        Calibration_ClearAll();
+        UI_Demo_RefreshCalibrationViews();
+        printf("[cal] 已清空全部校准数据与拟合结果\n");
+    }
+    else if ((action->action_code >= 340u) &&
+             (action->action_code <= 342u))
+    {
+        if (DisplayProtocol_CalibrationBusy())
+        {
+            /* 不用 "指令发送失败" —— 那是另一回事,会误导用户去查链路。 */
+            command_queued = false;
+            override_status = "状态:校准采集中,等这一轮跑完";
+        }
+        else if ((action->action_code == 342u) &&
+                 !Calibration_LegDefined(0u) &&
+                 !Calibration_LegDefined(1u) &&
+                 !Calibration_LegDefined(2u) &&
+                 !Calibration_LegDefined(3u))
+        {
+            command_queued = false;
+            override_status = "状态:先填标准板 Cgs/Cgd/Cds/Rg 再采负载";
+        }
+        else
+        {
+            command_queued =
+                DisplayProtocol_RequestCalibration(action->action_code - 340u);
+            if (!command_queued)
+            {
+                override_status = "状态:采集未开始(原因见 [cal] 日志)";
+            }
+        }
+    }
 
     UI_RecordAction(action->action_code);
     if (g_status_label != NULL)
     {
-        if (command_queued)
+        if (override_status != NULL)
+        {
+            lv_label_set_text(g_status_label, override_status);
+        }
+        else if (command_queued)
         {
             lv_label_set_text(
                 g_status_label,
@@ -3163,6 +3243,10 @@ static void UI_HomeButtonEvent(lv_event_t *event)
 
         case UI_PAGE_RESULTS:
             UI_ShowResults();
+            break;
+
+        case UI_PAGE_CALIBRATION:
+            UI_ShowCalibration();
             break;
 
         default:
@@ -3248,6 +3332,27 @@ static void UI_ShowHome(void)
 
         lv_obj_set_style_border_color(button,
                                       lv_color_hex(button_colors[index]),
+                                      LV_PART_MAIN);
+        lv_obj_set_style_border_width(button, 2, LV_PART_MAIN);
+    }
+
+    /* 🆕 2026-10-24:第 5 张卡 —— 校准。**单独占整行**,不挤成 3×2:
+     *    三行 156 高的卡片在 600 高的屏上放不下(142 + 3×174 = 664)。
+     *    下方 490 起、86 高,与第二行间距 18,底边留 24。 */
+    {
+        lv_obj_t *button = UI_CreateButton(
+            screen,
+            "校准\n开路 / 短接 / 标准板三标准标定",
+            UI_COLOR_SURFACE_LIGHT,
+            48,
+            button_top + 2 * (button_height + vertical_gap),
+            (lv_coord_t)LCD_PIXEL_WIDTH - 96,
+            86,
+            UI_HomeButtonEvent,
+            (void *)(uintptr_t)UI_PAGE_CALIBRATION);
+
+        lv_obj_set_style_border_color(button,
+                                      lv_color_hex(UI_COLOR_PURPLE),
                                       LV_PART_MAIN);
         lv_obj_set_style_border_width(button, 2, LV_PART_MAIN);
     }
@@ -3931,6 +4036,346 @@ static void UI_CreatePathButtons(lv_obj_t *panel,
     }
 }
 
+/* ---- 校准页:字段显示 / 覆盖表 / 进度(🆕 2026-10-24) ------------------ */
+
+static const char *UI_CalFieldTitle(CalField field)
+{
+    switch (field)
+    {
+        case CAL_FIELD_CGS:    return "设置 Cgs";
+        case CAL_FIELD_CGD:    return "设置 Cgd";
+        case CAL_FIELD_CDS:    return "设置 Cds";
+        case CAL_FIELD_RG:     return "设置 Rg";
+        case CAL_FIELD_RATING: return "设置标准板耐压";
+        case CAL_FIELD_BIAS:   return "设置校准偏压";
+        default:               return "设置参数";
+    }
+}
+
+static const char *UI_CalFieldUnit(CalField field)
+{
+    switch (field)
+    {
+        case CAL_FIELD_CGS:
+        case CAL_FIELD_CGD:
+        case CAL_FIELD_CDS:  return "pF";
+        case CAL_FIELD_RG:   return "Ω";
+        default:             return "V";
+    }
+}
+
+static const char *UI_CalFieldName(CalField field)
+{
+    switch (field)
+    {
+        case CAL_FIELD_CGS:    return "Cgs";
+        case CAL_FIELD_CGD:    return "Cgd";
+        case CAL_FIELD_CDS:    return "Cds";
+        case CAL_FIELD_RG:     return "Rg";
+        case CAL_FIELD_RATING: return "耐压";
+        case CAL_FIELD_BIAS:   return "偏压";
+        default:               return "?";
+    }
+}
+
+static void UI_CalFieldNote(CalField field, char *out, size_t capacity)
+{
+    if ((out == NULL) || (capacity == 0u))
+    {
+        return;
+    }
+
+    switch (field)
+    {
+        case CAL_FIELD_CGS:
+        case CAL_FIELD_CGD:
+        case CAL_FIELD_CDS:
+            lv_snprintf(out, capacity, "范围 0 - 1000000 pF(按数据手册填)");
+            break;
+
+        case CAL_FIELD_RG:
+            lv_snprintf(out, capacity, "范围 0 - 1000000 Ω(栅极电阻)");
+            break;
+
+        case CAL_FIELD_RATING:
+            lv_snprintf(out, capacity, "范围 0.1 - 1000 V(超出耐压的采集会被拒绝)");
+            break;
+
+        case CAL_FIELD_BIAS:
+        {
+            CalBoard board;
+
+            Calibration_GetBoard(&board);
+            lv_snprintf(out, capacity,
+                        "范围 0.1 - 100.0 V,且不超过耐压 %.1f V",
+                        board.rating_v);
+            break;
+        }
+
+        default:
+            out[0] = '\0';
+            break;
+    }
+}
+
+/** 把非负数按固定小数位格式化。
+ *
+ * 🔴 **不能用 `%f`**:`app/lv_conf.h` 里 `LV_SPRINTF_USE_FLOAT = 0`,
+ *    LVGL 自己的 `lv_snprintf()` 遇到 `%f` 会把整个格式串吐成 `f`(屏上
+ *    就显示成 "f pF",数值整段消失 —— 2026-10-24 首次上板见到的就是它)。
+ *    全工程其它地方都是"拆成整数 + 小数两位"再 `%lu` 拼,这里照做。
+ */
+static void UI_CalFormatNumber(char *out, size_t capacity, double value,
+                               uint32_t decimals)
+{
+    static const unsigned long k_scale[4] = {1ul, 10ul, 100ul, 1000ul};
+    unsigned long scale;
+    unsigned long scaled;
+    unsigned long whole;
+    unsigned long frac;
+
+    if (decimals > 3u)
+    {
+        decimals = 3u;
+    }
+    scale = k_scale[decimals];
+    if (!(value >= 0.0))            /* 同时挡住 NaN */
+    {
+        value = 0.0;
+    }
+    /* 界面上限 1e6 × 1000 仍在 unsigned long 内;再夹一次防异常输入 */
+    if (value > 4.0e6)
+    {
+        value = 4.0e6;
+    }
+    scaled = (unsigned long)((value * (double)scale) + 0.5);
+    whole  = scaled / scale;
+    frac   = scaled % scale;
+
+    switch (decimals)
+    {
+        case 1u:
+            lv_snprintf(out, capacity, "%lu.%01lu", whole, frac);
+            break;
+        case 2u:
+            lv_snprintf(out, capacity, "%lu.%02lu", whole, frac);
+            break;
+        case 3u:
+            lv_snprintf(out, capacity, "%lu.%03lu", whole, frac);
+            break;
+        default:
+            lv_snprintf(out, capacity, "%lu", whole);
+            break;
+    }
+}
+
+static void UI_CalFormatField(CalField field, char *out, size_t capacity)
+{
+    CalBoard board;
+    char number[24];
+
+    Calibration_GetBoard(&board);
+    switch (field)
+    {
+        case CAL_FIELD_CGS:
+            UI_CalFormatNumber(number, sizeof(number), board.cgs_pf, 3u);
+            lv_snprintf(out, capacity, "Cgs\n%s pF", number);
+            break;
+        case CAL_FIELD_CGD:
+            UI_CalFormatNumber(number, sizeof(number), board.cgd_pf, 3u);
+            lv_snprintf(out, capacity, "Cgd\n%s pF", number);
+            break;
+        case CAL_FIELD_CDS:
+            UI_CalFormatNumber(number, sizeof(number), board.cds_pf, 3u);
+            lv_snprintf(out, capacity, "Cds\n%s pF", number);
+            break;
+        case CAL_FIELD_RG:
+            UI_CalFormatNumber(number, sizeof(number), board.rg_ohm, 3u);
+            lv_snprintf(out, capacity, "Rg\n%s Ω", number);
+            break;
+        case CAL_FIELD_RATING:
+            UI_CalFormatNumber(number, sizeof(number), board.rating_v, 1u);
+            lv_snprintf(out, capacity, "耐压\n%s V", number);
+            break;
+        default:
+            UI_CalFormatNumber(number, sizeof(number), board.bias_v, 1u);
+            lv_snprintf(out, capacity, "偏压\n%s V", number);
+            break;
+    }
+}
+
+static void UI_CalRefreshEnableButton(void)
+{
+    lv_obj_t *label;
+    uint32_t enabled = Calibration_IsEnabled() ? 1u : 0u;
+
+    if (g_cal_enable_button == NULL)
+    {
+        return;
+    }
+
+    label = lv_obj_get_child(g_cal_enable_button, 0);
+    if (label != NULL)
+    {
+        lv_label_set_text(label, enabled ? "校准:开" : "校准:关");
+    }
+    lv_obj_set_style_bg_color(g_cal_enable_button,
+                              lv_color_hex(enabled ? UI_COLOR_GREEN
+                                                   : UI_COLOR_BORDER),
+                              LV_PART_MAIN | LV_STATE_DEFAULT);
+}
+
+static void UI_CalRefreshFields(void)
+{
+    char text[40];
+    uint32_t index;
+
+    if (g_cal_field_buttons[0] == NULL)
+    {
+        return;
+    }
+
+    for (index = 0u; index < UI_CAL_FIELD_COUNT; ++index)
+    {
+        lv_obj_t *label = lv_obj_get_child(g_cal_field_buttons[index], 0);
+
+        UI_CalFormatField((CalField)index, text, sizeof(text));
+        if (label != NULL)
+        {
+            lv_label_set_text(label, text);
+        }
+    }
+    UI_CalRefreshEnableButton();
+}
+
+/** 一个覆盖格:O/S/L = 已采到的标准,* = 已拟合。 */
+static void UI_CalFormatCell(uint8_t flags, char *out, size_t capacity)
+{
+    char text[8];
+    uint32_t length = 0u;
+
+    if ((flags & (CAL_F_OPEN | CAL_F_OPEN_INF)) != 0u)
+    {
+        text[length++] = 'O';
+    }
+    if ((flags & CAL_F_SHORT) != 0u)
+    {
+        text[length++] = 'S';
+    }
+    if ((flags & CAL_F_LOAD) != 0u)
+    {
+        text[length++] = 'L';
+    }
+    if (length == 0u)
+    {
+        text[length++] = '-';
+    }
+    if ((flags & CAL_F_FIT) != 0u)
+    {
+        text[length++] = '*';
+    }
+    text[length] = '\0';
+
+    lv_snprintf(out, capacity, "%s", text);
+}
+
+static const char *UI_CalFreqText(uint32_t hz)
+{
+    switch (hz)
+    {
+        case 10000u:   return "10 kHz";
+        case 100000u:  return "100 kHz";
+        case 1000000u: return "1 MHz";
+        default:       return "不支持";
+    }
+}
+
+static void UI_CalRefreshCoverage(void)
+{
+    char text[16];
+    uint32_t leg;
+    uint32_t gear;
+    uint32_t fitted = 0u;
+    uint32_t hz = MeasureConfig_GetDdsHz();
+    int32_t freq_index;
+
+    if (g_cal_cells[0][0] == NULL)
+    {
+        return;
+    }
+
+    freq_index = Calibration_FreqIndex(hz);
+    for (leg = 0u; leg < 4u; ++leg)
+    {
+        for (gear = 0u; gear < 4u; ++gear)
+        {
+            uint8_t flags = (freq_index >= 0) ?
+                Calibration_PointFlags(leg, gear, (uint32_t)freq_index) : 0u;
+            uint32_t color = ((flags & CAL_F_FIT) != 0u) ? UI_COLOR_GREEN :
+                             (((flags & (CAL_F_OPEN | CAL_F_OPEN_INF |
+                                          CAL_F_SHORT | CAL_F_LOAD)) != 0u) ?
+                              UI_COLOR_ORANGE : UI_COLOR_TEXT_MUTED);
+
+            UI_CalFormatCell(flags, text, sizeof(text));
+            lv_label_set_text(g_cal_cells[leg][gear], text);
+            lv_obj_set_style_text_color(g_cal_cells[leg][gear],
+                                        lv_color_hex(color),
+                                        LV_PART_MAIN);
+        }
+    }
+
+    if (freq_index >= 0)
+    {
+        fitted = Calibration_FittedCount((uint32_t)freq_index);
+    }
+
+    if (g_cal_coverage_label != NULL)
+    {
+        if (freq_index < 0)
+        {
+            lv_label_set_text(g_cal_coverage_label,
+                              "该激励频率不支持校准(只有 10k/100k/1M)");
+        }
+        else
+        {
+            lv_label_set_text_fmt(g_cal_coverage_label,
+                                  "拟合 %u/16 · %s · 全部 %u/48",
+                                  (unsigned)fitted, UI_CalFreqText(hz),
+                                  (unsigned)Calibration_TotalFitted());
+        }
+    }
+}
+
+void UI_Demo_RefreshCalibrationViews(void)
+{
+    UI_CalRefreshFields();
+    UI_CalRefreshCoverage();
+}
+
+void UI_Demo_CalibrationProgress(const char *text, uint32_t done,
+                                 uint32_t total)
+{
+    /* 页面没建过 ⇒ 静默忽略。协议层每采一点都调,不能要求先开过校准页。 */
+    if (g_cal_progress_label != NULL)
+    {
+        lv_label_set_text(g_cal_progress_label,
+                          (text != NULL) ? text : "");
+    }
+    if ((g_cal_progress_bar != NULL) && (g_cal_progress_width > 0))
+    {
+        /* LV_USE_BAR 在 lv_conf.h 里是 0 —— 不为一个进度条去改全局配置
+         * (会连带编译进一整个控件)。这里用"底槽 + 填充块"两层面板实现,
+         * 宽度按已采点数比例设置。 */
+        uint32_t denominator = (total > 0u) ? total : 16u;
+        lv_coord_t filled = (lv_coord_t)(((int32_t)g_cal_progress_width *
+                                          (int32_t)((done > denominator) ?
+                                                    denominator : done)) /
+                                         (int32_t)denominator);
+
+        lv_obj_set_width(g_cal_progress_bar, (filled > 2) ? filled : 2);
+    }
+}
+
 static void UI_BiasKeypadRefresh(void)
 {
     if (g_keypad_value_label == NULL)
@@ -3940,14 +4385,82 @@ static void UI_BiasKeypadRefresh(void)
 
     if (g_keypad_buffer[0] == '\0')
     {
-        lv_label_set_text(g_keypad_value_label, "0.0 V");
+        lv_label_set_text_fmt(g_keypad_value_label, "0.0 %s", g_keypad_unit);
     }
     else
     {
         lv_label_set_text_fmt(g_keypad_value_label,
-                              "%s V",
-                              g_keypad_buffer);
+                              "%s %s",
+                              g_keypad_buffer,
+                              g_keypad_unit);
     }
+}
+
+/** 打开数字键盘。@p value 是初值文本,@p note 是范围提示。 */
+static void UI_KeypadShow(const char *title, const char *value, const char *note)
+{
+    if ((g_keypad_overlay == NULL) ||
+        !lv_obj_has_flag(g_keypad_overlay, LV_OBJ_FLAG_HIDDEN))
+    {
+        return;
+    }
+
+    UI_RecordAction(240u);
+    lv_snprintf(g_keypad_buffer, sizeof(g_keypad_buffer), "%s",
+                (value != NULL) ? value : "");
+    lv_label_set_text(g_keypad_title_label,
+                      (title != NULL) ? title : "设置参数");
+    lv_label_set_text(g_keypad_note_label,
+                      (note != NULL) ? note : "");
+    lv_obj_set_style_text_color(g_keypad_note_label,
+                                lv_color_hex(UI_COLOR_TEXT_MUTED),
+                                LV_PART_MAIN);
+    UI_BiasKeypadRefresh();
+    lv_obj_clear_flag(g_keypad_overlay, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(g_keypad_overlay);
+}
+
+/** @brief 键盘里的十进制数 → double。只接受 数字 + 最多一个小数点。 */
+static uint32_t UI_ParseDecimalValue(double *out)
+{
+    uint32_t digit_seen = 0u;
+    uint32_t decimal_seen = 0u;
+    uint32_t index;
+
+    if (out == NULL)
+    {
+        return 0u;
+    }
+
+    for (index = 0u; g_keypad_buffer[index] != '\0'; ++index)
+    {
+        char character = g_keypad_buffer[index];
+
+        if (character == '.')
+        {
+            if (decimal_seen != 0u)
+            {
+                return 0u;
+            }
+            decimal_seen = 1u;
+        }
+        else if ((character < '0') || (character > '9'))
+        {
+            return 0u;
+        }
+        else
+        {
+            digit_seen = 1u;
+        }
+    }
+
+    if ((digit_seen == 0u) || !isfinite(strtod(g_keypad_buffer, NULL)))
+    {
+        return 0u;
+    }
+
+    *out = strtod(g_keypad_buffer, NULL);
+    return 1u;
 }
 
 static uint32_t UI_ParseBiasTenths(uint32_t *bias_tenths)
@@ -4027,6 +4540,158 @@ static void UI_CloseBiasKeypad(void)
     }
 }
 
+static void UI_KeypadError(const char *message)
+{
+    if (g_keypad_note_label == NULL)
+    {
+        return;
+    }
+    lv_label_set_text(g_keypad_note_label,
+                      (message != NULL) ? message : "输入错误");
+    lv_obj_set_style_text_color(g_keypad_note_label,
+                                lv_color_hex(UI_COLOR_RED),
+                                LV_PART_MAIN);
+}
+
+/** @brief 校准字段的「确认」:校验 → 写 Calibration → 刷新页面。 */
+static void UI_CalKeypadConfirm(void)
+{
+    CalField field = g_cal_edit_field;
+    CalBoard board;
+    double value = 0.0;
+    double minimum;
+    double maximum;
+    char note[96];
+    bool saved;
+
+    if (UI_ParseDecimalValue(&value) == 0u)
+    {
+        UI_KeypadError("输入错误:只接受数字与一个小数点");
+        return;
+    }
+
+    switch (field)
+    {
+        case CAL_FIELD_CGS:
+        case CAL_FIELD_CGD:
+        case CAL_FIELD_CDS:
+            minimum = 0.0;
+            maximum = 1000000.0;
+            break;
+        case CAL_FIELD_RG:
+            minimum = 0.0;
+            maximum = 1000000.0;
+            break;
+        case CAL_FIELD_RATING:
+            minimum = 0.1;
+            maximum = 1000.0;
+            break;
+        default:
+            minimum = 0.1;
+            maximum = 100.0;
+            break;
+    }
+
+    if (!isfinite(value) || (value < minimum) || (value > maximum))
+    {
+        UI_CalFieldNote(field, note, sizeof(note));
+        UI_KeypadError(note);
+        return;
+    }
+
+    Calibration_GetBoard(&board);
+    if ((field == CAL_FIELD_BIAS) && (value > board.rating_v))
+    {
+        lv_snprintf(note, sizeof(note),
+                    "偏压不能超过耐压 %.1f V", board.rating_v);
+        UI_KeypadError(note);
+        return;
+    }
+
+    /* 返回值 = **存盘**结果。参数本身已经被 `SetBoardField()` 改掉了,
+     * 所以存盘失败时不能回退显示 —— 如实说"已更新但没存住"。 */
+    saved = Calibration_SetBoardField(field, value);
+    UI_CalRefreshFields();
+    UI_CalRefreshCoverage();
+    UI_RecordAction(242u);
+    UI_CloseBiasKeypad();
+
+    if (g_status_label != NULL)
+    {
+        if (saved)
+        {
+            lv_label_set_text_fmt(g_status_label,
+                                  "状态:%s 已更新(自动存盘)",
+                                  UI_CalFieldName(field));
+        }
+        else
+        {
+            lv_label_set_text_fmt(g_status_label,
+                                  "状态:%s 已更新,但存盘失败(见日志)",
+                                  UI_CalFieldName(field));
+        }
+    }
+    printf("[cal] 标准板 %s = %.6g %s(%s)\n",
+           UI_CalFieldName(field), value, UI_CalFieldUnit(field),
+           saved ? "已存盘" : "⚠️ 存盘失败");
+}
+
+/** @brief 校准页上一个字段按钮(点数值 → 数字键盘)。 */
+static void UI_CalFieldEvent(lv_event_t *event)
+{
+    CalField field;
+    CalBoard board;
+    char value[24];
+    char note[96];
+
+    if ((event == NULL) ||
+        (lv_event_get_code(event) != LV_EVENT_CLICKED))
+    {
+        return;
+    }
+
+    if (DisplayProtocol_CalibrationBusy())
+    {
+        if (g_status_label != NULL)
+        {
+            lv_label_set_text(g_status_label,
+                              "状态:校准采集中,等这一轮跑完再改参数");
+        }
+        return;
+    }
+
+    field = (CalField)(uintptr_t)lv_event_get_user_data(event);
+    g_cal_edit_field = field;
+    g_keypad_target = UI_BIAS_TARGET_CAL;
+    g_keypad_unit = UI_CalFieldUnit(field);
+
+    Calibration_GetBoard(&board);
+    switch (field)
+    {
+        case CAL_FIELD_CGS:
+            UI_CalFormatNumber(value, sizeof(value), board.cgs_pf, 3u);
+            break;
+        case CAL_FIELD_CGD:
+            UI_CalFormatNumber(value, sizeof(value), board.cgd_pf, 3u);
+            break;
+        case CAL_FIELD_CDS:
+            UI_CalFormatNumber(value, sizeof(value), board.cds_pf, 3u);
+            break;
+        case CAL_FIELD_RG:
+            UI_CalFormatNumber(value, sizeof(value), board.rg_ohm, 3u);
+            break;
+        case CAL_FIELD_RATING:
+            UI_CalFormatNumber(value, sizeof(value), board.rating_v, 1u);
+            break;
+        default:
+            UI_CalFormatNumber(value, sizeof(value), board.bias_v, 1u);
+            break;
+    }
+
+    UI_CalFieldNote(field, note, sizeof(note));
+    UI_KeypadShow(UI_CalFieldTitle(field), value, note);
+}
+
 static void UI_BiasKeypadEvent(lv_event_t *event)
 {
     uint32_t action;
@@ -4052,9 +4717,13 @@ static void UI_BiasKeypadEvent(lv_event_t *event)
             (decimal == NULL) ? 0u :
             (uint32_t)(length - (size_t)(decimal - g_keypad_buffer) - 1u);
 
+        /* 校准字段的量级横跨 pF(0.001)/Ω(1e6)/V(1000),
+         * 所以位宽比偏压输入宽:整数 7 位、小数 3 位。 */
         if ((length < (sizeof(g_keypad_buffer) - 1u)) &&
-            (((decimal == NULL) && (integer_digits < 3u)) ||
-             ((decimal != NULL) && (fraction_digits < 1u))))
+            (((decimal == NULL) &&
+              (integer_digits < ((g_keypad_target == UI_BIAS_TARGET_CAL) ? 7u : 3u))) ||
+             ((decimal != NULL) &&
+              (fraction_digits < ((g_keypad_target == UI_BIAS_TARGET_CAL) ? 3u : 1u)))))
         {
             g_keypad_buffer[length] = (char)('0' + action);
             g_keypad_buffer[length + 1u] = '\0';
@@ -4095,7 +4764,9 @@ static void UI_BiasKeypadEvent(lv_event_t *event)
         UI_CloseBiasKeypad();
         if (g_status_label != NULL)
         {
-            lv_label_set_text(g_status_label, "状态:偏压设置取消");
+            lv_label_set_text(g_status_label,
+                              (g_keypad_target == UI_BIAS_TARGET_CAL) ?
+                              "状态:参数设置取消" : "状态:偏压设置取消");
         }
         return;
     }
@@ -4106,6 +4777,13 @@ static void UI_BiasKeypadEvent(lv_event_t *event)
     else if (action == UI_KEYPAD_CONFIRM)
     {
         uint32_t bias_tenths;
+
+        /* 🆕 校准页字段:量纲与范围都不同,走自己的校验/保存。 */
+        if (g_keypad_target == UI_BIAS_TARGET_CAL)
+        {
+            UI_CalKeypadConfirm();
+            return;
+        }
 
         if (UI_ParseBiasTenths(&bias_tenths) == 0u)
         {
@@ -4199,7 +4877,14 @@ static void UI_BiasKeypadEvent(lv_event_t *event)
 
     if (g_keypad_note_label != NULL)
     {
-        if (g_keypad_target == UI_BIAS_TARGET_ANALYSIS)
+        if (g_keypad_target == UI_BIAS_TARGET_CAL)
+        {
+            char note[80];
+
+            UI_CalFieldNote(g_cal_edit_field, note, sizeof(note));
+            lv_label_set_text(g_keypad_note_label, note);
+        }
+        else if (g_keypad_target == UI_BIAS_TARGET_ANALYSIS)
         {
             lv_label_set_text_fmt(
                 g_keypad_note_label,
@@ -4343,6 +5028,8 @@ static void UI_BiasOpenEvent(lv_event_t *event)
 {
     uint32_t current_bias_tenths;
     const char *dialog_title;
+    char value[24];
+    char note[80];
 
     if ((event == NULL) ||
         (lv_event_get_code(event) != LV_EVENT_CLICKED) ||
@@ -4353,9 +5040,9 @@ static void UI_BiasOpenEvent(lv_event_t *event)
         return;
     }
 
-    UI_RecordAction(240u);
     g_keypad_target =
         (UI_BiasTarget)(uintptr_t)lv_event_get_user_data(event);
+    g_keypad_unit = "V";
     if (g_keypad_target == UI_BIAS_TARGET_ANALYSIS)
     {
         current_bias_tenths = g_ui_analysis_voltage_tenths;
@@ -4373,30 +5060,193 @@ static void UI_BiasOpenEvent(lv_event_t *event)
         dialog_title = "设置偏压";
     }
 
-    lv_snprintf(g_keypad_buffer,
-                sizeof(g_keypad_buffer),
+    lv_snprintf(value, sizeof(value),
                 "%lu.%lu",
                 (unsigned long)(current_bias_tenths / 10u),
                 (unsigned long)(current_bias_tenths % 10u));
-    lv_label_set_text(g_keypad_title_label, dialog_title);
     if (g_keypad_target == UI_BIAS_TARGET_ANALYSIS)
     {
-        lv_label_set_text_fmt(
-            g_keypad_note_label,
-            "参数电压:0.1-%lu.%lu V",
-            (unsigned long)(g_ui_analysis_voltage_max_tenths / 10u),
-            (unsigned long)(g_ui_analysis_voltage_max_tenths % 10u));
+        lv_snprintf(note, sizeof(note),
+                    "参数电压:0.1-%lu.%lu V",
+                    (unsigned long)(g_ui_analysis_voltage_max_tenths / 10u),
+                    (unsigned long)(g_ui_analysis_voltage_max_tenths % 10u));
     }
     else
     {
-        lv_label_set_text(g_keypad_note_label, "偏压:0.1-100.0 V");
+        lv_snprintf(note, sizeof(note), "偏压:0.1-100.0 V");
     }
-    lv_obj_set_style_text_color(g_keypad_note_label,
-                                lv_color_hex(UI_COLOR_TEXT_MUTED),
-                                LV_PART_MAIN);
-    UI_BiasKeypadRefresh();
-    lv_obj_clear_flag(g_keypad_overlay, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_move_foreground(g_keypad_overlay);
+
+    UI_KeypadShow(dialog_title, value, note);
+}
+
+/* ==========================================================================
+ * 校准页(UI_PAGE_CALIBRATION,🆕 2026-10-24)
+ *
+ * 页面只负责**输入与展示**,采集编排在 `app/pynq_protocol.c` 的
+ * `calibration_process()` 里(4 腿 × 4 挡,逐拍采)。这里三个按钮只发请求。
+ *
+ * 布局(1024×600,顶栏 52):
+ *   62..274  左:标准板 6 个字段(点数值 → 数字键盘) 右:4×4 覆盖表
+ *   284..372 三个采集按钮(开路 / 短接 / 标准板)
+ *   382..466 进度条 + 当前状态
+ *   478..532 校准开关 / 清空 / 数据文件说明
+ *   540..568 一行操作口诀
+ * ========================================================================== */
+
+static void UI_ShowCalibration(void)
+{
+    static const UI_Action acquire_actions[] =
+    {
+        {340u, "状态:开始采集开路(拔掉被测件)"},
+        {341u, "状态:开始采集短接(D-G-S 接 0 Ω)"},
+        {342u, "状态:开始采集标准板(D-G-S 接标准板)"}
+    };
+    static const UI_Action toggle_action = {330u, "状态:校准开关已切换"};
+    static const UI_Action clear_action  = {331u, "状态:校准数据已清空"};
+    static const char *const acquire_text[] =
+    {
+        "采集开路\n拔掉被测件",
+        "采集短接\nD-G-S 接 0 Ω",
+        "采集标准板\nD-G-S 接标准板"
+    };
+    static const uint32_t acquire_color[] =
+    {
+        UI_COLOR_CYAN, UI_COLOR_ORANGE, UI_COLOR_BLUE
+    };
+    static const char *const leg_names[] = {"CISS", "COSS", "CRSS", "RG"};
+    static const char *const gear_names[] = {"A", "B", "C", "D"};
+    lv_obj_t *screen = g_page_containers[UI_PAGE_CALIBRATION];
+    lv_obj_t *panel;
+    lv_obj_t *label;
+    lv_coord_t width = (lv_coord_t)LCD_PIXEL_WIDTH - (2 * UI_PAGE_MARGIN);
+    uint32_t index;
+
+    g_ui_current_page = UI_PAGE_CALIBRATION;
+
+    if (g_page_built[UI_PAGE_CALIBRATION] != 0u)
+    {
+        UI_ActivatePage(UI_PAGE_CALIBRATION);
+        return;
+    }
+
+    /* ---- 左:标准板参数 -------------------------------------------------- */
+    panel = UI_CreatePanel(screen, UI_PAGE_MARGIN, 62, 576, 212,
+                           UI_COLOR_SURFACE_LIGHT, 14);
+    UI_CreateText(panel, "标准板参数(点数值修改 · 自动存盘)",
+                  &ui_font_cn_20, UI_COLOR_TEXT_MUTED,
+                  16, 10, 544, 26, LV_TEXT_ALIGN_LEFT);
+    for (index = 0u; index < UI_CAL_FIELD_COUNT; ++index)
+    {
+        lv_coord_t column = (lv_coord_t)(index % 3u);
+        lv_coord_t row = (lv_coord_t)(index / 3u);
+        lv_obj_t *button = UI_CreateButton(
+            panel, "",
+            UI_COLOR_BACKGROUND,
+            16 + column * 186,
+            50 + row * 70,
+            172, 60,
+            UI_CalFieldEvent,
+            (void *)(uintptr_t)index);
+
+        lv_obj_set_style_border_color(button,
+                                      lv_color_hex(UI_COLOR_BORDER),
+                                      LV_PART_MAIN);
+        lv_obj_set_style_border_width(button, 1, LV_PART_MAIN);
+        g_cal_field_buttons[index] = button;
+    }
+
+    /* ---- 右:4×4 覆盖表 ------------------------------------------------- */
+    panel = UI_CreatePanel(screen, 612, 62, 388, 212,
+                           UI_COLOR_SURFACE_LIGHT, 14);
+    UI_CreateText(panel, "覆盖(按当前激励频率)",
+                  &ui_font_cn_20, UI_COLOR_TEXT_MUTED,
+                  16, 10, 356, 26, LV_TEXT_ALIGN_LEFT);
+    for (index = 0u; index < 4u; ++index)
+    {
+        UI_CreateText(panel, gear_names[index],
+                      &ui_font_cn_20, UI_COLOR_TEXT_MUTED,
+                      78 + (lv_coord_t)index * 72, 40, 66, 24,
+                      LV_TEXT_ALIGN_CENTER);
+    }
+    for (index = 0u; index < 4u; ++index)
+    {
+        lv_coord_t y = 64 + (lv_coord_t)index * 30u;
+
+        UI_CreateText(panel, leg_names[index],
+                      &ui_font_cn_20, UI_COLOR_TEXT_MUTED,
+                      16, y, 56, 28, LV_TEXT_ALIGN_LEFT);
+        for (uint32_t gear = 0u; gear < 4u; ++gear)
+        {
+            lv_obj_t *cell = UI_CreateText(
+                panel, "-", &ui_font_cn_20, UI_COLOR_TEXT_MUTED,
+                78 + (lv_coord_t)gear * 72, y, 66, 28,
+                LV_TEXT_ALIGN_CENTER);
+
+            g_cal_cells[index][gear] = cell;
+        }
+    }
+    label = UI_CreateText(panel, "", &ui_font_cn_20, UI_COLOR_TEXT_MUTED,
+                          16, 184, 356, 24, LV_TEXT_ALIGN_LEFT);
+    g_cal_coverage_label = label;
+
+    /* ---- 三个采集按钮 --------------------------------------------------- */
+    UI_CreateText(screen,
+                  "采集标准:在校准偏压下把三条腿的四个挡位各采一次(约 2 秒)",
+                  &ui_font_cn_20, UI_COLOR_TEXT_MUTED,
+                  UI_PAGE_MARGIN, 284, width, 26, LV_TEXT_ALIGN_LEFT);
+    for (index = 0u; index < 3u; ++index)
+    {
+        UI_CreateButton(screen,
+                        acquire_text[index],
+                        acquire_color[index],
+                        UI_PAGE_MARGIN + (lv_coord_t)index * 331,
+                        312, 314, 60,
+                        UI_SimpleActionEvent,
+                        (void *)&acquire_actions[index]);
+    }
+
+    /* ---- 进度 ----------------------------------------------------------- */
+    panel = UI_CreatePanel(screen, UI_PAGE_MARGIN, 382, width, 84,
+                           UI_COLOR_BACKGROUND, 12);
+    g_cal_progress_label = UI_CreateText(panel, "未开始",
+                                         &ui_font_cn_20, UI_COLOR_TEXT,
+                                         16, 8, width - 32, 30,
+                                         LV_TEXT_ALIGN_LEFT);
+    {
+        lv_obj_t *track = UI_CreatePanel(panel, 16, 48, width - 32, 14,
+                                         UI_COLOR_SURFACE_LIGHT, 7);
+
+        lv_obj_set_style_border_width(track, 0, LV_PART_MAIN);
+        g_cal_progress_width = width - 32;
+        g_cal_progress_bar = UI_CreatePanel(track, 0, 0, 2, 14,
+                                            UI_COLOR_GREEN, 7);
+        lv_obj_set_style_border_width(g_cal_progress_bar, 0, LV_PART_MAIN);
+    }
+
+    /* ---- 开关 / 清空 / 存盘说明 ----------------------------------------- */
+    g_cal_enable_button = UI_CreateButton(screen, "校准:开",
+                                          UI_COLOR_GREEN,
+                                          UI_PAGE_MARGIN, 478, 200, 52,
+                                          UI_SimpleActionEvent,
+                                          (void *)&toggle_action);
+    UI_CreateButton(screen, "清空全部校准数据",
+                    UI_COLOR_RED,
+                    UI_PAGE_MARGIN + 216, 478, 244, 52,
+                    UI_SimpleActionEvent,
+                    (void *)&clear_action);
+    UI_CreateText(screen,
+                  "存盘:/home/xilinx/cv_calibration.dat\n参数一改就自动存盘,掉电不丢",
+                  &ui_font_cn_20, UI_COLOR_TEXT_MUTED,
+                  UI_PAGE_MARGIN + 476, 478, width - 476, 52,
+                  LV_TEXT_ALIGN_LEFT);
+
+    UI_CreateText(screen,
+                  "空载 = 直接拔掉被测件 · 短接 = 0 Ω 接 D-G-S · 负载 = 标准板接 D-G-S",
+                  &ui_font_cn_20, UI_COLOR_TEXT_MUTED,
+                  UI_PAGE_MARGIN, 540, width, 28, LV_TEXT_ALIGN_LEFT);
+
+    g_page_built[UI_PAGE_CALIBRATION] = 1u;
+    UI_ActivatePage(UI_PAGE_CALIBRATION);
 }
 
 /*
@@ -6568,6 +7418,14 @@ uint32_t UI_Demo_Init(void)
     g_sweep_probe_owner = 0u;
     g_keypad_value_label = NULL;
     g_keypad_note_label = NULL;
+    g_cal_enable_button = NULL;
+    g_cal_progress_label = NULL;
+    g_cal_progress_bar = NULL;
+    g_cal_progress_width = 0;
+    g_cal_coverage_label = NULL;
+    (void)memset(g_cal_field_buttons, 0, sizeof(g_cal_field_buttons));
+    (void)memset(g_cal_cells, 0, sizeof(g_cal_cells));
+    g_cal_edit_field = CAL_FIELD_CGS;
     g_results_chart = NULL;
     (void)memset(g_result_cards, 0, sizeof(g_result_cards));
     (void)memset(g_result_value_labels, 0, sizeof(g_result_value_labels));
@@ -6632,7 +7490,7 @@ uint32_t UI_Demo_Init(void)
     g_latest_rg_valid = 0u;
 
     root_screen = UI_PrepareRootScreen();
-    for (index = 0u; index < 5u; ++index)
+    for (index = 0u; index < 6u; ++index)
     {
         g_page_containers[index] = UI_CreatePageContainer(root_screen);
     }
@@ -7392,6 +8250,10 @@ void UI_Demo_GotoPage(uint32_t page)
 
         case (uint32_t)UI_PAGE_RESULTS:
             UI_ShowResults();
+            break;
+
+        case (uint32_t)UI_PAGE_CALIBRATION:
+            UI_ShowCalibration();
             break;
 
         case (uint32_t)UI_PAGE_HOME:

@@ -118,6 +118,9 @@
  *    (经 `RelayView_ApplyPath()` / `RelayView_ApplyCode()`),不再是只读。
  *    顶栏仍只显示回读真值。见 `relay_view.c` 文件头。 */
 #include "relay_view.h"
+/* 🆕 2026-10-24:开路/短接/标准板三标准校准。本文件负责"采",数学在
+ * calibration.c,界面在 ui_demo.c。 */
+#include "calibration.h"
 #include "cv_qr_live.h"
 
 #include <math.h>
@@ -151,15 +154,48 @@
  * 一句话:挡位边界恰在相邻两挡正中间,不给迟滞就会在边界附近来回跳。 */
 #define SWEEP_GEAR_MARGIN      0.15
 
+/* 🆕 2026-10-23:`VL/VH` 比例判据。**比 `|Z|` 更可信** —— 它是两路解调幅值
+ * 直接相除,不经过 `(A−B)/B` 的相消;在 `|Z|` 已经算错(甚至变号)的区间里,
+ * 这个比值仍然是对的。
+ *
+ * 【为什么上界是硬闸,下界只警告】
+ *   比例越接近 1,R0 越比 |Z| 大,`A−B` 是两个大数相减:通道增益/相位失配
+ *   会被按 `|Z|/R0` 倍放大进实部。2026-10-23 实测同一器件同一 50 V:
+ *   B 挡 Re Z = 1.85 kΩ、C 挡 = 17.7 kΩ、D 挡 = 175 kΩ —— **几乎正好 ∝ R0**,
+ *   而 Im Z 基本不动(12.5/11.9/9.7 kΩ)。比例 > 0.95 时算出来的 Z 已经不是
+ *   器件,而是通道失配的镜像,所以**拒收**。
+ *   比例太小只是信噪比差(Cs 靠相干平均仍然稳),不该把高压段整段判没 ⇒
+ *   只警告,不置 `z_valid = 0`。
+ *
+ * 【自动换挡的目标带】
+ *   纯电容在 `R0 = |Z|` 时 `VL/VH = 1/√2 ≈ 0.71`;目标带 [0.15, 0.90] 对应
+ *   `R0/|Z|` 约 [0.15, 4.4],把两边都留在"最多差一个十倍程"的范围里。
+ *   ⚠️ 上界取 0.90 而不是 0.85:0.1 V 附近的 CISS 在 B 挡上就是 0.894
+ *   (|Z| ≈ 50 Ω, 100/|100−j50|),那一点是用户实测"问题不大"的,不该被
+ *   自动换挡赶去 A 挡。 */
+#define CV_VLVH_TARGET_LOW     0.15
+#define CV_VLVH_TARGET_HIGH    0.90
+#define CV_VLVH_REJECT_HIGH    0.95
+#define CV_VLVH_WARN_LOW       0.0015
+
+/* 换挡后核对:同一个器件换一挡,反推的 |Z| 应当基本不变。
+ * 2026-10-23 实测 B→C 差 1.76 倍、C→D 差 8.3 倍(而 B→C 那次本身也已偏大)。
+ * 阈值 1.5 倍:真曲线在高压段是平的,换挡后跳 1.5 倍只能说明**新挡不可信**。 */
+#define SWEEP_GEAR_STEP_RATIO  1.5
+
 /* 🔴 **2026-10-15 起扫压自动换挡默认【关闭】—— 挡位固定,由用户手动选。**
  *
  * 为什么关:接线整理后的一次上板,打开自动换挡跑出来是这样 ——
  *   COSS 腿把挡位从 B 顶到 C,CRSS 腿**继承 C** 再顶到 D;而 **CRSS 恰恰是当时
  *   唯一一条随偏压变化的曲线**,抬到 D 之后出来的是 |Z| = 140 kΩ、Cs 为负、
  *   D = 71 的垃圾(见 `report/measurements/20261015_uilog_*.txt`)。
- *   换挡判据本身没错 —— **错的是它脚下的 |Z| 本身就不可信**(参考电阻是否
- *   真是挡位标称值,尚未用已知件标定过)。在一个坏数上乘一次错比例,只会放大。
- *   ⇒ 在测量链标定完之前,先把挡位钉死,少一个自变量。
+ *   当时的结论是"判据没错,错的是脚下的 |Z|"。**2026-10-23 修正了一半**:
+ *   判据(拿复数 `|Z|` 选挡)也有错 —— 那条 `|Z|` 的实部本身就 ∝ R0,正是
+ *   通道失配的镜像(见上面 `CV_VLVH_*` 那段)。现在判据改成由 `VL/VH` 反推,
+ *   并加了换挡后核对与"一次只走一挡";**但默认仍然是关**:
+ *   参考电阻是否真是挡位标称值,至今没用已知件标定过,而在一个未标定的
+ *   比例上做任何自动决策,只是在放大同一个未知量。
+ *   ⇒ **四挡已知电阻 + OPEN 标定做完之前,挡位钉死,少一个自变量。**
  *
  * 开关用**文件**不用环境变量:环境变量要重启服务才生效,而 `qrs-ui.service`
  *   重启 = 第二次加载位流(**红线**)。这个文件在 `sweep_start()` 时读,随时可改:
@@ -193,6 +229,36 @@ static float    s_bias_volts;           /* 最后一次真正下发的偏压(量
  * ⚠️ 必须是粘滞的:判据是确定性的,失败后每一点都会算同一个"该换"的结论,
  *    不粘滞就会**每 300 ms 重试一次并弹一次框**,把扫压搅成一片报错。 */
 static uint32_t s_auto_gear_off;
+
+/* 🆕 2026-10-23:换挡后的**核对状态**。
+ *   换了挡之后,下一点要拿新挡反推的 |Z| 与换挡前那个比一比 —— 同一个器件、
+ *   相邻两个偏压点,|Z| 不该差出 1.5 倍。对不上就说明**新挡按标称 R0 算不出来**
+ *   (2026-10-23 实测 D 挡:B 挡 12.6 kΩ → D 挡 185 kΩ),回退并关掉本轮自动换挡。 */
+static uint32_t s_gear_probe_pending;   /* 1 = 上一点刚换过挡,本点要核对       */
+static uint32_t s_gear_probe_prev;      /* 换挡前的挡位(回退目标)               */
+static double   s_gear_probe_z;         /* 换挡前由比例反推的 |Z|(Ω)            */
+static uint32_t s_gear_limit_logged;    /* 已经到 A/D 端仍不匹配时只喊一次      */
+
+/* ---- 校准采集状态机(🆕 2026-10-24) ----------------------------------
+ * 一次采集 = 4 条腿 × 4 个挡位 = 16 点。挡位切换是当拍生效的,
+ * **继电器每换一条腿才切一次**(每次 ≤200 ms),所以整轮只有 4 次阻塞,
+ * 其余点都在同一圈 Process() 里逐拍采 —— 不需要另开线程。
+ * ⚠️ `s_cal_capture_active` 在采集中为 1:
+ *   ① 让 `adc_capture_pair_once()` **跳过 >95% 的挡位硬闸**
+ *      (短接 / 开路本来就会被那个闸判"无读数",校准必须拿到原始数);
+ *   ② 让本文件**不应用**校准(采的是原始 M_o/M_s/M_L)。
+ */
+static uint32_t s_cal_capture_active;
+static uint32_t s_cal_active;           /* 1 = 正在跑一轮采集               */
+static uint32_t s_cal_std;              /* CalStandard                      */
+static uint32_t s_cal_leg;              /* 0..3                             */
+static uint32_t s_cal_gear;             /* 0..3                             */
+static uint32_t s_cal_done;             /* 已完成点数(0..16)               */
+static uint32_t s_cal_ok;
+static uint32_t s_cal_bad;
+static uint32_t s_cal_due_ms;
+static uint32_t s_cal_leg_started;      /* 本腿继电器是否已切到目标          */
+static char     s_cal_text[80];         /* 给界面的一行状态                  */
 
 /* 🔴 扫压自动换挡的**总开关**(与上面那个粘滞位不同:这个是用户意图,那是失败状态)。
  *    默认关 —— 理由与开关文件路径见 `SWEEP_AUTO_GEAR_FLAG` 的注释。
@@ -242,6 +308,8 @@ typedef struct
 {
     float      mag_a_v;     /* 通道 A(INA = VH)解调幅值,伏 —— 未标定 */
     float      mag_b_v;     /* 通道 B(INB = VL)解调幅值,伏 —— 未标定 */
+    double     vl_vh;       /* 🆕 VL/VH(B 路参考电阻电压 / A 路总激励)。
+                             *    挡位是否匹配的直接判据,见 CV_VLVH_* 常数。 */
     AdcSampleZ z;           /* 🆕 复数阻抗及其派生量(Cs / Cp / D / 电流)   */
     uint32_t   gear;        /* 🆕 本次读到的 0x18 原始码(挡位是谁说了算)   */
     double     r0_ohm;      /* 🆕 本次用的参考电阻 = 挡位电阻(回读换算)     */
@@ -251,7 +319,14 @@ typedef struct
     float      mag_b_codes; /* 🆕 通道 B 解调幅值,**码**                        */
     uint32_t   otr;         /* 两路 OTR 置起的字数合计 */
     uint32_t   z_valid;     /* 🆕 1 = `z` 是本次算出来的;0 = 保留上一次的值 */
+    uint32_t   fresh;       /* 🆕 1 = 本点的幅值/比例是这一次采的(不是上一点的残留)。
+                             *    自动换挡据此判断"能不能拿这组数做决定"。      */
     uint32_t   tries;       /* 🆕 本点连采了几次才自洽(1 = 一次就对)            */
+    /* 🆕 2026-10-24:校准。`z` 在应用校准后是**已修正**的值;
+     *    `calibrated` 说明 `z` 是不是修正过的,`z_raw_*` 留一份原始值写日志。 */
+    uint32_t   calibrated;
+    double     z_raw_re_ohm;
+    double     z_raw_im_ohm;
 } AdcPair;
 
 static uint32_t s_code_a[ADC_SAMPLE_POINTS];
@@ -474,6 +549,12 @@ static bool adc_capture_pair_once(void)
      *    `[adc]` 日志行:它把 `R0` 与挡位码一并打出来,事后对得上。 */
     s_pair.gear   = cv_reg_read(CV_REG_RANGE_SEL) & CV_RANGE_MASK;
     s_pair.r0_ohm = cv_range_ohms(s_pair.gear);
+    /* 🆕 本函数一旦中途失败,`s_pair` 里的幅值仍是**上一点**的 ——
+     *    自动换挡不能拿它做决定,所以先清 fresh,成功解调后再置 1。 */
+    s_pair.fresh  = 0u;
+    s_pair.calibrated = 0u;
+    s_pair.z_raw_re_ohm = 0.0;
+    s_pair.z_raw_im_ohm = 0.0;
 
     /* ① 采一对。刻度合法性检查在 `AdcSample_CapturePair()` 内部(它才知道 DIV)。 */
     if (!AdcSample_CapturePair(s_code_a, s_code_b, &otr_n)) {
@@ -504,6 +585,12 @@ static bool adc_capture_pair_once(void)
     s_pair.mag_b_codes = mag_b_codes;
     s_pair.mag_a_v = AdcSample_CodesToVolts(mag_a_codes);
     s_pair.mag_b_v = AdcSample_CodesToVolts(mag_b_codes);
+    /* 🆕 2026-10-23:比例直接由两路解调幅值相除得到 —— **不经过 Z**。
+     *    A 为 0 时置 0(阻抗本来就算不出来,下面不会再往下走)。 */
+    s_pair.vl_vh = (s_pair.mag_a_v > 0.0f)
+                 ? ((double)s_pair.mag_b_v / (double)s_pair.mag_a_v)
+                 : 0.0;
+    s_pair.fresh = 1u;          /* 两路幅值都是本次采的,比例可以拿去选挡了 */
     s_pair.pp_a    = (float)(max_a - min_a);
     s_pair.pp_b    = (float)(max_b - min_b);
     s_pair.otr     = otr_n;
@@ -520,6 +607,63 @@ static bool adc_capture_pair_once(void)
          * 仍然要喂给波形页。所以这里不 return false,由调用方看 z_valid。 */
         fprintf(stderr, "[adc] ⚠️ %s 这一点算不出阻抗:%s\n",
                 path_name(path), AdcSample_LastError());
+    }
+
+    /* 🆕 2026-10-23:**挡位过大硬闸。**
+     *   比例接近 1 ⇒ `A−B` 是两个大数相减,R0 的失配(增益/相位)被按
+     *   `|Z|/R0` 倍放大 ⇒ Re Z 几乎正比于 R0、Im Z 可能变号(Cs 负)。
+     *   这不是器件行为,是量程错配;把这一点**判无读数**比往曲线上塞一个
+     *   负电容好。⚠️ 只在 `z_valid` 时判 —— 阻抗本来就失败的,原因已打过。 */
+    /* 🔴 校准采集**必须绕过这道闸**:短接的 VL/VH ≈ 1(必然 >95%)、开路虽然
+     *    比例很小但也是"标准点",两者都不是"挡位错配"。绕过只影响本次采集的
+     *    判定,**不改任何测量值**;校准结束后下一拍照常按原判据走。 */
+    if (!s_cal_capture_active &&
+        s_pair.z_valid && (s_pair.vl_vh > CV_VLVH_REJECT_HIGH)) {
+        double z_app = 0.0;
+
+        if (s_pair.vl_vh < 1.0) {
+            z_app = s_pair.r0_ohm *
+                    sqrt((1.0 / (s_pair.vl_vh * s_pair.vl_vh)) - 1.0);
+        }
+        s_pair.z_valid = 0u;
+        printf("[adc] ⛔ %s 挡位不匹配:VL/VH = %.2f%%(R0 = %.0f Ω)",
+               path_name(path), 100.0 * s_pair.vl_vh, s_pair.r0_ohm);
+        if (z_app > 0.0) {
+            uint32_t sug = cv_range_pick(z_app, s_pair.gear, 0.0);
+
+            printf(",由比例反推 |Z| ≈ %.0f Ω ⇒ 建议 %.0f Ω 挡", z_app,
+                   cv_range_ohms(sug));
+        }
+        printf("。\n        A−B 已相消,实部是通道失配的镜像(实测 Re Z ∝ R0),"
+               "本点判无读数 —— 换低挡再看。\n");
+    }
+    if (s_pair.z_valid && !s_cal_capture_active &&
+        (s_pair.vl_vh < CV_VLVH_WARN_LOW)) {
+        printf("[adc] ⚠️ %s VL/VH 只有 %.3f%%(B 路已接近噪声底)。"
+               "Cs 靠相干平均仍可看,**D/Cp 不可信**;能换高挡就换。\n",
+               path_name(path), 100.0 * s_pair.vl_vh);
+    }
+
+    /* 🆕 2026-10-24:应用三标准校准。
+     *   · 校准采集中**不应用**(采的必须是原始 M_o/M_s/M_L);
+     *   · 没校准 / 该点未拟合 / 反演退化 ⇒ 原样保留,`calibrated = 0`;
+     *   · 修正后 Cs/Cp/D **必须重算**(同一个 Z 出三个量,见 adc_sample.h)。
+     * ⚠️ 硬闸在**修正之前**判 —— 它判的是"这个测点本身能不能信",
+     *    校准只能修系统误差,不能把一次 A−B 相消的坏测点变成好测点。 */
+    if (s_pair.z_valid && !s_cal_capture_active) {
+        double zr = 0.0;
+        double zi = 0.0;
+
+        if (Calibration_Apply(path, s_pair.gear, fe_hz,
+                              s_pair.z.z_re_ohm, s_pair.z.z_im_ohm,
+                              &zr, &zi)) {
+            s_pair.z_raw_re_ohm = s_pair.z.z_re_ohm;
+            s_pair.z_raw_im_ohm = s_pair.z.z_im_ohm;
+            s_pair.z.z_re_ohm = zr;
+            s_pair.z.z_im_ohm = zi;
+            AdcSample_DeriveFromZ(&s_pair.z, fe_hz);
+            s_pair.calibrated = 1u;
+        }
     }
 
     s_adc_points++;
@@ -629,23 +773,43 @@ static void adc_log_pair(const char *tag, float bias_v)
      *    第一眼看这两项就能分清"设备真变了"和"采集又采错了"。 */
     printf("[adc] %-8s 偏压 %7.3f V | A/INA tick%+d 幅值 %7.4f V 峰峰 %5.0f 码 | "
            "B/INB tick%+d 幅值 %7.4f V 峰峰 %5.0f 码 | OTR %u | "
-           "码/期望 %.2f / %.2f | 采 %u 次\n",
+           "VL/VH %7.2f%%%s | 码/期望 %.2f / %.2f | 采 %u 次\n",
            tag, (double)bias_v,
            (int)AdcSample_PortATick(div), (double)s_pair.mag_a_v, (double)s_pair.pp_a,
            (int)AdcSample_PortBTickHw(div, AdcSample_PortATick(div)),
            (double)s_pair.mag_b_v, (double)s_pair.pp_b,
            (unsigned)s_pair.otr,
+           100.0 * s_pair.vl_vh,
+           /* 🆕 2026-10-23:挡位是否匹配,一眼可读。
+            *    高 > 95 % ⇒ 参考电阻太大,本点 Z 已判无效(⛔ 那行);
+            *    低 < 0.15 % ⇒ A 路满幅而 B 路只剩几码,Cs 的噪声被放大 |Z|/R0 倍。 */
+           (s_pair.fresh == 0u)            ? " (旧)" :
+           (s_pair.vl_vh > CV_VLVH_REJECT_HIGH) ? " ⛔高" :
+           (s_pair.vl_vh < CV_VLVH_WARN_LOW)    ? " ⚠低" : "",
            pp_ratio(s_pair.pp_a, s_pair.mag_a_codes),
            pp_ratio(s_pair.pp_b, s_pair.mag_b_codes),
            (unsigned)((s_pair.tries != 0u) ? s_pair.tries : 1u));
 
     if (s_pair.z_valid) {
-        printf("[adc] %-8s Z = %9.3f %+.3f j Ω (R0 = %.0f Ω,挡位 0x%X) | "
-               "Cs %9.3f pF | Cp %9.3f pF | D %.5f | I %8.4f mA  (均未标定)\n",
-               tag,
-               s_pair.z.z_re_ohm, s_pair.z.z_im_ohm,
-               s_pair.r0_ohm, (unsigned)s_pair.gear,
-               s_pair.z.cs_pf, s_pair.z.cp_pf, s_pair.z.d, s_pair.z.cur_ma);
+        if (s_pair.calibrated) {
+            /* 校准后的行**两个 Z 都打** —— 报告里要能看出"修掉了多少",
+             * 也能在怀疑校准时一眼拿原始值复核。 */
+            printf("[adc] %-8s Z = %9.3f %+.3f j Ω (校准前 %9.3f %+.3f j) | "
+                   "R0 = %.0f Ω,挡位 0x%X | Cs %9.3f pF | Cp %9.3f pF | "
+                   "D %.5f | I %8.4f mA  (已校准)\n",
+                   tag,
+                   s_pair.z.z_re_ohm, s_pair.z.z_im_ohm,
+                   s_pair.z_raw_re_ohm, s_pair.z_raw_im_ohm,
+                   s_pair.r0_ohm, (unsigned)s_pair.gear,
+                   s_pair.z.cs_pf, s_pair.z.cp_pf, s_pair.z.d, s_pair.z.cur_ma);
+        } else {
+            printf("[adc] %-8s Z = %9.3f %+.3f j Ω (R0 = %.0f Ω,挡位 0x%X) | "
+                   "Cs %9.3f pF | Cp %9.3f pF | D %.5f | I %8.4f mA  (未校准)\n",
+                   tag,
+                   s_pair.z.z_re_ohm, s_pair.z.z_im_ohm,
+                   s_pair.r0_ohm, (unsigned)s_pair.gear,
+                   s_pair.z.cs_pf, s_pair.z.cp_pf, s_pair.z.d, s_pair.z.cur_ma);
+        }
     } else {
         printf("[adc] %-8s Z 无读数(原因见上面那一行 ⚠️);"
                "两路幅值仍有效,波形照画\n", tag);
@@ -821,14 +985,21 @@ static void point_measure(void)
         uint32_t ok_rg = valid && s_pair.z_valid;
 
         if (ok_rg) {
-            double rg = s_pair.z.z_re_ohm + 0.7;
+            /* 🔴 0.7 Ω 是前序的经验补偿(线阻/接触电阻)。**校准后不再加** ——
+             *    短接 + 标准板已经把那部分系统误差标掉,再加一次就是重复补偿。
+             *    未校准时保持原口径,便于与历史数据对照。 */
+            double rg = s_pair.z.z_re_ohm +
+                        (s_pair.calibrated ? 0.0 : 0.7);
 
             /* 显示带单位,和扫压页的读数风格一致 */
             (void)snprintf(rg_text, sizeof(rg_text), "%.2f Ω", rg);
             UI_Demo_UpdateResistance(rg_text, 1u);
-            printf("[proto] 点测 RG:Rg = Re Z + 0.7 = %.4f + 0.7 = %.4f Ω"
+            printf("[proto] 点测 RG:Rg = Re Z %s = %.4f %s = %.4f Ω"
                    "(R0 = %.0f Ω,挡位 0x%X)\n",
-                   s_pair.z.z_re_ohm, rg, s_pair.r0_ohm, (unsigned)s_pair.gear);
+                   s_pair.calibrated ? "(已校准)" : "+ 0.7(未校准)",
+                   s_pair.z.z_re_ohm,
+                   s_pair.calibrated ? "" : "+ 0.7",
+                   rg, s_pair.r0_ohm, (unsigned)s_pair.gear);
         } else {
             /* 算不出来就**留空**,不编一个电阻值出来。 */
             UI_Demo_UpdateResistance("--", 0u);
@@ -837,7 +1008,8 @@ static void point_measure(void)
     }
 
     UI_Demo_SetStatusText(valid ?
-        "状态:单点完成(Cs 未标定)" :
+        (s_pair.calibrated ? "状态:单点完成(已校准)"
+                           : "状态:单点完成(未校准)") :
         "状态:单点失败(见 [adc] 日志)");
 
     UI_Demo_RefreshResultViews();
@@ -1016,6 +1188,10 @@ static void sweep_start(uint32_t mask, uint32_t stop_tenths)
     s_sweep_active     = 1u;
     s_sweep_next_ms    = cv_millis();       /* 第一点立刻发,不等一个驻留 */
     s_auto_gear_off    = 0u;                /* 🆕 新的一轮,重新允许自动换挡 */
+    s_gear_probe_pending = 0u;              /* 🆕 上一轮的核对/到端记账一律作废 */
+    s_gear_probe_prev    = 0u;
+    s_gear_probe_z       = 0.0;
+    s_gear_limit_logged  = 0u;
 
     UI_Demo_ClearSweep(3u);                 /* 3 ≥ 3 = 清全部三路 */
     CV_QR_Live_Reset();                     /* 上一轮的二维码立刻作废 */
@@ -1051,6 +1227,11 @@ static void sweep_finish(void)
                path_name(s_sweep_leg), (unsigned)s_sweep_index, path_name(next));
         s_sweep_index   = 0u;
         s_sweep_next_ms = cv_millis();      /* 下一条腿第一点立刻发 */
+        /* 换腿 = 换器件等效电容,起手的挡位也就换了。上一腿留下的"换挡后核对"
+         * 不能跨腿用(那是另一条曲线的 |Z|),但 `s_auto_gear_off` **不清** ——
+         * 挡位失配是硬件/回路的问题,与哪条腿无关,不该每腿重犯一次。 */
+        s_gear_probe_pending = 0u;
+        s_gear_limit_logged  = 0u;
         sweep_begin_leg(next);
         return;                             /* ⛔ 不置 inspection_ready —— 还没跑完 */
     }
@@ -1115,6 +1296,20 @@ static void sweep_finish(void)
  *   相邻或相同 —— 用上一点选下一点,**最多落后一个点**,而且第一跳之后
  *   就收敛了。日志每行都印了当时的挡位(`adc_log_pair`),落后与否看得见。
  *
+ * 【2026-10-23 修订:判据改成"由 `VL/VH` 反推 `|Z|`",并加换挡后核对】
+ *   原判据直接用复数 `|Z|`。2026-10-23 实测同一器件、同一 50 V、同一回路:
+ *   `Re Z` = 1.85 k / 17.7 k / 175 k Ω(B/C/D 挡)—— **几乎正好 ∝ R0**,
+ *   而 `Im Z` 基本不动(12.5 / 11.9 / 9.7 kΩ)。也就是说 R0 越大,`|Z|` 的
+ *   实部越是**通道失配的镜像**,不是器件;拿它继续选挡,等于在坏数上再乘一次
+ *   比例 —— 这正是 2026-10-15 自动换挡一路顶到 D 之后跑飞的原因。
+ *   ⇒ 只用**两路解调幅值之比**反推:`|Z| ≈ R0·√(1/r² − 1)`,r = VL/VH。
+ *     它不经过 `(A−B)` 相消,在 `Re Z` 变号时仍然成立。
+ *   另加一道**换挡后核对**:同一器件换一挡,反推的 `|Z|` 必须基本不变
+ *   (1.5 倍内,`SWEEP_GEAR_STEP_RATIO`)。对不上就**回退到旧挡并关闭本轮自动换挡**
+ *   —— 不做"再试一次",因为那会把后面整段曲线都建在同一个坏挡上。
+ *   ⚠️ 自动换挡**一次只走一挡**(B→C→D),不跨挡直跳:跨挡会一次跨过两个
+ *      没验证过的电阻,出问题时也定位不到是哪一挡。
+ *
  * ⛔ **不做的两件事(都是有意不做,不是漏了)**
  *   ① **不给第 1 点预扫一次**。预扫要阻塞一个驻留(≈300 ms + 采集),
  *      而本函数所在的 `sweep_step()` 由 `DisplayProtocol_Process()` 在主循环里调,
@@ -1125,10 +1320,22 @@ static void sweep_finish(void)
  *      `0x18` 回读,看得见);收尾时停在**最后一点真正用过的**那一挡上,
  *      那正是看曲线时最想知道的。
  */
+/* 相邻一挡。up != 0 往电阻大的一边走。到头返回 0(调用方据此判断"到端")。 */
+static uint32_t gear_adjacent(uint32_t cur, int up)
+{
+    switch (cur & CV_RANGE_MASK) {
+    case CV_RANGE_A: return (up != 0) ? CV_RANGE_B : 0u;
+    case CV_RANGE_B: return (up != 0) ? CV_RANGE_C : CV_RANGE_A;
+    case CV_RANGE_C: return (up != 0) ? CV_RANGE_D : CV_RANGE_B;
+    case CV_RANGE_D: return (up != 0) ? 0u : CV_RANGE_C;
+    default:         return 0u;
+    }
+}
+
 static void sweep_autoscale(void)
 {
-    double   z_mag;
-    uint32_t cur, pick;
+    double   ratio, z_app;
+    uint32_t cur, pick, step;
 
     if (s_auto_gear_off != 0u) {
         return;
@@ -1137,19 +1344,65 @@ static void sweep_autoscale(void)
     if (!sweep_auto_gear_enabled()) {
         return;
     }
-    /* ⚠️ `|Z|` 不可信就别据它换挡 —— 那等于拿噪声去选量程。
-     *    这一点的读数会照常填进曲线(`s_pair.z_valid` 为 0 时曲线本来就不画点)。 */
-    if (!s_pair.z_valid) {
-        return;
-    }
-    z_mag = sqrt((s_pair.z.z_re_ohm * s_pair.z.z_re_ohm) +
-                 (s_pair.z.z_im_ohm * s_pair.z.z_im_ohm));
-    if (!(z_mag > 0.0)) {
+    /* 本点没拿到新数据(采集/解调失败)⇒ 手上的比例是上一点的残留,不能拿它选挡。
+     * ⛔ 这里**不**用 `s_pair.z_valid`:负的 Cs 会让 z_valid 为 0,但比例本身
+     *    仍然有效 —— 恰恰是这种点最需要换挡。 */
+    if (s_pair.fresh == 0u) {
         return;
     }
 
-    cur  = cv_reg_read(CV_REG_RANGE_SEL) & CV_RANGE_MASK;
-    pick = cv_range_pick(z_mag, cur, SWEEP_GEAR_MARGIN);
+    /* ⚠️ 用**采集时**记下的挡位,不是现读 0x18:比例是在那一挡下测的,
+     *    两者理论上必然一致(同一调用链内没人能改),但拿采集时的那个
+     *    才让"比例 ↔ R0 ↔ 挡位"三者出自同一次测量。 */
+    cur = s_pair.gear & CV_RANGE_MASK;
+    if (cur == 0u) {
+        return;
+    }
+    ratio = s_pair.vl_vh;
+    if (!(ratio > 0.0) || !(ratio < 1.0)) {
+        return;             /* 无信号(0)或数值异常 —— 不动作,采集侧另会报 */
+    }
+
+    /* 由比例反推 |Z|:纯电抗分压下 VL/VH = R0/|R0 + jZ| ⇒ |Z| = R0·√(1/r² − 1)。
+     * ⚠️ 对带实部的 Z 这是近似,但**选挡只要求量级对**;它不经过 `(A−B)`
+     *    相消,所以在 `Re Z` 变号(2026-10-23 的 B/C/D 挡)时仍然成立。 */
+    z_app = s_pair.r0_ohm * sqrt((1.0 / (ratio * ratio)) - 1.0);
+
+    /* ① 上一点刚**往大挡**换过 —— 先用本点的比例核对新挡可信不可信。
+     *    只在往上换时记账:往下换时旧挡的比例接近 1,反推的 |Z| 本身就不可信,
+     *    拿它做基准会把"正确的往下降"误判成失配。 */
+    if (s_gear_probe_pending != 0u) {
+        double change = (s_gear_probe_z > 0.0) ? (z_app / s_gear_probe_z) : 1.0;
+
+        s_gear_probe_pending = 0u;
+        if (!((change > (1.0 / SWEEP_GEAR_STEP_RATIO)) &&
+              (change < SWEEP_GEAR_STEP_RATIO))) {
+            printf("[proto] ⛔ 换挡后 |Z| 对不上:%.0f Ω 挡反推 %.0f Ω,"
+                   "换成 %.0f Ω 挡后反推 %.0f Ω(差 %.2f 倍)。\n"
+                   "        同一器件换一挡 |Z| 应当基本不变 —— 差这么多说明"
+                   "**这一挡按标称 R0 算不出来**(2026-10-23 实测:C 挡 Re Z "
+                   "≈ 17.7 kΩ,而 B 挡只有 1.85 kΩ)。\n"
+                   "        ⇒ 回退到 %.0f Ω 挡,**本轮不再自动换挡**;"
+                   "要恢复得先做四挡已知电阻标定。\n",
+                   cv_range_ohms(s_gear_probe_prev), s_gear_probe_z,
+                   cv_range_ohms(cur), z_app, change,
+                   cv_range_ohms(s_gear_probe_prev));
+            if (!RelayView_ApplyGear(s_gear_probe_prev)) {
+                printf("[proto] ⚠️ 回退到 %.0f Ω 挡未确认 —— 挡位留在 %.0f Ω,"
+                       "请手动接管。\n",
+                       cv_range_ohms(s_gear_probe_prev), cv_range_ohms(cur));
+            }
+            s_auto_gear_off = 1u;
+            return;
+        }
+    }
+
+    /* ② 比例在目标带内 —— 不动。 */
+    if ((ratio >= CV_VLVH_TARGET_LOW) && (ratio <= CV_VLVH_TARGET_HIGH)) {
+        return;
+    }
+
+    pick = cv_range_pick(z_app, cur, SWEEP_GEAR_MARGIN);
     if (pick == 0u) {
         /* 只有 |Z| 无效才会走到这里,上面已经挡过 —— 真到了就说明判据自身异常。 */
         printf("[proto] ⚠️ 自动换挡:判据返回 0(不该发生),本轮不再自动换挡\n");
@@ -1160,32 +1413,50 @@ static void sweep_autoscale(void)
         return;                       /* 迟滞窗口内 —— 什么都不做 */
     }
 
-    if (!RelayView_ApplyGear(pick)) {
+    /* ③ **一次只走一挡**:跨挡会一次跨过两个没验证过的电阻,出问题定位不到。 */
+    step = gear_adjacent(cur, (pick > cur) ? 1 : 0);
+    if (step == 0u) {
+        if (s_gear_limit_logged == 0u) {
+            printf("[proto] ⚠️ 自动换挡已到%s端:VL/VH = %.2f%% 仍不在目标带 "
+                   "[%.0f%%, %.0f%%],但已是能选的%s挡 —— 保持不动。\n",
+                   (pick > cur) ? "最高" : "最低",
+                   100.0 * ratio, 100.0 * CV_VLVH_TARGET_LOW,
+                   100.0 * CV_VLVH_TARGET_HIGH,
+                   (pick > cur) ? "最高" : "最低");
+            s_gear_limit_logged = 1u;
+        }
+        return;
+    }
+
+    if (!RelayView_ApplyGear(step)) {
         printf("[proto] ⚠️ 自动换挡 %.0f Ω(0x%X)未确认 —— **本轮不再尝试**;\n"
                "        下一点仍按 0x%X 算(每行 Z 日志都印了当时挡位),\n"
                "        要手动接管:测量页那 4 颗挡位按钮。\n",
-               cv_range_ohms(pick), (unsigned)pick, (unsigned)cur);
+               cv_range_ohms(step), (unsigned)step, (unsigned)cur);
         s_auto_gear_off = 1u;
         return;
     }
 
-    /* `VL/VH = R0 / |R0 + Z|` —— **相量和的模**,不是 `R0/(R0+|Z|)`。
-     * 两者在 `|Z| ≫ R0` 时接近,在 `|Z| ≈ R0` 时差一倍 ——
-     * 本函数恰恰常在 `|Z| ≈ R0` 附近做判断,所以只能写对的那个。
-     * (左边那个数是**实测**的 `mag_b/mag_a`,右边是换算到新挡的**预测值**。) */
+    /* ④ 记账 —— 只有**往大挡**换才挂核对(理由见①)。 */
+    if (step > cur) {
+        s_gear_probe_pending = 1u;
+        s_gear_probe_prev    = cur;
+        s_gear_probe_z       = z_app;
+    }
+
+    /* `VL/VH = R0 / |R0 + jZ|`(换成纯电抗近似)—— 左边是**实测**,右边是新挡预测。
+     * 两者在换挡后应当相去不远,否则下一点的①会拦下来。 */
     {
         double r_cur  = cv_range_ohms(cur);
-        double r_pick = cv_range_ohms(pick);
-        double d_new  = sqrt(((r_pick + s_pair.z.z_re_ohm) * (r_pick + s_pair.z.z_re_ohm)) +
-                             (s_pair.z.z_im_ohm * s_pair.z.z_im_ohm));
+        double r_step = cv_range_ohms(step);
+        double ratio_pred = r_step / sqrt((r_step * r_step) + (z_app * z_app));
 
         printf("[proto] 🔁 自动换挡:%.0f Ω(0x%X)→ %.0f Ω(0x%X)| "
-               "|Z| = %.0f Ω,VL/VH 实测 %.1f%% → 预计 %.1f%%(R0=%.0f Ω,+%.0f%% 于 |Z|)\n",
-               r_cur, (unsigned)cur, r_pick, (unsigned)pick, z_mag,
-               (s_pair.mag_a_v > 0.0f) ? (100.0 * (double)s_pair.mag_b_v / (double)s_pair.mag_a_v) : 0.0,
-               (d_new > 0.0) ? (100.0 * r_pick / d_new) : 0.0,
-               r_pick,
-               (z_mag > 0.0) ? (100.0 * ((r_pick / z_mag) - 1.0)) : 0.0);
+               "比例反推 |Z| ≈ %.0f Ω,VL/VH 实测 %.1f%% → 预计 %.1f%%"
+               "(R0/|Z| = %.2f)\n",
+               r_cur, (unsigned)cur, r_step, (unsigned)step,
+               z_app, 100.0 * ratio, 100.0 * ratio_pred,
+               (z_app > 0.0) ? (r_cur / z_app) : 0.0);
     }
 }
 
@@ -1292,6 +1563,194 @@ static void demo_auto_run(void)
 }
 
 /* ==========================================================================
+ * 三标准校准采集(🆕 2026-10-24)
+ *
+ * 一次采集 = 4 条腿 × 4 个挡位 = 16 点。**挡位当拍生效**,所以同一腿的
+ * 4 个挡位在连续几圈 `Process()` 里采完;**继电器只在换腿时切一次**,
+ * 切完等一个驻留(`s_dwell_ms`)再采第一点 —— 触点要稳定。
+ * ⇒ 整轮阻塞点只有 4 次继电器切换(每次 ≤200 ms),界面照常响应。
+ *
+ * ⚠️ 采的必须是**原始** M_o / M_s / M_L:
+ *    `s_cal_capture_active = 1` 让 `adc_capture_pair_once()` 跳过挡位硬闸、
+ *    也不应用已有的校准。短接的 VL/VH ≈ 1 会被那道闸判"无读数",
+ *    而它恰恰是最好的短接标准点。
+ * ========================================================================== */
+
+static const uint32_t s_cal_gear_onehot[CAL_GEAR_COUNT] =
+    {CV_RANGE_A, CV_RANGE_B, CV_RANGE_C, CV_RANGE_D};
+
+static const char *cal_std_name(uint32_t std)
+{
+    static const char *const names[3] =
+        {"OPEN(拔掉被测件)", "SHORT(D-G-S 短接)", "LOAD(标准板)"};
+
+    return (std < 3u) ? names[std] : "?";
+}
+
+#define CAL_POINTS_PER_STD (CAL_LEG_COUNT * CAL_GEAR_COUNT)
+
+static void cal_ui_progress(void)
+{
+    if (s_cal_done >= CAL_POINTS_PER_STD) {
+        (void)snprintf(s_cal_text, sizeof(s_cal_text), "%s · 完成 %u/%u",
+                       cal_std_name(s_cal_std),
+                       (unsigned)s_cal_done, (unsigned)CAL_POINTS_PER_STD);
+    } else {
+        (void)snprintf(s_cal_text, sizeof(s_cal_text), "%s · %s · %s · %u/%u",
+                       cal_std_name(s_cal_std),
+                       (s_cal_leg < CAL_LEG_COUNT) ? path_name(s_cal_leg) : "-",
+                       gear_name(s_cal_gear),
+                       (unsigned)s_cal_done, (unsigned)CAL_POINTS_PER_STD);
+    }
+    UI_Demo_CalibrationProgress(s_cal_text, s_cal_done,
+                                (uint32_t)CAL_POINTS_PER_STD);
+}
+
+static void calibration_finish(void)
+{
+    uint32_t total_fitted = Calibration_EndStandard((CalStandard)s_cal_std);
+    int32_t  fi = Calibration_FreqIndex(MeasureConfig_GetDdsHz());
+    uint32_t this_fitted = (fi >= 0) ?
+        Calibration_FittedCount((uint32_t)fi) : 0u;
+
+    s_cal_active = 0u;
+    (void)snprintf(s_cal_text, sizeof(s_cal_text),
+                   "%s 完成:%u 点成功 / %u 点失败;本频率拟合 %u/16",
+                   cal_std_name(s_cal_std), (unsigned)s_cal_ok,
+                   (unsigned)s_cal_bad, (unsigned)this_fitted);
+    UI_Demo_CalibrationProgress(s_cal_text, s_cal_done,
+                                (uint32_t)CAL_POINTS_PER_STD);
+    UI_Demo_RefreshCalibrationViews();
+    UI_Demo_SetStatusText(s_cal_text);
+
+    printf("[cal] %s\n", Calibration_LastMessage());
+    printf("[cal] %s:成功 %u / 失败 %u,本频率拟合 %u/16;全部频率拟合 %u/48\n",
+           cal_std_name(s_cal_std), (unsigned)s_cal_ok, (unsigned)s_cal_bad,
+           (unsigned)this_fitted, (unsigned)total_fitted);
+
+    /* 采完把偏压归 0 —— 标准板不必一直带电,也是离开页面后最安全的状态。 */
+    (void)bias_apply(0.0f);
+}
+
+/** @brief 每圈 `Process()` 调一次:到点就采**一个**点。 */
+static void calibration_process(void)
+{
+    uint32_t hz;
+    uint32_t onehot;
+    bool     captured = false;
+
+    if (!s_cal_active) {
+        return;
+    }
+    if ((int32_t)(cv_millis() - s_cal_due_ms) < 0) {
+        return;
+    }
+
+    /* ① 换腿:先切继电器,等一个驻留让触点稳定,本圈不采。 */
+    if (!s_cal_leg_started) {
+        if (!RelayView_ApplyPath(s_cal_leg)) {
+            printf("[cal] ⚠️ %s 继电器切换未确认 —— 这 4 个点可能落在上一条腿上,"
+                   "拟合结果请对照日志\n", path_name(s_cal_leg));
+        }
+        s_pair_path       = s_cal_leg;
+        s_cal_leg_started = 1u;
+        s_cal_due_ms      = cv_millis() + s_dwell_ms;
+        return;
+    }
+
+    /* ② 切挡(当拍生效,不占稳定窗)再采。挡位没确认就**不存** ——
+     *    存了的话这点的 M 是在哪个 R0 下测的说不清,拟合会整段错。 */
+    onehot = s_cal_gear_onehot[s_cal_gear];
+    if (RelayView_ApplyGear(onehot)) {
+        hz = MeasureConfig_GetDdsHz();
+        s_pair_path          = s_cal_leg;
+        s_cal_capture_active = 1u;
+        captured = adc_capture_pair();
+        s_cal_capture_active = 0u;
+
+        if (captured && s_pair.z_valid) {
+            int weak = (s_cal_std != CAL_STD_OPEN) &&
+                       (s_pair.vl_vh < CV_VLVH_WARN_LOW);
+            /* 🆕 按 **0x18 回读**的挡位存,不按"我以为切到了哪挡"存。
+             *    ApplyGear 返回 true 已经核对过一次,这里再用采集时现读的那份
+             *    核对第二次 —— 两次说的是同一件事,才把它写进校准文件。 */
+            uint32_t actual_gear = 0xFFu;
+
+            for (uint32_t gi = 0u; gi < CAL_GEAR_COUNT; ++gi) {
+                if (s_pair.gear == s_cal_gear_onehot[gi]) {
+                    actual_gear = gi;
+                }
+            }
+            if (actual_gear != s_cal_gear) {
+                s_cal_bad++;
+                printf("[cal] ⛔ %s %s:挡位回读 0x%X 与目标 %s 不符 —— 本点不存\n",
+                       cal_std_name(s_cal_std), path_name(s_cal_leg),
+                       (unsigned)s_pair.gear, gear_name(s_cal_gear));
+            } else if (Calibration_StoreRaw((CalStandard)s_cal_std, s_cal_leg,
+                                     actual_gear, hz,
+                                     s_pair.z.z_re_ohm, s_pair.z.z_im_ohm,
+                                     weak)) {
+                s_cal_ok++;
+            } else {
+                s_cal_bad++;
+            }
+            printf("[cal] %s %s %s:VL/VH = %.3f%%  Z = %.3f %+.3f j Ω"
+                   "(R0 = %.0f Ω)%s\n",
+                   cal_std_name(s_cal_std), path_name(s_cal_leg),
+                   gear_name(s_cal_gear), 100.0 * s_pair.vl_vh,
+                   s_pair.z.z_re_ohm, s_pair.z.z_im_ohm, s_pair.r0_ohm,
+                   weak ? " ⚠弱信号" : "");
+        } else if (captured && (s_cal_std == CAL_STD_OPEN)) {
+            /* 空载连 |VL| 都没有 ⇒ 这才是**理想开路**,按无穷大记,
+             * 拟合时走"短接 + 负载"的仿射兜底。 */
+            (void)Calibration_StoreOpenInfinite(s_cal_leg, s_cal_gear, hz);
+            s_cal_ok++;
+            printf("[cal] %s %s %s:|VL| 为 0 ⇒ 记作理想无穷\n",
+                   cal_std_name(s_cal_std), path_name(s_cal_leg),
+                   gear_name(s_cal_gear));
+        } else {
+            s_cal_bad++;
+            printf("[cal] ⛔ %s %s %s:采集失败 —— 本点不存\n",
+                   cal_std_name(s_cal_std), path_name(s_cal_leg),
+                   gear_name(s_cal_gear));
+        }
+    } else {
+        s_cal_bad++;
+        printf("[cal] ⛔ %s %s %s:挡位切换未确认 —— 本点不存\n",
+               cal_std_name(s_cal_std), path_name(s_cal_leg),
+               gear_name(s_cal_gear));
+    }
+
+    /* ③ 推进。4 个挡位走完换下一条腿(下一圈先切继电器)。 */
+    s_cal_done++;
+    s_cal_gear++;
+    if (s_cal_gear >= CAL_GEAR_COUNT) {
+        s_cal_gear       = 0u;
+        s_cal_leg++;
+        s_cal_leg_started = 0u;
+    }
+
+    if (s_cal_done >= CAL_POINTS_PER_STD) {
+        calibration_finish();
+        return;
+    }
+
+    s_cal_due_ms = cv_millis();     /* 挡位已生效 ⇒ 下一圈接着采 */
+    cal_ui_progress();
+}
+
+/** @brief 校准时挡住会打架的指令,并说明还剩几点。 */
+static bool cal_reject_if_busy(const char *what)
+{
+    if (!s_cal_active) {
+        return false;
+    }
+    printf("[cal] ⛔ 校准采集中(还剩 %u 点),暂不接受「%s」—— 等它跑完\n",
+           (unsigned)(CAL_POINTS_PER_STD - s_cal_done), what);
+    return true;
+}
+
+/* ==========================================================================
  * 生命周期
  * ========================================================================== */
 
@@ -1329,6 +1788,39 @@ void DisplayProtocol_Init(void)
     s_adc_void          = 0u;
     s_adc_tries_max     = ADC_SAMPLE_TRIES_MAX;
     (void)memset(&s_pair, 0, sizeof(s_pair));
+
+    /* 🆕 校准(2026-10-24):从 /home/xilinx/cv_calibration.dat 读入。
+     *    读不到不算错误 —— 用默认值(标准板参数全 0、偏压 1 V、耐压 100 V),
+     *    界面里填完标准板参数才开始有用。 */
+    s_cal_capture_active = 0u;
+    s_cal_active         = 0u;
+    s_cal_std            = 0u;
+    s_cal_leg            = 0u;
+    s_cal_gear           = 0u;
+    s_cal_done           = 0u;
+    s_cal_ok             = 0u;
+    s_cal_bad            = 0u;
+    s_cal_due_ms         = 0u;
+    s_cal_leg_started    = 0u;
+    (void)snprintf(s_cal_text, sizeof(s_cal_text), "未开始");
+    if (Calibration_Init()) {
+        CalBoard board;
+        Calibration_GetBoard(&board);
+        printf("[cal] 已载入校准文件:拟合 %u/%u 点;标准板 Cgs %.3f pF / "
+               "Cgd %.3f pF / Cds %.3f pF / Rg %.3f Ω;耐压 %.1f V,偏压 %.2f V;"
+               "总开关 %s\n",
+               (unsigned)Calibration_TotalFitted(), (unsigned)CAL_POINT_COUNT,
+               board.cgs_pf, board.cgd_pf, board.cds_pf, board.rg_ohm,
+               board.rating_v, board.bias_v,
+               Calibration_IsEnabled() ? "开" : "关");
+    } else {
+        CalBoard board;
+        Calibration_GetBoard(&board);
+        printf("[cal] 没有可用的校准文件(首次运行或文件损坏)—— 用默认值:"
+               "标准板参数全 0、耐压 %.1f V、偏压 %.2f V。"
+               "测得的 Cs/Cp/D **未校准**\n",
+               board.rating_v, board.bias_v);
+    }
 
     env = getenv("CV_UI_DEMO");
     if ((env != NULL) && (env[0] == '1')) {
@@ -1419,6 +1911,14 @@ void DisplayProtocol_Process(void)
     (void)RelayView_Refresh(0);
 
     demo_auto_run();
+
+    /* 🆕 校准采集:挡位逐拍走、继电器换腿时切。它跑的时候不接别的测量 ——
+     *    请求侧已经互锁(见 `cal_reject_if_busy()`),这里再挡一道,
+     *    防止在途的点测/扫压与它抢同一套 0x18/0x1C。 */
+    calibration_process();
+    if (s_cal_active) {
+        return;
+    }
 
     /* ---- 单点测量:偏压稳定了再采 ----
      * 🔴 必须挂在下面那句 `if (!s_sweep_active) return;` **之前** ——
@@ -1524,6 +2024,10 @@ void DisplayProtocol_Process(void)
 bool DisplayProtocol_RequestReset(void)
 {
     bool     ok;
+
+    if (cal_reject_if_busy("系统复位")) {
+        return false;
+    }
     uint32_t err;
 
     s_cmd_total++;
@@ -1593,6 +2097,10 @@ bool DisplayProtocol_RequestReset(void)
  */
 bool DisplayProtocol_RequestPath(uint32_t path)
 {
+    if (cal_reject_if_busy("回路按钮")) {
+        return false;
+    }
+
     s_cmd_total++;
     s_path_cmds++;
 
@@ -1644,6 +2152,10 @@ bool DisplayProtocol_RequestGear(uint32_t index)
     static const uint32_t onehot[4] =
         {CV_RANGE_A, CV_RANGE_B, CV_RANGE_C, CV_RANGE_D};
 
+    if (cal_reject_if_busy("挡位按钮")) {
+        return false;
+    }
+
     s_cmd_total++;
     /* 挡位也算"测量设置类"指令,与回路按钮共用计数 ——
      * `DisplayProtocol_GetPathCommandCount()` 报的是"设置类按钮总点击数",
@@ -1678,6 +2190,10 @@ bool DisplayProtocol_RequestGear(uint32_t index)
 
 bool DisplayProtocol_RequestBias(uint32_t bias_tenths)
 {
+    if (cal_reject_if_busy("偏压")) {
+        return false;
+    }
+
     s_cmd_total++;
 
     if (bias_tenths < CV_BIAS_TENTHS_MIN) { bias_tenths = CV_BIAS_TENTHS_MIN; }
@@ -1694,6 +2210,10 @@ bool DisplayProtocol_RequestBias(uint32_t bias_tenths)
 
 bool DisplayProtocol_RequestPoint(uint32_t path, uint32_t bias_tenths)
 {
+    if (cal_reject_if_busy("单点测量")) {
+        return false;
+    }
+
     s_cmd_total++;
     s_readback_pending++;
 
@@ -1728,6 +2248,10 @@ bool DisplayProtocol_RequestPoint(uint32_t path, uint32_t bias_tenths)
 
 bool DisplayProtocol_RequestPointAll(uint32_t bias_tenths)
 {
+    if (cal_reject_if_busy("三腿点测")) {
+        return false;
+    }
+
     s_cmd_total++;
     s_readback_pending++;
 
@@ -1759,6 +2283,10 @@ bool DisplayProtocol_RequestPointAll(uint32_t bias_tenths)
 
 bool DisplayProtocol_RequestSweep(uint32_t path, uint32_t stop_tenths)
 {
+    if (cal_reject_if_busy("扫压")) {
+        return false;
+    }
+
     s_cmd_total++;
     s_readback_pending++;
 
@@ -1774,6 +2302,10 @@ bool DisplayProtocol_RequestSweep(uint32_t path, uint32_t stop_tenths)
 
 bool DisplayProtocol_RequestRgThenSweepAll(uint32_t stop_tenths)
 {
+    if (cal_reject_if_busy("RG + 三路扫压")) {
+        return false;
+    }
+
     s_cmd_total++;
     s_readback_pending++;
 
@@ -1847,6 +2379,118 @@ bool DisplayProtocol_RequestSweepStatus(void)
            s_sweep_active ? "进行中" : "空闲",
            (unsigned)s_sweep_index, (unsigned)s_sweep_total);
     return true;
+}
+
+/**
+ * @brief 校准页的三个采集按钮(🆕 2026-10-24)。
+ *
+ * 采集本体在 `calibration_process()`(由 `Process()` 每圈推进),这里只做
+ * **准入判断 + 起跑**。拒绝的四种情形都打印了**该怎么办**,不是只说"不行":
+ *
+ *   ① 已有采集/扫压/在途单点 —— 三者与校准抢同一套 0x18 / 0x1C;
+ *   ② 激励频率不在 10 k / 100 k / 1 M —— 校准表按这三个频率分档;
+ *   ③ 校准偏压 > 标准板耐压 —— 用户填的耐压就是用来挡这一下的;
+ *   ④ LOAD 但标准板参数全为 0 —— 没有 Z_L 就没有第三个方程,不猜。
+ *
+ * @param standard 0=OPEN 1=SHORT 2=LOAD(见 `CalStandard`)
+ * @return true = 已起跑(实际结果看日志/进度,不在这里保证 16 点全成)
+ */
+bool DisplayProtocol_RequestCalibration(uint32_t standard)
+{
+    CalBoard board;
+    uint32_t hz;
+    uint32_t leg;
+
+    s_cmd_total++;
+
+    if (standard > (uint32_t)CAL_STD_LOAD) {
+        printf("[cal] ⛔ 标准编号 %u 越界(只有 0=OPEN / 1=SHORT / 2=LOAD)\n",
+               (unsigned)standard);
+        return false;
+    }
+    if (s_cal_active) {
+        printf("[cal] ⛔ 已在采集中(%u/%u),等它跑完\n",
+               (unsigned)s_cal_done, (unsigned)CAL_POINTS_PER_STD);
+        return false;
+    }
+    if (s_sweep_active) {
+        printf("[cal] ⛔ 扫压正在跑 —— 先停扫压再校准(两者抢回路与挡位)\n");
+        return false;
+    }
+    if (s_point_pending) {
+        printf("[cal] ⛔ 有一个单点在等采集 —— 等它采完再校准\n");
+        return false;
+    }
+
+    hz = MeasureConfig_GetDdsHz();
+    if (Calibration_FreqIndex(hz) < 0) {
+        printf("[cal] ⛔ 激励 %u Hz 不在校准表(只有 10 kHz / 100 kHz / 1 MHz)—— "
+               "先去「系统复位」页换频率\n", (unsigned)hz);
+        return false;
+    }
+
+    Calibration_GetBoard(&board);
+    if (board.bias_v > board.rating_v) {
+        printf("[cal] ⛔ 校准偏压 %.2f V 超过标准板耐压 %.1f V —— "
+               "先在校准页改小偏压或改对耐压\n",
+               board.bias_v, board.rating_v);
+        return false;
+    }
+    if (standard == (uint32_t)CAL_STD_LOAD) {
+        bool any = false;
+
+        for (leg = 0u; leg < CAL_LEG_COUNT; ++leg) {
+            if (Calibration_LegDefined(leg)) {
+                any = true;
+                break;
+            }
+        }
+        if (!any) {
+            printf("[cal] ⛔ 标准板参数全为 0 —— 先在「校准」页填 Cgs/Cgd/Cds/Rg。"
+                   "(四个全 0 时没有任何一条腿有已知负载,第三个方程不成立)\n");
+            return false;
+        }
+    }
+
+    if ((standard == (uint32_t)CAL_STD_SHORT) && (board.bias_v > 0.1)) {
+        /* ⚠️ 偏压是**直流**。把它改小只减掉直流分量;交流激励幅值由源侧固定
+         *    决定(`0x10 EXC_AMP` 未实现,软件改不了它)⇒ 别把这条当成限流保护。 */
+        printf("[cal] ⚠️ 短接采集:直流偏压 %.2f V 和交流激励会同时加在 D-G-S 的 "
+               "0 Ω 上,电流只由源侧输出能力与 R0 决定。"
+               "改小「校准偏压」只减直流分量,减不了交流;"
+               "源侧限流未在仓库中记录 —— 确认过再采。\n",
+               board.bias_v);
+    }
+
+    Calibration_BeginStandard((CalStandard)standard);
+    s_cal_active      = 1u;
+    s_cal_std         = standard;
+    s_cal_leg         = 0u;
+    s_cal_gear        = 0u;
+    s_cal_done        = 0u;
+    s_cal_ok          = 0u;
+    s_cal_bad         = 0u;
+    s_cal_leg_started = 0u;
+    s_cal_due_ms      = cv_millis() + s_dwell_ms;
+
+    (void)bias_apply((float)board.bias_v);
+    (void)snprintf(s_cal_text, sizeof(s_cal_text), "%s · 准备中…",
+                   cal_std_name(standard));
+    UI_Demo_CalibrationProgress(s_cal_text, 0u, (uint32_t)CAL_POINTS_PER_STD);
+    UI_Demo_SetStatusText(s_cal_text);
+
+    printf("[cal] 开始 %s:4 腿 × 4 挡 = 16 点;偏压 %.2f V(耐压 %.1f V),"
+           "激励 %u Hz。\n"
+           "      继电器只在换腿时切(等 %u ms),挡位当拍换;\n"
+           "      挡位一律按 0x18 回读记 —— 不假设切换成功。\n",
+           cal_std_name(standard), (double)s_bias_volts, board.rating_v,
+           (unsigned)hz, (unsigned)s_dwell_ms);
+    return true;
+}
+
+bool DisplayProtocol_CalibrationBusy(void)
+{
+    return s_cal_active != 0u;
 }
 
 /* ==========================================================================

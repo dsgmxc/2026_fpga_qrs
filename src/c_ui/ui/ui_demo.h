@@ -109,6 +109,16 @@ void UI_Demo_UpdateWaveformPoint(uint32_t kind,
    在任何页面下调用都安全。 */
 void UI_Demo_RefreshResultViews(void);
 
+/* 🆕 2026-10-24:校准页(第 6 页,`UI_Demo_GotoPage(5)`)。
+   `UI_Demo_CalibrationProgress` 由 `app/pynq_protocol.c` 的采集状态机每采完
+   一个点调一次 —— 页面还没建时是空操作。
+   `UI_Demo_RefreshCalibrationViews` 重新读标准板参数与 4×4 覆盖表;
+   采集结束、改参数、清空之后都要调。 */
+void UI_Demo_CalibrationProgress(const char *text,
+                                 uint32_t done,
+                                 uint32_t total);
+void UI_Demo_RefreshCalibrationViews(void);
+
 void UI_Demo_ClearAllResults(void);
 void UI_Demo_ClearSweep(uint32_t path_or_all);
 void UI_Demo_BeginSweep(uint32_t path, uint32_t total_points,
