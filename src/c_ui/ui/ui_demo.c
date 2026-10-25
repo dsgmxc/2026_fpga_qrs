@@ -19,6 +19,8 @@
 #include "measure_config.h"
 /* 🆕 2026-10-23:器件标准曲线(TK9J90T 十颗中位)。只读查表,不参与测量链。 */
 #include "ref_model.h"
+/* 🆕 2026-10-24:扫压曲线的无监督异常诊断(马氏距离)。 */
+#include "anomaly_detect.h"
 
 LV_FONT_DECLARE(ui_font_cn_20);
 LV_FONT_DECLARE(ui_font_cn_28);
@@ -367,6 +369,7 @@ static void UI_ShowMeasure(void);
 static void UI_ShowSweep(void);
 static void UI_ShowResults(void);
 static void UI_ResultsRefresh(void);
+static void UI_AnomalyRefresh(void);
 static void UI_UpdateSinglePathStyle(void);
 static void UI_UpdateGearStyle(void);
 static void UI_UpdateMeasureResultMode(void);
@@ -4128,15 +4131,16 @@ static void UI_CalFieldNote(CalField field, char *out, size_t capacity)
 static void UI_CalFormatNumber(char *out, size_t capacity, double value,
                                uint32_t decimals)
 {
-    static const unsigned long k_scale[4] = {1ul, 10ul, 100ul, 1000ul};
+    static const unsigned long k_scale[6] =
+        {1ul, 10ul, 100ul, 1000ul, 10000ul, 100000ul};
     unsigned long scale;
     unsigned long scaled;
     unsigned long whole;
     unsigned long frac;
 
-    if (decimals > 3u)
+    if (decimals > 5u)
     {
-        decimals = 3u;
+        decimals = 5u;
     }
     scale = k_scale[decimals];
     if (!(value >= 0.0))            /* 同时挡住 NaN */
@@ -4162,6 +4166,12 @@ static void UI_CalFormatNumber(char *out, size_t capacity, double value,
             break;
         case 3u:
             lv_snprintf(out, capacity, "%lu.%03lu", whole, frac);
+            break;
+        case 4u:
+            lv_snprintf(out, capacity, "%lu.%04lu", whole, frac);
+            break;
+        case 5u:
+            lv_snprintf(out, capacity, "%lu.%05lu", whole, frac);
             break;
         default:
             lv_snprintf(out, capacity, "%lu", whole);
@@ -5671,7 +5681,7 @@ static lv_obj_t *UI_CreateResultsParameterCard(lv_obj_t *parent,
  * =========================================================================== */
 
 #define UI_RESULT_ROUTE_COUNT  4u    /* CISS / COSS / CRSS / RG */
-#define UI_RESULT_TAB_COUNT    5u
+#define UI_RESULT_TAB_COUNT    6u
 #define UI_WAVE_KIND_COUNT     2u    /* 0 = 单点波形  1 = 扫压包络 */
 #define UI_WAVE_MAX_SAMPLES    480u
 
@@ -5728,6 +5738,24 @@ static lv_obj_t *g_result_state_labels[UI_RESULT_ROUTE_COUNT];
 static lv_obj_t *g_result_tab_buttons[UI_RESULT_TAB_COUNT];
 static lv_obj_t *g_result_subpages[UI_RESULT_TAB_COUNT];
 static uint32_t  g_result_tab;
+
+/* ---- AI 异常检测(结果页第 6 个页签)----
+ * 诊断本身在 app/anomaly_detect.c,这里只保存它给出的结果并显示。
+ * 用固定小结构而不是把 AnomalyResult 暴露到 ui_demo.h,是为了让界面
+ * 与算法解耦:换模型/换阈值不用动界面头文件。 */
+typedef struct
+{
+    uint8_t valid;
+    uint8_t level;              /* AnomalyLevel */
+    uint8_t feature;            /* 最大偏离对应的特征 0..3 */
+    float   score;
+    float   log_delta;          /* 该特征的 log10 偏差 */
+} UI_AnomalySnapshot;
+
+static UI_AnomalySnapshot g_anomaly_snapshot[ANOMALY_LEG_COUNT];
+static lv_obj_t *g_anomaly_score_labels[ANOMALY_LEG_COUNT];
+static lv_obj_t *g_anomaly_verdict_labels[ANOMALY_LEG_COUNT];
+static lv_obj_t *g_anomaly_detail_labels[ANOMALY_LEG_COUNT];
 
 static lv_obj_t *g_results_chart;
 static lv_chart_series_t *g_results_series[3];
@@ -6096,6 +6124,156 @@ static void UI_ResultWaveRefresh(void)
     }
 }
 
+/* --------------------------------------------------------------------------
+ * AI 异常检测页(结果页页签 5)
+ *
+ * 算法在 `app/anomaly_detect.c`。这里只做两件事:
+ *   ① 把协议层塞进来的结果画到三行卡片上;
+ *   ② 文案/颜色由等级决定 —— **健康时显示"四项均在健康范围内"**,
+ *      不显示"最大偏离":健康曲线的贡献项互相抵消,挑一个最大项出来解释
+ *      会误导(2026-10-24 观察到平台基线自评分 0.00 时 dominant 仍是随机项)。
+ * ------------------------------------------------------------------------ */
+
+/* 固定小数位格式化(不用 %f:LV_SPRINTF_USE_FLOAT = 0)。
+   与 `UI_CalFormatNumber` 同一套路,但支持负号 —— 偏离百分比有正有负。 */
+static void UI_AnomalyFormatSigned(char *out, size_t capacity,
+                                   double value, uint32_t decimals)
+{
+    static const unsigned long k_scale[3] = {10ul, 100ul, 1000ul};
+    unsigned long scale;
+    unsigned long scaled;
+    unsigned long whole;
+    unsigned long frac;
+    const char *sign = "";
+
+    if (decimals < 1u)
+    {
+        decimals = 1u;
+    }
+    if (decimals > 3u)
+    {
+        decimals = 3u;
+    }
+    scale = k_scale[decimals - 1u];
+    if (!isfinite(value))
+    {
+        value = 0.0;
+    }
+    if (value < 0.0)
+    {
+        sign = "-";
+        value = -value;
+    }
+    scaled = (unsigned long)((value * (double)scale) + 0.5);
+    whole  = scaled / scale;
+    frac   = scaled % scale;
+
+    if (decimals == 1u)
+    {
+        lv_snprintf(out, capacity, "%s%lu.%01lu", sign, whole, frac);
+    }
+    else if (decimals == 2u)
+    {
+        lv_snprintf(out, capacity, "%s%lu.%02lu", sign, whole, frac);
+    }
+    else
+    {
+        lv_snprintf(out, capacity, "%s%lu.%03lu", sign, whole, frac);
+    }
+}
+
+static void UI_AnomalyRefresh(void)
+{
+    uint32_t leg;
+
+    for (leg = 0u; leg < ANOMALY_LEG_COUNT; ++leg)
+    {
+        const UI_AnomalySnapshot *snap = &g_anomaly_snapshot[leg];
+        lv_obj_t *score = g_anomaly_score_labels[leg];
+        lv_obj_t *verdict = g_anomaly_verdict_labels[leg];
+        lv_obj_t *detail = g_anomaly_detail_labels[leg];
+        uint32_t color;
+        const char *label;
+
+        if ((score == NULL) || (verdict == NULL) || (detail == NULL))
+        {
+            continue;   /* 结果页还没建 */
+        }
+
+        if (snap->valid == 0u)
+        {
+            lv_label_set_text(score, "得分 --");
+            lv_label_set_text(verdict, "无数据");
+            lv_label_set_text(detail, "完成一次扫压后自动得分");
+            lv_obj_set_style_text_color(verdict,
+                                        lv_color_hex(UI_COLOR_TEXT_MUTED),
+                                        LV_PART_MAIN);
+            lv_obj_set_style_text_color(detail,
+                                        lv_color_hex(UI_COLOR_TEXT_MUTED),
+                                        LV_PART_MAIN);
+            continue;
+        }
+
+        {
+            char number[24];
+            char text[96];
+
+            UI_AnomalyFormatSigned(number, sizeof(number),
+                                   (double)snap->score, 1u);
+            lv_snprintf(text, sizeof(text), "得分 %s", number);
+            lv_label_set_text(score, text);
+        }
+
+        if (snap->level == ANOMALY_LEVEL_NORMAL)
+        {
+            color = UI_COLOR_GREEN;
+            label = "正常";
+            lv_label_set_text(detail, "四项均在健康范围内");
+            lv_obj_set_style_text_color(detail,
+                                        lv_color_hex(UI_COLOR_TEXT_MUTED),
+                                        LV_PART_MAIN);
+        }
+        else
+        {
+            char number[24];
+            char text[96];
+
+            color = (snap->level == ANOMALY_LEVEL_SUSPECT) ?
+                    UI_COLOR_ORANGE : UI_COLOR_RED;
+            label = (snap->level == ANOMALY_LEVEL_SUSPECT) ?
+                    "待查" : "异常";
+
+            if (snap->feature == 3u)
+            {
+                /* 宽度是比值,用 × 表达比百分比直观 */
+                double ratio = pow(10.0, (double)snap->log_delta);
+                UI_AnomalyFormatSigned(number, sizeof(number), ratio, 2u);
+                lv_snprintf(text, sizeof(text),
+                            "最大偏离:V75/V25 比 ×%s", number);
+            }
+            else
+            {
+                /* 电平 / V50 是绝对量,用相对模型中心的百分比 */
+                double percent =
+                    (pow(10.0, (double)snap->log_delta) - 1.0) * 100.0;
+                const char *sign = (snap->log_delta >= 0.0f) ? "+" : "";
+
+                UI_AnomalyFormatSigned(number, sizeof(number), percent, 1u);
+                lv_snprintf(text, sizeof(text), "最大偏离:%s %s%s%%",
+                            Anomaly_FeatureText(snap->feature), sign, number);
+            }
+            lv_label_set_text(detail, text);
+            lv_obj_set_style_text_color(detail,
+                                        lv_color_hex(UI_COLOR_TEXT),
+                                        LV_PART_MAIN);
+        }
+
+        lv_label_set_text(verdict, label);
+        lv_obj_set_style_text_color(verdict, lv_color_hex(color),
+                                    LV_PART_MAIN);
+    }
+}
+
 static void UI_ResultsRefresh(void)
 {
     static const char *const value_keys[] = {"Cs", "Cp", "D "};
@@ -6206,8 +6384,13 @@ static void UI_ResultsRefresh(void)
                 }
                 if ((line == 2u) && RefModel_Rg(g_ref_model, &rg_ohm))
                 {
-                    lv_label_set_text_fmt(ref, "标准 %.3f Ω",
-                                          (double)rg_ohm);
+                    /* 🔴 不能写 `%.3f`:LV_SPRINTF_USE_FLOAT=0,屏上会变成 "f"。
+                       下面四处标准值原先是 %f,2026-10-24 一并改成先格式化再拼。 */
+                    char number[24];
+
+                    UI_CalFormatNumber(number, sizeof(number),
+                                       (double)rg_ohm, 3u);
+                    lv_label_set_text_fmt(ref, "标准 %s Ω", number);
                 }
                 else
                 {
@@ -6243,20 +6426,18 @@ static void UI_ResultsRefresh(void)
                     lv_label_set_text(ref, "标准 --");
                     continue;
                 }
-                if (line == 0u)
                 {
-                    lv_label_set_text_fmt(ref, "标准 %s %.3f pF",
-                                          ref_keys[line], (double)ref_cs);
-                }
-                else if (line == 1u)
-                {
-                    lv_label_set_text_fmt(ref, "标准 %s %.3f pF",
-                                          ref_keys[line], (double)ref_cp);
-                }
-                else
-                {
-                    lv_label_set_text_fmt(ref, "标准 %s %.5f",
-                                          ref_keys[line], (double)ref_d);
+                    char number[24];
+                    uint32_t decimals = (line == 2u) ? 5u : 3u;
+                    double value = (line == 0u) ? (double)ref_cs :
+                                   ((line == 1u) ? (double)ref_cp :
+                                                   (double)ref_d);
+
+                    UI_CalFormatNumber(number, sizeof(number),
+                                       value, decimals);
+                    lv_label_set_text_fmt(ref, "标准 %s %s%s",
+                                          ref_keys[line], number,
+                                          (line < 2u) ? " pF" : "");
                 }
             }
         }
@@ -6267,6 +6448,7 @@ static void UI_ResultsRefresh(void)
     UI_UpdateSweepAnalysisCard();
     UI_UpdateTransferQRCode();
     UI_ResultWaveRefresh();
+    UI_AnomalyRefresh();
     UI_ResultTabApply();
 }
 
@@ -6619,7 +6801,8 @@ static void UI_ShowResults(void)
 {
     static const char *const tab_names[UI_RESULT_TAB_COUNT] =
     {
-        "单点结果", "单点波形", "扫压结果", "扫压波形", "数据传输"
+        "单点结果", "单点波形", "扫压结果", "扫压波形", "数据传输",
+        "AI 检测"
     };
     static const char *const route_names[] =
         {"CISS", "COSS", "CRSS", "RG"};
@@ -6628,6 +6811,7 @@ static void UI_ShowResults(void)
     lv_obj_t *point_value_page;
     lv_obj_t *sweep_value_page;
     lv_obj_t *export_page;
+    lv_obj_t *anomaly_page;
     lv_coord_t content_width =
         (lv_coord_t)LCD_PIXEL_WIDTH - (2 * UI_PAGE_MARGIN);
     lv_coord_t card_gap = 14;
@@ -6652,7 +6836,10 @@ static void UI_ShowResults(void)
                                UI_COLOR_SURFACE_LIGHT, 12);
     for (index = 0u; index < UI_RESULT_TAB_COUNT; ++index)
     {
-        lv_coord_t tab_width = (content_width - 24 - 4 * 8) / 5;
+        /* 6 个页签:(976 - 12*2 - 5*8) / 6 = 152,最后一个右缘正好到 964 */
+        lv_coord_t tab_width =
+            (content_width - 24 - (lv_coord_t)(UI_RESULT_TAB_COUNT - 1u) * 8) /
+            (lv_coord_t)UI_RESULT_TAB_COUNT;
         lv_obj_t *button = UI_CreateButton(
             tab_panel, tab_names[index], UI_COLOR_SURFACE,
             12 + (lv_coord_t)index * (tab_width + 8), 8,
@@ -6997,6 +7184,61 @@ static void UI_ShowResults(void)
                       390, 270, 546, 70, LV_TEXT_ALIGN_LEFT);
     }
     g_transfer_qr_dirty = 1u;
+
+    /* ================= 子页 5:AI 异常检测 ================= */
+    anomaly_page = UI_CreateResultSubpage(screen);
+    g_result_subpages[5] = anomaly_page;
+    {
+        static const char *const leg_names[ANOMALY_LEG_COUNT] =
+            {"CISS", "COSS", "CRSS"};
+        lv_obj_t *panel = UI_CreatePanel(anomaly_page,
+                                         UI_PAGE_MARGIN, 124,
+                                         content_width, 452,
+                                         UI_COLOR_SURFACE_LIGHT, 16);
+        uint32_t leg;
+
+        lv_obj_set_style_border_color(panel, lv_color_hex(UI_COLOR_BORDER),
+                                      LV_PART_MAIN);
+        lv_obj_set_style_border_width(panel, 1, LV_PART_MAIN);
+
+        UI_CreateText(panel, "AI 异常检测", &ui_font_cn_28,
+                      UI_COLOR_TEXT, 20, 14, 600, 38,
+                      LV_TEXT_ALIGN_LEFT);
+        UI_CreateText(panel,
+                      "健康基线:10 颗 TK9J90T 中位曲线 · 本机 2026-10-24",
+                      &ui_font_cn_20, UI_COLOR_TEXT_MUTED,
+                      20, 56, 936, 26, LV_TEXT_ALIGN_LEFT);
+
+        for (leg = 0u; leg < ANOMALY_LEG_COUNT; ++leg)
+        {
+            lv_coord_t y = (lv_coord_t)(92 + (int)leg * 92);
+            lv_obj_t *card = UI_CreatePanel(panel, 20, y, 936, 80,
+                                            UI_COLOR_SURFACE, 12);
+
+            UI_CreateText(card, leg_names[leg], &ui_font_cn_28,
+                          UI_COLOR_CYAN, 20, 8, 120, 34,
+                          LV_TEXT_ALIGN_LEFT);
+            g_anomaly_score_labels[leg] =
+                UI_CreateText(card, "得分 --", &ui_font_cn_28,
+                              UI_COLOR_TEXT, 150, 8, 230, 34,
+                              LV_TEXT_ALIGN_LEFT);
+            g_anomaly_verdict_labels[leg] =
+                UI_CreateText(card, "无数据", &ui_font_cn_28,
+                              UI_COLOR_TEXT_MUTED, 400, 8, 200, 34,
+                              LV_TEXT_ALIGN_LEFT);
+            g_anomaly_detail_labels[leg] =
+                UI_CreateText(card, "完成一次扫压后自动得分",
+                              &ui_font_cn_20, UI_COLOR_TEXT_MUTED,
+                              20, 46, 896, 26, LV_TEXT_ALIGN_LEFT);
+        }
+
+        UI_CreateText(panel,
+                      "判据:0.3V 电平 / 100V 电平 / V50 电压 / V75/V25 比 → 偏离度\n"
+                      "得分 < 25 正常,25 - 100 待查,>= 100 异常(健康件最大约 9)\n"
+                      "换标定 / 采样配置后,健康基线需重跑",
+                      &ui_font_cn_20, UI_COLOR_TEXT_MUTED,
+                      20, 366, 936, 78, LV_TEXT_ALIGN_LEFT);
+    }
 
     g_result_tab = 0u;
     {   /* ⚠️ 仅供**演示 / 自动化截图**:CV_UI_RESULT_TAB 指定进页时停在哪个页签,
@@ -8219,6 +8461,38 @@ uint32_t UI_Demo_CopySweepPath(uint32_t path,
     (void)memcpy(valid, g_sweep_valid[path],
                  count * sizeof(valid[0]));
     return count;
+}
+
+void UI_Demo_SetAnomalyResult(uint32_t leg,
+                              uint32_t valid,
+                              float score,
+                              uint32_t level,
+                              uint32_t feature,
+                              float log_delta)
+{
+    UI_AnomalySnapshot *snap;
+
+    if (leg >= ANOMALY_LEG_COUNT)
+    {
+        return;
+    }
+
+    snap = &g_anomaly_snapshot[leg];
+    snap->valid     = (valid != 0u) ? 1u : 0u;
+    snap->score     = score;
+    snap->level     = (uint8_t)((level <= ANOMALY_LEVEL_FAULT) ?
+                                level : ANOMALY_LEVEL_FAULT);
+    snap->feature   = (uint8_t)((feature < ANOMALY_FEATURE_COUNT) ?
+                                feature : 0u);
+    snap->log_delta = log_delta;
+
+    UI_AnomalyRefresh();
+}
+
+void UI_Demo_ClearAnomalyResults(void)
+{
+    memset(g_anomaly_snapshot, 0, sizeof(g_anomaly_snapshot));
+    UI_AnomalyRefresh();
 }
 
 uint32_t UI_Demo_GetLatestResistance(float *resistance_ohm)

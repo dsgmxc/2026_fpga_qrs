@@ -122,6 +122,7 @@
  * calibration.c,界面在 ui_demo.c。 */
 #include "calibration.h"
 #include "cv_qr_live.h"
+#include "anomaly_detect.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -1217,6 +1218,7 @@ static void sweep_start(uint32_t mask, uint32_t stop_tenths)
     s_gear_limit_logged  = 0u;
 
     UI_Demo_ClearSweep(3u);                 /* 3 ≥ 3 = 清全部三路 */
+    UI_Demo_ClearAnomalyResults();          /* 🆕 上一轮的诊断结果同时作废 */
     CV_QR_Live_Reset();                     /* 上一轮的二维码立刻作废 */
     sweep_begin_leg(first);                 /* ← 切继电器 + 开第一条腿的曲线 */
 
@@ -1233,6 +1235,54 @@ static void sweep_start(uint32_t mask, uint32_t stop_tenths)
            sweep_auto_gear_enabled()
                ? "🔁 扫压期间**自动换挡已开启**,手动那 4 颗按钮会被盖掉"
                : "🔒 **扫压期间固定不变**(自动换挡默认关闭,要开见 SWEEP_AUTO_GEAR_FLAG)");
+}
+
+/* 🆕 2026-10-24:扫压结束后的 AI 异常诊断。
+ *
+ * 三条腿的曲线已经完整落在 `g_sweep_*` 里;这里只读复制,不改测量数据。
+ * 评分算法与模型常数在 `app/anomaly_detect.c` / `anomaly_model_data.h`,
+ * 模型由 `tools/fit_anomaly_model.py` 从 10 颗 TK9J90T 生成。
+ *
+ * ⚠️ 只在本轮**真正跑完**时调用:中止的曲线没有 100 V 端点,特征里的
+ *    高压电平与拐点都不可信 —— 宁可不评分,也不给一个假分数。 */
+static void anomaly_evaluate_sweep(void)
+{
+    float voltage[UI_DEMO_SWEEP_MAX_POINTS];
+    float cs_pf[UI_DEMO_SWEEP_MAX_POINTS];
+    uint8_t valid[UI_DEMO_SWEEP_MAX_POINTS];
+    uint32_t leg;
+
+    /* 先清空:本轮没跑的腿不能沿用上一轮的结果 */
+    UI_Demo_ClearAnomalyResults();
+
+    for (leg = 0u; leg < ANOMALY_LEG_COUNT; ++leg) {
+        AnomalyResult result;
+        uint32_t count;
+
+        if ((s_sweep_mask & (1u << leg)) == 0u) {
+            printf("[ai] %s 本轮未扫,不评分\n", path_name(leg));
+            continue;
+        }
+
+        count = UI_Demo_CopySweepPath(leg, voltage, cs_pf, valid,
+                                      UI_DEMO_SWEEP_MAX_POINTS);
+        if (Anomaly_Evaluate(leg, voltage, cs_pf, valid, count, &result) == 0) {
+            UI_Demo_SetAnomalyResult(leg, 0u, 0.0f, 0u, 0u, 0.0f);
+            printf("[ai] %s 数据不足(%u 点),未评分\n",
+                   path_name(leg), (unsigned)count);
+            continue;
+        }
+
+        UI_Demo_SetAnomalyResult(leg, 1u, result.score, result.level,
+                                 result.dominant_feature,
+                                 result.log_delta[result.dominant_feature]);
+        printf("[ai] %s 得分 %.1f -> %s"
+               "(n=%u, 最大偏离=%s %+.3f log10)\n",
+               path_name(leg), (double)result.score,
+               Anomaly_LevelText(result.level), (unsigned)count,
+               Anomaly_FeatureText(result.dominant_feature),
+               (double)result.log_delta[result.dominant_feature]);
+    }
 }
 
 static void sweep_finish(void)
@@ -1282,6 +1332,9 @@ static void sweep_finish(void)
     (void)bias_apply(0.0f);
 
     UI_Demo_SetSweepInspectionReady();
+    /* 🆕 三路跑完 → AI 异常检测。必须在 `SetSweepInspectionReady()` 之后:
+     *   后者才把本轮数据固化进曲线缓存,提前调会读到上一轮的尾巴。 */
+    anomaly_evaluate_sweep();
     /* 三路都完整才生成二维码;单路/多点中止会清空传输页(见 cv_qr_live.c)。 */
     CV_QR_Live_OnSweepComplete();
     UI_Demo_SetStatusText(s_demo_enabled ?
@@ -2405,6 +2458,9 @@ bool DisplayProtocol_RequestSweepStop(void)
      *   而重新发起会自己写第一点。 */
     (void)bias_apply(0.0f);
     UI_Demo_SetSweepInspectionReady();      /* 已经拿到的点仍可查看 */
+    /* 🆕 中止 = 曲线不完整:AI 诊断结果作废,不留一个基于半条曲线的分数。
+       这里**不调** `anomaly_evaluate_sweep()` —— 见该函数的说明。 */
+    UI_Demo_ClearAnomalyResults();
     /* 中止时若三路都已扫完(只是用户在最后一条腿上点了停止)仍可生成;
      * 否则 `CV_QR_Live_OnSweepComplete()` 会清空传输页并打日志。 */
     CV_QR_Live_OnSweepComplete();

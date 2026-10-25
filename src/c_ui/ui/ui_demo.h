@@ -154,6 +154,20 @@ uint32_t UI_Demo_CopySweepPath(uint32_t path,
                                uint32_t capacity);
 uint32_t UI_Demo_GetLatestResistance(float *resistance_ohm);
 
+/* 🆕 2026-10-24:AI 异常检测结果(结果页第 6 个页签)。
+ * 算法在 `app/anomaly_detect.c`;界面只保存结果并显示,不参与计算。
+ * @param valid   0 = 该腿数据不足,界面显示"无数据"
+ * @param level   0 正常 / 1 待查 / 2 异常(与 `AnomalyLevel` 同一编号)
+ * @param feature 最大偏离对应的特征 0..3
+ * @param log_delta 该特征相对健康基线的 log10 偏差 */
+void UI_Demo_SetAnomalyResult(uint32_t leg,
+                              uint32_t valid,
+                              float score,
+                              uint32_t level,
+                              uint32_t feature,
+                              float log_delta);
+void UI_Demo_ClearAnomalyResults(void);
+
 #ifdef __cplusplus
 }
 #endif
