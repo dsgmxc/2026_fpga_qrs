@@ -6,9 +6,9 @@
  *   /tmp/test_calibration
  *
  * 验证的是**数学与存盘**,不是硬件:
- *   1. 已知 Möbius 误差模型 (a·Zd+b)/(c·Zd+1) 下,三种标准能否把 Zd 反演回来;
- *   2. OPEN 为无穷大 / 没有 SHORT / 只有 OPEN(平行杂散校正)/ 只有 SHORT
- *      几种退化情形;
+ *   1. 已知 Möbius 误差模型 (a·Zd+b)/(c·Zd+1) 下,各种标准能否把 Zd 反演回来;
+ *   2. OPEN 为无穷大 / 没有 SHORT / 只有 OPEN(平行杂散校正)/ 只有 SHORT /
+ *      **只有两块标准板(两点仿射,2026-10-27)** / 两块板太接近(必须拒) 几种情形;
  *   3. 存盘 → 重新 Init → 参数与拟合结果是否原样回来。
  *
  * ⚠️ 存盘路径用 CV_CAL_PATH 指到 /tmp —— 这些用例**绝不允许**写到板上的
@@ -70,6 +70,15 @@ static void set_board(void)
     Calibration_SetBoardField(CAL_FIELD_RG, 5.0);
 }
 
+/** 第二块标准板。参数刻意与第一块拉开:两点仿射要求 |Z2−Z1| 足够大。 */
+static void set_board2(double cgs, double cgd, double cds, double rg)
+{
+    Calibration_SetBoardField(CAL_FIELD_CGS2, cgs);
+    Calibration_SetBoardField(CAL_FIELD_CGD2, cgd);
+    Calibration_SetBoardField(CAL_FIELD_CDS2, cds);
+    Calibration_SetBoardField(CAL_FIELD_RG2, rg);
+}
+
 /* 采一轮 16 点(4 腿 × 4 挡),全部由给定误差模型合成。 */
 static void acquire(Zc a, Zc b, Zc c,
                     int open_inf, int have_short, int have_load)
@@ -111,6 +120,36 @@ static void acquire(Zc a, Zc b, Zc c,
                 m = zmodel(a, b, c, (Zc){zl.re, zl.im});
                 Calibration_StoreRaw(CAL_STD_LOAD, leg, g, k_hz, m.re, m.im, 0);
             }
+        }
+    }
+}
+
+/* 🆕 2026-10-27:采两轮 16 点(两块标准板),不含开路/短接。
+ * 两块板的标称阻抗都从当前 `CalBoard` 现算,所以要先 set_board()/set_board2()。 */
+static void acquire_two_loads(Zc a, Zc b, Zc c)
+{
+    uint32_t leg, g;
+
+    for (leg = 0u; leg < 4u; ++leg)
+    {
+        for (g = 0u; g < 4u; ++g)
+        {
+            CalZ z1, z2;
+            Zc m1, m2;
+
+            if (!Calibration_StandardZ(leg, k_hz, &z1) ||
+                !Calibration_StandardZ2(leg, k_hz, &z2))
+            {
+                printf("FAIL two-load standard leg %u undefined\n", leg);
+                g_fail++;
+                continue;
+            }
+            m1 = zmodel(a, b, c, (Zc){z1.re, z1.im});
+            m2 = zmodel(a, b, c, (Zc){z2.re, z2.im});
+            Calibration_StoreRaw(CAL_STD_LOAD, leg, g, k_hz,
+                                 m1.re, m1.im, 0);
+            Calibration_StoreRaw(CAL_STD_LOAD2, leg, g, k_hz,
+                                 m2.re, m2.im, 0);
         }
     }
 }
@@ -403,6 +442,47 @@ int main(void)
         printf("--   %-28s fitted=%u/48 (want 0)\n",
                "short only", fitted);
         expect_true("short only does not fit", fitted == 0u);
+    }
+
+    /* 🆕 2026-10-27:两块标准板,既没有开路也没有短接 —— 两点仿射。
+     * 这是"短接有风险、开路在低挡位不可信"时的主路径。 */
+    {
+        Zc a0 = {1.05, 0.02};
+        Zc b0 = {3.0, -1.0};
+        Zc z0 = {0.0, 0.0};
+        uint32_t fitted;
+        int bad;
+
+        Calibration_ClearAll();
+        set_board();
+        set_board2(470.0, 25.0, 210.0, 12.0);
+        acquire_two_loads(a0, b0, z0);
+        fitted = Calibration_EndStandard(CAL_STD_LOAD2);
+        printf("--   %-28s fitted=%u/48 (want 16)\n",
+               "two loads (no O, no S)", fitted);
+        expect_true("two loads fit the affine path", fitted == 16u);
+        expect_true("two loads: point carries LOAD2 flag",
+                    (Calibration_PointFlags(0u, 1u, 2u) & CAL_F_LOAD2) != 0u);
+        bad = invert_and_compare(a0, b0, z0, "two loads", -1);
+        expect_true("two loads: inversion is exact", bad == 0);
+    }
+
+    /* 两块板标称值只差 1% ⇒ 判据不许拟合:两个方程几乎重合,
+     * 硬解会把噪声放大 100 倍。宁可显示"未标定"。 */
+    {
+        Zc a0 = {1.05, 0.02};
+        Zc b0 = {3.0, -1.0};
+        Zc z0 = {0.0, 0.0};
+        uint32_t fitted;
+
+        Calibration_ClearAll();
+        set_board();
+        set_board2(1010.0, 50.5, 505.0, 5.05);
+        acquire_two_loads(a0, b0, z0);
+        fitted = Calibration_EndStandard(CAL_STD_LOAD2);
+        printf("--   %-28s fitted=%u/48 (want 0)\n",
+               "two loads too close", fitted);
+        expect_true("two loads too close do not fit", fitted == 0u);
     }
 
     case_save_reload();

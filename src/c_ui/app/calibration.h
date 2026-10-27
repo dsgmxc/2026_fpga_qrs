@@ -29,6 +29,9 @@
  *       LOAD  (Z_d = Z_L): c = (M_L − M_s) / (Z_L·(M_o − M_L))
  *                           a = c·M_o
  *
+ *   两个标准板(LOAD1 / LOAD2)是**两对** `(Z_L, M_L)`,本身就能定仿射的
+ *   `a`、`b` —— 见下面的"退化与兜底"。
+ *
  *   反演:
  *
  *       Z_d = (Z_m − b) / (a − c·Z_m)
@@ -41,11 +44,24 @@
  *   · 开路实测接近无穷(`|VL| = 0`)⇒ 记 `CAL_F_OPEN_INF`,用 **SHORT+LOAD**
  *     的仿射模型(`c = 0`,`a = (M_L−M_s)/Z_L`,`b = M_s`);
  *   · 短接没采到 ⇒ 用 **OPEN+LOAD**(`b = 0`,`c = M_L/(Z_L(M_o−M_L))`);
+ *   · **两个已知负载、没有短接**(🆕 2026-10-27)⇒ 用 `LOAD1 + LOAD2` 的
+ *     **两点仿射**:
+ *         a = (M_2 − M_1) / (Z_2 − Z_1),  b = M_1 − a·Z_1,  c = 0
+ *     两个标准板就是两个"已知 Z_d",足够定仿射的两个未知量。
+ *     要求 `|Z_2 − Z_1|` 相对量级够大(见 `CAL_LOAD_SEP_MIN`),否则两个
+ *     方程几乎重合,噪声按 1/间隔 放大 ⇒ 宁可判"不拟合"。
  *   · **只有开路、没有负载** ⇒ 仍可做**仅开路平行杂散校正**
  *     (`a = 1`,`b = 0`,`c = 1/M_o`,即 `Z_d = 1/(1/Z_m − 1/M_o)`),
  *     标记 `CAL_F_FIT_OPEN`。它只减掉与器件并联的夹具杂散,**不识别**
  *     增益 `a` 与串联项 `b` —— 有了标准板后自动升级成上面的路径。
  *   · 加载和开路都没有 ⇒ 该点不拟合、不应用(不猜)。
+ *
+ * 【为什么需要两个负载(2026-10-27 实测)】
+ *   本夹具的 OPEN 在四个挡位上量出来相差 150–1500 倍(低挡位是通道地板,
+ *   不是夹具杂散),被 `CAL_OPEN_MAX_GEAR_SPREAD` 判为不可信;用户又不愿
+ *   短接(D-G-S 上电流只由源侧限流). ⇒ 只剩一个标准板时只有一个方程,
+ *   仿射的 `a`、`b` 两个未知量定不下来。两个已知负载给两个方程,
+ *   于是**不需要开路也不需要短接**就能标定。
  *
  * 【口径(必须与实测一起写进报告)】
  *   · 校准是 **(回路, 挡位, 激励频率)** 各一套;换频率必须重采;
@@ -72,15 +88,17 @@ extern "C" {
 #define CAL_FREQ_COUNT  3u   /* 0 10 kHz / 1 100 kHz / 2 1 MHz */
 #define CAL_POINT_COUNT (CAL_LEG_COUNT * CAL_GEAR_COUNT * CAL_FREQ_COUNT)
 
-/** 三个标准。数值与采集顺序无关,只用来选"这次采的是哪一种"。 */
+/** 四个标准。数值与采集顺序无关,只用来选"这次采的是哪一种"。 */
 typedef enum
 {
     CAL_STD_OPEN = 0,
     CAL_STD_SHORT = 1,
-    CAL_STD_LOAD = 2
+    CAL_STD_LOAD = 2,      /* 标准板 1 */
+    CAL_STD_LOAD2 = 3      /* 标准板 2(🆕 2026-10-27) */
 } CalStandard;
 
-/** 标准板参数在界面上的字段号(@ref Calibration_SetBoardField)。 */
+/** 标准板参数在界面上的字段号(@ref Calibration_SetBoardField)。
+ *  0..3 = 标准板 1,6..9 = 标准板 2 —— 两组数值**完全独立**。 */
 typedef enum
 {
     CAL_FIELD_CGS = 0,     /* pF */
@@ -89,18 +107,27 @@ typedef enum
     CAL_FIELD_RG  = 3,     /* Ω  */
     CAL_FIELD_RATING = 4,  /* V  */
     CAL_FIELD_BIAS   = 5,  /* V  */
-    CAL_FIELD_COUNT  = 6
+    CAL_FIELD_CGS2 = 6,    /* pF */
+    CAL_FIELD_CGD2 = 7,    /* pF */
+    CAL_FIELD_CDS2 = 8,    /* pF */
+    CAL_FIELD_RG2  = 9,    /* Ω  */
+    CAL_FIELD_COUNT  = 10
 } CalField;
 
-/** 标准板定义 + 采集偏压。默认值见 `calibration.c`。 */
+/** 标准板定义 + 采集偏压。默认值见 `calibration.c`。
+ *  ⚠️ 成员顺序即存盘布局(见 `CalFileHeader`),改顺序必须改 `CAL_VERSION`。 */
 typedef struct
 {
     double cgs_pf;
     double cgd_pf;
     double cds_pf;
     double rg_ohm;
+    double cgs2_pf;    /* 标准板 2(🆕) */
+    double cgd2_pf;
+    double cds2_pf;
+    double rg2_ohm;
     double rating_v;   /* 标准板耐压上限(只用来挡住超限的采集) */
-    double bias_v;     /* 三种标准共用的采集偏压 */
+    double bias_v;     /* 四种标准共用的采集偏压 */
 } CalBoard;
 
 /** 复数(不引入 <complex.h>,便于和 LVGL / 交叉编译共存)。 */
@@ -110,15 +137,18 @@ typedef struct
     double im;
 } CalZ;
 
-/** 每个点的状态位(@ref Calibration_PointFlags)。 */
-#define CAL_F_OPEN       0x01u
-#define CAL_F_SHORT      0x02u
-#define CAL_F_LOAD       0x04u
-#define CAL_F_FIT        0x08u
-#define CAL_F_OPEN_INF   0x10u   /* 开路实测 |VL| = 0 ⇒ 按无穷处理 */
-#define CAL_F_WEAK_OPEN  0x20u   /* 开路信号低于噪声门槛 */
-#define CAL_F_WEAK_LOAD  0x40u   /* 标准板信号低于噪声门槛 */
-#define CAL_F_FIT_OPEN   0x80u   /* 仅开路平行杂散校正(a=1,b=0,c=1/M_o) */
+/** 每个点的状态位(@ref Calibration_PointFlags)。🆕 2026-10-27 起是 16 位 ——
+ *  第 8 位给了 `CAL_F_LOAD2`,原来的 8 个位一个没动。 */
+#define CAL_F_OPEN       0x001u
+#define CAL_F_SHORT      0x002u
+#define CAL_F_LOAD       0x004u  /* 标准板 1 已采 */
+#define CAL_F_FIT        0x008u
+#define CAL_F_OPEN_INF   0x010u  /* 开路实测 |VL| = 0 ⇒ 按无穷处理 */
+#define CAL_F_WEAK_OPEN  0x020u  /* 开路信号低于噪声门槛 */
+#define CAL_F_WEAK_LOAD  0x040u  /* 标准板 1 信号低于噪声门槛 */
+#define CAL_F_FIT_OPEN   0x080u  /* 仅开路平行杂散校正(a=1,b=0,c=1/M_o) */
+#define CAL_F_LOAD2      0x100u  /* 标准板 2 已采(🆕) */
+#define CAL_F_WEAK_LOAD2 0x200u  /* 标准板 2 信号低于噪声门槛(🆕) */
 
 /**
  * @brief 上电调用一次:从 `/home/xilinx/cv_calibration.dat` 读入。
@@ -139,14 +169,20 @@ void Calibration_GetBoard(CalBoard *out);
 /** @brief 改一个字段。会夹到合法范围,并**重新拟合 + 存盘**。 */
 bool Calibration_SetBoardField(CalField field, double value);
 
-/** @brief 标准板参数是否足够标定 @p leg(该腿的负载阻抗有限且非零)。 */
+/** @brief 标准板 1 的参数是否足够标定 @p leg(负载阻抗有限且非零)。 */
 bool Calibration_LegDefined(uint32_t leg);
 
+/** @brief 标准板 2 的参数是否足够标定 @p leg(🆕)。 */
+bool Calibration_LegDefined2(uint32_t leg);
+
 /**
- * @brief 标准板在 @p leg 上、@p hz 下的标称阻抗。
+ * @brief 标准板 1 在 @p leg 上、@p hz 下的标称阻抗。
  * @return false = 该腿参数未定义(例如 Cgd = 0),不能当负载点用
  */
 bool Calibration_StandardZ(uint32_t leg, uint32_t hz, CalZ *out);
+
+/** @brief 标准板 2 在 @p leg 上、@p hz 下的标称阻抗(🆕)。 */
+bool Calibration_StandardZ2(uint32_t leg, uint32_t hz, CalZ *out);
 
 /* ---- 采集 ------------------------------------------------------------ */
 
@@ -174,9 +210,9 @@ uint32_t Calibration_EndStandard(CalStandard standard);
 
 /* ---- 查询 ------------------------------------------------------------ */
 
-/** @brief 该点的状态位;没有该点返回 0。 */
-uint8_t Calibration_PointFlags(uint32_t leg, uint32_t gear_index,
-                               uint32_t freq_index);
+/** @brief 该点的状态位;没有该点返回 0。(🆕 16 位) */
+uint16_t Calibration_PointFlags(uint32_t leg, uint32_t gear_index,
+                                uint32_t freq_index);
 
 /** @brief 某个频率下已拟合的点数(0..16)。 */
 uint32_t Calibration_FittedCount(uint32_t freq_index);

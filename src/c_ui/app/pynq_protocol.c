@@ -279,7 +279,10 @@ static uint32_t s_cal_ok;
 static uint32_t s_cal_bad;
 static uint32_t s_cal_due_ms;
 static uint32_t s_cal_leg_started;      /* 本腿继电器是否已切到目标          */
-static char     s_cal_text[80];         /* 给界面的一行状态                  */
+/* 80 字节装不下中文:每个汉字 3 字节,进度条那行最长的一句约 200 字节
+ * (2026-10-27 加两负载提示时 -Wformat-truncation 当场报出来)。
+ * UI 的进度标签宽 960 px,256 字节按 20 号字算约 800 px,放得下。 */
+static char     s_cal_text[256];        /* 给界面的一行状态                  */
 
 /* 🔴 扫压自动换挡的**总开关**(与上面那个粘滞位不同:这个是用户意图,那是失败状态)。
  *    默认关 —— 理由与开关文件路径见 `SWEEP_AUTO_GEAR_FLAG` 的注释。
@@ -1678,10 +1681,11 @@ static const uint32_t s_cal_gear_onehot[CAL_GEAR_COUNT] =
 
 static const char *cal_std_name(uint32_t std)
 {
-    static const char *const names[3] =
-        {"OPEN(拔掉被测件)", "SHORT(D-G-S 短接)", "LOAD(标准板)"};
+    static const char *const names[4] =
+        {"OPEN(拔掉被测件)", "SHORT(D-G-S 短接)",
+         "LOAD1(标准板1)", "LOAD2(标准板2)"};
 
-    return (std < 3u) ? names[std] : "?";
+    return (std < 4u) ? names[std] : "?";
 }
 
 #define CAL_POINTS_PER_STD (CAL_LEG_COUNT * CAL_GEAR_COUNT)
@@ -1711,10 +1715,22 @@ static void calibration_finish(void)
         Calibration_FittedCount((uint32_t)fi) : 0u;
 
     s_cal_active = 0u;
-    (void)snprintf(s_cal_text, sizeof(s_cal_text),
-                   "%s 完成:%u 点成功 / %u 点失败;本频率拟合 %u/16",
-                   cal_std_name(s_cal_std), (unsigned)s_cal_ok,
-                   (unsigned)s_cal_bad, (unsigned)this_fitted);
+    if ((this_fitted == 0u) &&
+        ((s_cal_std == (uint32_t)CAL_STD_LOAD) ||
+         (s_cal_std == (uint32_t)CAL_STD_LOAD2))) {
+        /* 只有一块标准板时一个方程解不出两个未知量。别让用户以为"采集失败" ——
+         * 采集本身成功了,缺的是**另一块**标准板(或开路+短接)。 */
+        (void)snprintf(s_cal_text, sizeof(s_cal_text),
+                       "%s 完成:%u 点成功 / %u 点失败;拟合 0/16 —— "
+                       "再采另一块标准板即可标定",
+                       cal_std_name(s_cal_std), (unsigned)s_cal_ok,
+                       (unsigned)s_cal_bad);
+    } else {
+        (void)snprintf(s_cal_text, sizeof(s_cal_text),
+                       "%s 完成:%u 点成功 / %u 点失败;本频率拟合 %u/16",
+                       cal_std_name(s_cal_std), (unsigned)s_cal_ok,
+                       (unsigned)s_cal_bad, (unsigned)this_fitted);
+    }
     UI_Demo_CalibrationProgress(s_cal_text, s_cal_done,
                                 (uint32_t)CAL_POINTS_PER_STD);
     UI_Demo_RefreshCalibrationViews();
@@ -2482,7 +2498,7 @@ bool DisplayProtocol_RequestSweepStatus(void)
 }
 
 /**
- * @brief 校准页的三个采集按钮(🆕 2026-10-24)。
+ * @brief 校准页的四个采集按钮(2026-10-24 立 / 2026-10-27 加第二个负载)。
  *
  * 采集本体在 `calibration_process()`(由 `Process()` 每圈推进),这里只做
  * **准入判断 + 起跑**。拒绝的四种情形都打印了**该怎么办**,不是只说"不行":
@@ -2490,9 +2506,9 @@ bool DisplayProtocol_RequestSweepStatus(void)
  *   ① 已有采集/扫压/在途单点 —— 三者与校准抢同一套 0x18 / 0x1C;
  *   ② 激励频率不在 10 k / 100 k / 1 M —— 校准表按这三个频率分档;
  *   ③ 校准偏压 > 标准板耐压 —— 用户填的耐压就是用来挡这一下的;
- *   ④ LOAD 但标准板参数全为 0 —— 没有 Z_L 就没有第三个方程,不猜。
+ *   ④ LOAD/LOAD2 但**那一组**标准板参数全为 0 —— 没有 Z_L 就没有方程,不猜。
  *
- * @param standard 0=OPEN 1=SHORT 2=LOAD(见 `CalStandard`)
+ * @param standard 0=OPEN 1=SHORT 2=LOAD1 3=LOAD2(见 `CalStandard`)
  * @return true = 已起跑(实际结果看日志/进度,不在这里保证 16 点全成)
  */
 bool DisplayProtocol_RequestCalibration(uint32_t standard)
@@ -2503,8 +2519,9 @@ bool DisplayProtocol_RequestCalibration(uint32_t standard)
 
     s_cmd_total++;
 
-    if (standard > (uint32_t)CAL_STD_LOAD) {
-        printf("[cal] ⛔ 标准编号 %u 越界(只有 0=OPEN / 1=SHORT / 2=LOAD)\n",
+    if (standard > (uint32_t)CAL_STD_LOAD2) {
+        printf("[cal] ⛔ 标准编号 %u 越界"
+               "(只有 0=OPEN / 1=SHORT / 2=LOAD1 / 3=LOAD2)\n",
                (unsigned)standard);
         return false;
     }
@@ -2536,18 +2553,22 @@ bool DisplayProtocol_RequestCalibration(uint32_t standard)
                board.bias_v, board.rating_v);
         return false;
     }
-    if (standard == (uint32_t)CAL_STD_LOAD) {
-        bool any = false;
+    if ((standard == (uint32_t)CAL_STD_LOAD) ||
+        (standard == (uint32_t)CAL_STD_LOAD2)) {
+        bool  second = (standard == (uint32_t)CAL_STD_LOAD2);
+        bool  any    = false;
 
         for (leg = 0u; leg < CAL_LEG_COUNT; ++leg) {
-            if (Calibration_LegDefined(leg)) {
+            if (second ? Calibration_LegDefined2(leg)
+                       : Calibration_LegDefined(leg)) {
                 any = true;
                 break;
             }
         }
         if (!any) {
-            printf("[cal] ⛔ 标准板参数全为 0 —— 先在「校准」页填 Cgs/Cgd/Cds/Rg。"
-                   "(四个全 0 时没有任何一条腿有已知负载,第三个方程不成立)\n");
+            printf("[cal] ⛔ 标准板%u 的参数全为 0 —— 先在「校准」页填它的 "
+                   "Cgs/Cgd/Cds/Rg。(四个全 0 时没有任何一条腿有已知负载,"
+                   "这个方程不成立)\n", second ? 2u : 1u);
             return false;
         }
     }

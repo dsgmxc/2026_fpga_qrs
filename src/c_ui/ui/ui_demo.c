@@ -199,7 +199,7 @@ static lv_obj_t *g_keypad_value_label;
 static lv_obj_t *g_keypad_note_label;
 /* 🆕 2026-10-24 校准页(第 6 页)。全部在 `UI_ShowCalibration()` 里建,
  * 没进过校准页时保持 NULL —— 协议层每采一点都会调进度函数,必须判空。 */
-#define UI_CAL_FIELD_COUNT  6u
+#define UI_CAL_FIELD_COUNT  10u   /* 标准板 1 四项 + 耐压 + 偏压 + 标准板 2 四项 */
 static lv_obj_t *g_cal_field_buttons[UI_CAL_FIELD_COUNT];
 static lv_obj_t *g_cal_enable_button;
 static lv_obj_t *g_cal_progress_label;
@@ -3149,7 +3149,8 @@ static void UI_SimpleActionEvent(lv_event_t *event)
     {
         command_queued = DisplayProtocol_RequestSweepStop();
     }
-    /* 🆕 2026-10-24:校准页(330 开关 / 331 清空 / 340-342 三种标准采集)。 */
+    /* 校准页:330 开关 / 331 清空 / 340-343 四种标准采集
+     * (🆕 2026-10-27 加 343 = 标准板 2)。 */
     else if (action->action_code == 330u)
     {
         Calibration_SetEnabled(!Calibration_IsEnabled());
@@ -3165,7 +3166,7 @@ static void UI_SimpleActionEvent(lv_event_t *event)
         printf("[cal] 已清空全部校准数据与拟合结果\n");
     }
     else if ((action->action_code >= 340u) &&
-             (action->action_code <= 342u))
+             (action->action_code <= 343u))
     {
         if (DisplayProtocol_CalibrationBusy())
         {
@@ -3173,14 +3174,21 @@ static void UI_SimpleActionEvent(lv_event_t *event)
             command_queued = false;
             override_status = "状态:校准采集中,等这一轮跑完";
         }
-        else if ((action->action_code == 342u) &&
-                 !Calibration_LegDefined(0u) &&
-                 !Calibration_LegDefined(1u) &&
-                 !Calibration_LegDefined(2u) &&
-                 !Calibration_LegDefined(3u))
+        else if (((action->action_code == 342u) &&
+                  !Calibration_LegDefined(0u) &&
+                  !Calibration_LegDefined(1u) &&
+                  !Calibration_LegDefined(2u) &&
+                  !Calibration_LegDefined(3u)) ||
+                 ((action->action_code == 343u) &&
+                  !Calibration_LegDefined2(0u) &&
+                  !Calibration_LegDefined2(1u) &&
+                  !Calibration_LegDefined2(2u) &&
+                  !Calibration_LegDefined2(3u)))
         {
             command_queued = false;
-            override_status = "状态:先填标准板 Cgs/Cgd/Cds/Rg 再采负载";
+            override_status = (action->action_code == 343u) ?
+                "状态:先填标准板 2 的 Cgs2/Cgd2/Cds2/Rg2 再采" :
+                "状态:先填标准板 1 的 Cgs/Cgd/Cds/Rg 再采";
         }
         else
         {
@@ -4051,6 +4059,10 @@ static const char *UI_CalFieldTitle(CalField field)
         case CAL_FIELD_RG:     return "设置 Rg";
         case CAL_FIELD_RATING: return "设置标准板耐压";
         case CAL_FIELD_BIAS:   return "设置校准偏压";
+        case CAL_FIELD_CGS2:   return "设置标准板2 Cgs";
+        case CAL_FIELD_CGD2:   return "设置标准板2 Cgd";
+        case CAL_FIELD_CDS2:   return "设置标准板2 Cds";
+        case CAL_FIELD_RG2:    return "设置标准板2 Rg";
         default:               return "设置参数";
     }
 }
@@ -4061,8 +4073,12 @@ static const char *UI_CalFieldUnit(CalField field)
     {
         case CAL_FIELD_CGS:
         case CAL_FIELD_CGD:
-        case CAL_FIELD_CDS:  return "pF";
-        case CAL_FIELD_RG:   return "Ω";
+        case CAL_FIELD_CDS:
+        case CAL_FIELD_CGS2:
+        case CAL_FIELD_CGD2:
+        case CAL_FIELD_CDS2: return "pF";
+        case CAL_FIELD_RG:
+        case CAL_FIELD_RG2:  return "Ω";
         default:             return "V";
     }
 }
@@ -4077,6 +4093,10 @@ static const char *UI_CalFieldName(CalField field)
         case CAL_FIELD_RG:     return "Rg";
         case CAL_FIELD_RATING: return "耐压";
         case CAL_FIELD_BIAS:   return "偏压";
+        case CAL_FIELD_CGS2:   return "Cgs2";
+        case CAL_FIELD_CGD2:   return "Cgd2";
+        case CAL_FIELD_CDS2:   return "Cds2";
+        case CAL_FIELD_RG2:    return "Rg2";
         default:               return "?";
     }
 }
@@ -4093,10 +4113,14 @@ static void UI_CalFieldNote(CalField field, char *out, size_t capacity)
         case CAL_FIELD_CGS:
         case CAL_FIELD_CGD:
         case CAL_FIELD_CDS:
+        case CAL_FIELD_CGS2:
+        case CAL_FIELD_CGD2:
+        case CAL_FIELD_CDS2:
             lv_snprintf(out, capacity, "范围 0 - 1000000 pF(按数据手册填)");
             break;
 
         case CAL_FIELD_RG:
+        case CAL_FIELD_RG2:
             lv_snprintf(out, capacity, "范围 0 - 1000000 Ω(栅极电阻)");
             break;
 
@@ -4179,6 +4203,10 @@ static void UI_CalFormatNumber(char *out, size_t capacity, double value,
     }
 }
 
+/** 字段按钮上的文字。⚠️ 小数位是 **2** 而不是 3:
+ *  按钮宽 161,标签可用宽度 = 141;实测 "1000000.000 pF" 要 144 px(会折行
+ *  被裁掉),"1000000.00 pF" 只要 133 px。存进去的值不动,只是显示少一位 ——
+ *  键盘里仍显示 3 位。 */
 static void UI_CalFormatField(CalField field, char *out, size_t capacity)
 {
     CalBoard board;
@@ -4188,24 +4216,40 @@ static void UI_CalFormatField(CalField field, char *out, size_t capacity)
     switch (field)
     {
         case CAL_FIELD_CGS:
-            UI_CalFormatNumber(number, sizeof(number), board.cgs_pf, 3u);
+            UI_CalFormatNumber(number, sizeof(number), board.cgs_pf, 2u);
             lv_snprintf(out, capacity, "Cgs\n%s pF", number);
             break;
         case CAL_FIELD_CGD:
-            UI_CalFormatNumber(number, sizeof(number), board.cgd_pf, 3u);
+            UI_CalFormatNumber(number, sizeof(number), board.cgd_pf, 2u);
             lv_snprintf(out, capacity, "Cgd\n%s pF", number);
             break;
         case CAL_FIELD_CDS:
-            UI_CalFormatNumber(number, sizeof(number), board.cds_pf, 3u);
+            UI_CalFormatNumber(number, sizeof(number), board.cds_pf, 2u);
             lv_snprintf(out, capacity, "Cds\n%s pF", number);
             break;
         case CAL_FIELD_RG:
-            UI_CalFormatNumber(number, sizeof(number), board.rg_ohm, 3u);
+            UI_CalFormatNumber(number, sizeof(number), board.rg_ohm, 2u);
             lv_snprintf(out, capacity, "Rg\n%s Ω", number);
             break;
         case CAL_FIELD_RATING:
             UI_CalFormatNumber(number, sizeof(number), board.rating_v, 1u);
             lv_snprintf(out, capacity, "耐压\n%s V", number);
+            break;
+        case CAL_FIELD_CGS2:
+            UI_CalFormatNumber(number, sizeof(number), board.cgs2_pf, 2u);
+            lv_snprintf(out, capacity, "Cgs2\n%s pF", number);
+            break;
+        case CAL_FIELD_CGD2:
+            UI_CalFormatNumber(number, sizeof(number), board.cgd2_pf, 2u);
+            lv_snprintf(out, capacity, "Cgd2\n%s pF", number);
+            break;
+        case CAL_FIELD_CDS2:
+            UI_CalFormatNumber(number, sizeof(number), board.cds2_pf, 2u);
+            lv_snprintf(out, capacity, "Cds2\n%s pF", number);
+            break;
+        case CAL_FIELD_RG2:
+            UI_CalFormatNumber(number, sizeof(number), board.rg2_ohm, 2u);
+            lv_snprintf(out, capacity, "Rg2\n%s Ω", number);
             break;
         default:
             UI_CalFormatNumber(number, sizeof(number), board.bias_v, 1u);
@@ -4258,8 +4302,8 @@ static void UI_CalRefreshFields(void)
     UI_CalRefreshEnableButton();
 }
 
-/** 一个覆盖格:O/S/L = 已采到的标准,* = 已拟合。 */
-static void UI_CalFormatCell(uint8_t flags, char *out, size_t capacity)
+/** 一个覆盖格:O/S/L/2 = 已采到的标准(2 = 标准板 2),* = 已拟合。 */
+static void UI_CalFormatCell(uint16_t flags, char *out, size_t capacity)
 {
     char text[8];
     uint32_t length = 0u;
@@ -4276,6 +4320,10 @@ static void UI_CalFormatCell(uint8_t flags, char *out, size_t capacity)
     {
         text[length++] = 'L';
     }
+    if ((flags & CAL_F_LOAD2) != 0u)
+    {
+        text[length++] = '2';
+    }
     if (length == 0u)
     {
         text[length++] = '-';
@@ -4287,17 +4335,6 @@ static void UI_CalFormatCell(uint8_t flags, char *out, size_t capacity)
     text[length] = '\0';
 
     lv_snprintf(out, capacity, "%s", text);
-}
-
-static const char *UI_CalFreqText(uint32_t hz)
-{
-    switch (hz)
-    {
-        case 10000u:   return "10 kHz";
-        case 100000u:  return "100 kHz";
-        case 1000000u: return "1 MHz";
-        default:       return "不支持";
-    }
 }
 
 static void UI_CalRefreshCoverage(void)
@@ -4319,11 +4356,12 @@ static void UI_CalRefreshCoverage(void)
     {
         for (gear = 0u; gear < 4u; ++gear)
         {
-            uint8_t flags = (freq_index >= 0) ?
+            uint16_t flags = (freq_index >= 0) ?
                 Calibration_PointFlags(leg, gear, (uint32_t)freq_index) : 0u;
             uint32_t color = ((flags & CAL_F_FIT) != 0u) ? UI_COLOR_GREEN :
                              (((flags & (CAL_F_OPEN | CAL_F_OPEN_INF |
-                                          CAL_F_SHORT | CAL_F_LOAD)) != 0u) ?
+                                          CAL_F_SHORT | CAL_F_LOAD |
+                                          CAL_F_LOAD2)) != 0u) ?
                               UI_COLOR_ORANGE : UI_COLOR_TEXT_MUTED);
 
             UI_CalFormatCell(flags, text, sizeof(text));
@@ -4344,13 +4382,16 @@ static void UI_CalRefreshCoverage(void)
         if (freq_index < 0)
         {
             lv_label_set_text(g_cal_coverage_label,
-                              "该激励频率不支持校准(只有 10k/100k/1M)");
+                              "该频率不在校准表");
         }
         else
         {
+            /* ⚠️ 右面板收窄后标签只有 260 px 宽;实测
+             *    "拟合 16/16 · 1 MHz · 全部 48/48" = 311 px(会折行),
+             *    去掉频率那段 = 224 px。频率在常驻状态行里本来就有。 */
             lv_label_set_text_fmt(g_cal_coverage_label,
-                                  "拟合 %u/16 · %s · 全部 %u/48",
-                                  (unsigned)fitted, UI_CalFreqText(hz),
+                                  "拟合 %u/16 · 全部 %u/48",
+                                  (unsigned)fitted,
                                   (unsigned)Calibration_TotalFitted());
         }
     }
@@ -4585,10 +4626,14 @@ static void UI_CalKeypadConfirm(void)
         case CAL_FIELD_CGS:
         case CAL_FIELD_CGD:
         case CAL_FIELD_CDS:
+        case CAL_FIELD_CGS2:
+        case CAL_FIELD_CGD2:
+        case CAL_FIELD_CDS2:
             minimum = 0.0;
             maximum = 1000000.0;
             break;
         case CAL_FIELD_RG:
+        case CAL_FIELD_RG2:
             minimum = 0.0;
             maximum = 1000000.0;
             break;
@@ -4692,6 +4737,18 @@ static void UI_CalFieldEvent(lv_event_t *event)
             break;
         case CAL_FIELD_RATING:
             UI_CalFormatNumber(value, sizeof(value), board.rating_v, 1u);
+            break;
+        case CAL_FIELD_CGS2:
+            UI_CalFormatNumber(value, sizeof(value), board.cgs2_pf, 3u);
+            break;
+        case CAL_FIELD_CGD2:
+            UI_CalFormatNumber(value, sizeof(value), board.cgd2_pf, 3u);
+            break;
+        case CAL_FIELD_CDS2:
+            UI_CalFormatNumber(value, sizeof(value), board.cds2_pf, 3u);
+            break;
+        case CAL_FIELD_RG2:
+            UI_CalFormatNumber(value, sizeof(value), board.rg2_ohm, 3u);
             break;
         default:
             UI_CalFormatNumber(value, sizeof(value), board.bias_v, 1u);
@@ -5093,11 +5150,11 @@ static void UI_BiasOpenEvent(lv_event_t *event)
  * 校准页(UI_PAGE_CALIBRATION,🆕 2026-10-24)
  *
  * 页面只负责**输入与展示**,采集编排在 `app/pynq_protocol.c` 的
- * `calibration_process()` 里(4 腿 × 4 挡,逐拍采)。这里三个按钮只发请求。
+ * `calibration_process()` 里(4 腿 × 4 挡,逐拍采)。这里四个按钮只发请求。
  *
  * 布局(1024×600,顶栏 52):
- *   62..274  左:标准板 6 个字段(点数值 → 数字键盘) 右:4×4 覆盖表
- *   284..372 三个采集按钮(开路 / 短接 / 标准板)
+ *   62..274  左:10 个字段(板 1 四项 / 板 2 四项 / 耐压 / 偏压) 右:4×4 覆盖表
+ *   284..372 四个采集按钮(开路 / 短接 / 负载 1 / 负载 2)
  *   382..466 进度条 + 当前状态
  *   478..532 校准开关 / 清空 / 数据文件说明
  *   540..568 一行操作口诀
@@ -5109,7 +5166,8 @@ static void UI_ShowCalibration(void)
     {
         {340u, "状态:开始采集开路(拔掉被测件)"},
         {341u, "状态:开始采集短接(D-G-S 接 0 Ω)"},
-        {342u, "状态:开始采集标准板(D-G-S 接标准板)"}
+        {342u, "状态:开始采集标准板 1(D-G-S 接标准板 1)"},
+        {343u, "状态:开始采集标准板 2(D-G-S 接标准板 2)"}
     };
     static const UI_Action toggle_action = {330u, "状态:校准开关已切换"};
     static const UI_Action clear_action  = {331u, "状态:校准数据已清空"};
@@ -5117,11 +5175,12 @@ static void UI_ShowCalibration(void)
     {
         "采集开路\n拔掉被测件",
         "采集短接\nD-G-S 接 0 Ω",
-        "采集标准板\nD-G-S 接标准板"
+        "采集负载 1\nD-G-S 接标准板 1",
+        "采集负载 2\nD-G-S 接标准板 2"
     };
     static const uint32_t acquire_color[] =
     {
-        UI_COLOR_CYAN, UI_COLOR_ORANGE, UI_COLOR_BLUE
+        UI_COLOR_CYAN, UI_COLOR_ORANGE, UI_COLOR_BLUE, UI_COLOR_GREEN
     };
     static const char *const leg_names[] = {"CISS", "COSS", "CRSS", "RG"};
     static const char *const gear_names[] = {"A", "B", "C", "D"};
@@ -5140,21 +5199,62 @@ static void UI_ShowCalibration(void)
     }
 
     /* ---- 左:标准板参数 -------------------------------------------------- */
-    panel = UI_CreatePanel(screen, UI_PAGE_MARGIN, 62, 576, 212,
+    /* 左侧从 576 加宽到 700:一格 161 px 才装得下两行
+     * "Cgs" + "1000.000 pF"(label 宽度是按钮宽 − 20)。 */
+    panel = UI_CreatePanel(screen, UI_PAGE_MARGIN, 62, 700, 212,
                            UI_COLOR_SURFACE_LIGHT, 14);
-    UI_CreateText(panel, "标准板参数(点数值修改 · 自动存盘)",
+    UI_CreateText(panel, "标准板参数(上排板 1 · 中排板 2 · 点数值修改)",
                   &ui_font_cn_20, UI_COLOR_TEXT_MUTED,
-                  16, 10, 544, 26, LV_TEXT_ALIGN_LEFT);
+                  16, 10, 668, 26, LV_TEXT_ALIGN_LEFT);
+    /* 10 个字段排成三行:
+     *   row 0 = 标准板 1 的 Cgs/Cgd/Cds/Rg
+     *   row 1 = 标准板 2 的 Cgs/Cgd/Cds/Rg
+     *   row 2 = 耐压 / 偏压(两组共用,所以放在最后、两颗宽的)
+     * 字段号到格子的映射写在循环里 —— 枚举顺序是"板 1 → 耐压/偏压 → 板 2",
+     * 与视觉顺序**不同**,别按 index 直接取模。 */
     for (index = 0u; index < UI_CAL_FIELD_COUNT; ++index)
     {
-        lv_coord_t column = (lv_coord_t)(index % 3u);
-        lv_coord_t row = (lv_coord_t)(index / 3u);
-        lv_obj_t *button = UI_CreateButton(
+        lv_coord_t column;
+        lv_coord_t row;
+        lv_coord_t x;
+        lv_coord_t y;
+        lv_coord_t w;
+        lv_obj_t *button;
+
+        if (index < 4u)               /* 0..3  板 1 */
+        {
+            column = (lv_coord_t)index;
+            row = 0;
+        }
+        else if (index >= 6u)         /* 6..9  板 2 */
+        {
+            column = (lv_coord_t)(index - 6u);
+            row = 1;
+        }
+        else                          /* 4,5   耐压 / 偏压 */
+        {
+            column = (lv_coord_t)(index - 4u);
+            row = 2;
+        }
+
+        if (row < 2)
+        {
+            x = 16 + column * 169;
+            w = 161;
+        }
+        else
+        {
+            x = 16 + column * 340;
+            w = 328;
+        }
+        /* 行高 54:两行 20 号字 = 2 × line_height 24 = 48,留 6 px 余量;
+         * 行距 56 让三行都落在 40..206 里(面板高 212)。 */
+        y = 40 + row * 56;
+
+        button = UI_CreateButton(
             panel, "",
             UI_COLOR_BACKGROUND,
-            16 + column * 186,
-            50 + row * 70,
-            172, 60,
+            x, y, w, 54,
             UI_CalFieldEvent,
             (void *)(uintptr_t)index);
 
@@ -5166,16 +5266,17 @@ static void UI_ShowCalibration(void)
     }
 
     /* ---- 右:4×4 覆盖表 ------------------------------------------------- */
-    panel = UI_CreatePanel(screen, 612, 62, 388, 212,
+    /* 右侧收窄到 280(左面板加宽的代价):四列各 50 px,起点 52。 */
+    panel = UI_CreatePanel(screen, 728, 62, 280, 212,
                            UI_COLOR_SURFACE_LIGHT, 14);
     UI_CreateText(panel, "覆盖(按当前激励频率)",
                   &ui_font_cn_20, UI_COLOR_TEXT_MUTED,
-                  16, 10, 356, 26, LV_TEXT_ALIGN_LEFT);
+                  10, 10, 260, 26, LV_TEXT_ALIGN_LEFT);
     for (index = 0u; index < 4u; ++index)
     {
         UI_CreateText(panel, gear_names[index],
                       &ui_font_cn_20, UI_COLOR_TEXT_MUTED,
-                      78 + (lv_coord_t)index * 72, 40, 66, 24,
+                      52 + (lv_coord_t)index * 54, 40, 50, 24,
                       LV_TEXT_ALIGN_CENTER);
     }
     for (index = 0u; index < 4u; ++index)
@@ -5184,33 +5285,33 @@ static void UI_ShowCalibration(void)
 
         UI_CreateText(panel, leg_names[index],
                       &ui_font_cn_20, UI_COLOR_TEXT_MUTED,
-                      16, y, 56, 28, LV_TEXT_ALIGN_LEFT);
+                      8, y, 42, 28, LV_TEXT_ALIGN_LEFT);
         for (uint32_t gear = 0u; gear < 4u; ++gear)
         {
             lv_obj_t *cell = UI_CreateText(
                 panel, "-", &ui_font_cn_20, UI_COLOR_TEXT_MUTED,
-                78 + (lv_coord_t)gear * 72, y, 66, 28,
+                52 + (lv_coord_t)gear * 54, y, 50, 28,
                 LV_TEXT_ALIGN_CENTER);
 
             g_cal_cells[index][gear] = cell;
         }
     }
     label = UI_CreateText(panel, "", &ui_font_cn_20, UI_COLOR_TEXT_MUTED,
-                          16, 184, 356, 24, LV_TEXT_ALIGN_LEFT);
+                          10, 184, 260, 24, LV_TEXT_ALIGN_LEFT);
     g_cal_coverage_label = label;
 
-    /* ---- 三个采集按钮 --------------------------------------------------- */
+    /* ---- 四个采集按钮 --------------------------------------------------- */
     UI_CreateText(screen,
-                  "采集标准:在校准偏压下把三条腿的四个挡位各采一次(约 2 秒)",
+                  "采集标准:在校准偏压下把四条腿的四个挡位各采一次(约 2 秒)",
                   &ui_font_cn_20, UI_COLOR_TEXT_MUTED,
                   UI_PAGE_MARGIN, 284, width, 26, LV_TEXT_ALIGN_LEFT);
-    for (index = 0u; index < 3u; ++index)
+    for (index = 0u; index < 4u; ++index)
     {
         UI_CreateButton(screen,
                         acquire_text[index],
                         acquire_color[index],
-                        UI_PAGE_MARGIN + (lv_coord_t)index * 331,
-                        312, 314, 60,
+                        UI_PAGE_MARGIN + (lv_coord_t)index * 250,
+                        312, 242, 60,
                         UI_SimpleActionEvent,
                         (void *)&acquire_actions[index]);
     }
@@ -5251,7 +5352,7 @@ static void UI_ShowCalibration(void)
                   LV_TEXT_ALIGN_LEFT);
 
     UI_CreateText(screen,
-                  "空载 = 直接拔掉被测件 · 短接 = 0 Ω 接 D-G-S · 负载 = 标准板接 D-G-S",
+                  "空载 = 拔掉被测件 · 短接 = 0 Ω 接 D-G-S · 负载 1/2 = 标准板 1/2 接 D-G-S(两个都采过即可标定)",
                   &ui_font_cn_20, UI_COLOR_TEXT_MUTED,
                   UI_PAGE_MARGIN, 540, width, 28, LV_TEXT_ALIGN_LEFT);
 

@@ -29,7 +29,10 @@
 
 #define CAL_PATH        "/home/xilinx/cv_calibration.dat"
 #define CAL_MAGIC       0x5143414Cu   /* "QCAL" */
-#define CAL_VERSION     1u
+/* v2(2026-10-27):标准板 2 的四个字段 + 每点的 flags 扩到 16 位 + load2 实测。
+ * v1 文件会被拒(版本号不符),旧校准数据需要重采 —— 这是有意的:
+ * 布局变了却"尽量兼容"比直接拒更危险。 */
+#define CAL_VERSION     2u
 
 /* 开路实测与负载实测至少差这么多倍,才把开路当作有效标准;
  * 否则开路那点信号已接近噪声,拟合出的 c 会把噪声放大。 */
@@ -45,6 +48,13 @@
  * 四挡差这么多说明那根本不是夹具阻抗。差超过这个倍数就判"开路不可信",
  * 宁可退到 SHORT+LOAD,也不拿一个假的开路去拟合。 */
 #define CAL_OPEN_MAX_GEAR_SPREAD  3.0
+
+/* 🆕 2026-10-27 两负载仿射:两个已知负载的标称阻抗必须拉开,
+ * 否则 a = (M2−M1)/(Z2−Z1) 的两个方程几乎重合,测量噪声按 1/间隔 放大。
+ * 判据用**相对量级**:|Z2−Z1| ≥ 5% × max(|Z1|,|Z2|)。
+ * 取 5% 是折中:再严格(10%)会把"两颗同型但离散 10% 的器件"判死;
+ * 再松(1%)放大 100 倍噪声,拟合出来数字好看但没有意义。 */
+#define CAL_LOAD_SEP_MIN  0.05
 
 #define CAL_EPS_REL     1e-12
 
@@ -69,7 +79,7 @@ typedef struct __attribute__((packed))
     uint32_t version;
     uint32_t count;
     uint32_t crc;              /* 全缓冲区(本字段置 0)的 CRC32 */
-    CalBoard board;            /* 6 × double = 48 B */
+    CalBoard board;            /* 10 × double = 80 B(v2 起) */
 } CalFileHeader;
 
 typedef struct __attribute__((packed))
@@ -77,13 +87,17 @@ typedef struct __attribute__((packed))
     uint8_t  leg;              /* 0..3   */
     uint8_t  gear;             /* 0..3   */
     uint8_t  freq;             /* 0..2   */
-    uint8_t  flags;            /* CAL_F_* */
+    uint8_t  reserved;
+    uint16_t flags;            /* CAL_F_*(v2 起 16 位) */
+    uint16_t reserved2;
     double   open_re;
     double   open_im;
     double   short_re;
     double   short_im;
-    double   load_re;
+    double   load_re;          /* 标准板 1 实测 */
     double   load_im;
+    double   load2_re;         /* 标准板 2 实测(🆕) */
+    double   load2_im;
     double   a_re;
     double   a_im;
     double   b_re;
@@ -92,12 +106,12 @@ typedef struct __attribute__((packed))
     double   c_im;
 } CalFilePoint;
 
-/* 4×4 + 48 = 64 B 的头;点为 4 + 12×8 = 100 B(紧凑排列,没有对齐填充)。
- * ⚠️ 2026-10-24 首版这里写成 60 / 132 且注释写"16 个 double" —— 实际只有
- *    12 个 double,两处都是算错的,`_Static_assert` 当场把它拦住了。
- *    改布局必须同时改本断言与 `CAL_VERSION`(已存的文件会因版本号不符被拒)。 */
-_Static_assert(sizeof(CalFileHeader) == 64u, "CalFileHeader 布局变了,版本号必须跟着改");
-_Static_assert(sizeof(CalFilePoint) == 100u, "CalFilePoint 布局变了,版本号必须跟着改");
+/* v2:4×4 + 80 = 96 B 的头;点为 8 + 14×8 = 120 B。
+ * 头的 8 字节前缀 + 两个保留字是为了让 double 自然 8 字节对齐(不是必须,
+ * 但读起来省心)。改布局必须同时改本断言与 `CAL_VERSION`
+ * (已存的文件会因版本号不符被拒)。 */
+_Static_assert(sizeof(CalFileHeader) == 96u, "CalFileHeader 布局变了,版本号必须跟着改");
+_Static_assert(sizeof(CalFilePoint) == 120u, "CalFilePoint 布局变了,版本号必须跟着改");
 
 /* ==========================================================================
  * 状态
@@ -223,7 +237,10 @@ int32_t Calibration_FreqIndex(uint32_t hz)
  * 标准板 → 每腿负载阻抗
  * ========================================================================== */
 
-bool Calibration_StandardZ(uint32_t leg, uint32_t hz, CalZ *out)
+/** 标准板 → 每腿负载阻抗的公共实现;两组参数只有这四个字段不同。 */
+static bool standard_z_from(double cgs_pf, double cgd_pf, double cds_pf,
+                            double rg_ohm, uint32_t leg, uint32_t hz,
+                            CalZ *out)
 {
     double w;
     double c_pf;
@@ -235,35 +252,47 @@ bool Calibration_StandardZ(uint32_t leg, uint32_t hz, CalZ *out)
 
     switch (leg) {
     case 0u:   /* CISS = Cgs + Cgd,栅极电阻串联(没有就填 0) */
-        c_pf = s_board.cgs_pf + s_board.cgd_pf;
+        c_pf = cgs_pf + cgd_pf;
         if (c_pf <= 0.0) {
             return false;
         }
-        *out = cz(s_board.rg_ohm, -1e12 / (w * c_pf));
+        *out = cz(rg_ohm, -1e12 / (w * c_pf));
         return true;
     case 1u:   /* COSS = Cds + Cgd */
-        c_pf = s_board.cds_pf + s_board.cgd_pf;
+        c_pf = cds_pf + cgd_pf;
         if (c_pf <= 0.0) {
             return false;
         }
         *out = cz(0.0, -1e12 / (w * c_pf));
         return true;
     case 2u:   /* CRSS = Cgd(数据手册定义) */
-        c_pf = s_board.cgd_pf;
+        c_pf = cgd_pf;
         if (c_pf <= 0.0) {
             return false;
         }
         *out = cz(0.0, -1e12 / (w * c_pf));
         return true;
     case 3u:   /* RG = Rg */
-        if (s_board.rg_ohm <= 0.0) {
+        if (rg_ohm <= 0.0) {
             return false;
         }
-        *out = cz(s_board.rg_ohm, 0.0);
+        *out = cz(rg_ohm, 0.0);
         return true;
     default:
         return false;
     }
+}
+
+bool Calibration_StandardZ(uint32_t leg, uint32_t hz, CalZ *out)
+{
+    return standard_z_from(s_board.cgs_pf, s_board.cgd_pf,
+                           s_board.cds_pf, s_board.rg_ohm, leg, hz, out);
+}
+
+bool Calibration_StandardZ2(uint32_t leg, uint32_t hz, CalZ *out)
+{
+    return standard_z_from(s_board.cgs2_pf, s_board.cgd2_pf,
+                           s_board.cds2_pf, s_board.rg2_ohm, leg, hz, out);
 }
 
 bool Calibration_LegDefined(uint32_t leg)
@@ -273,6 +302,13 @@ bool Calibration_LegDefined(uint32_t leg)
     return Calibration_StandardZ(leg, s_freq_hz[2], &z);
 }
 
+bool Calibration_LegDefined2(uint32_t leg)
+{
+    CalZ z;
+
+    return Calibration_StandardZ2(leg, s_freq_hz[2], &z);
+}
+
 /* ==========================================================================
  * 拟合
  * ========================================================================== */
@@ -280,13 +316,17 @@ bool Calibration_LegDefined(uint32_t leg)
 /**
  * @brief 重算一个点。
  *
- * 三条路径(按可用性降级,不是"猜"):
+ * 五条路径(按可用性降级,不是"猜"):
  *   1. OPEN(有限且 ≥ 5×负载)+ SHORT + LOAD → 完整 Möbius;
  *   2. SHORT + LOAD                          → 仿射(c = 0);
- *   3. OPEN + LOAD                           → b = 0 的 Möbius;
- *   4. 只有 OPEN                             → 平行杂散校正(a = 1,b = 0,
+ *   3. LOAD1 + LOAD2                         → 两点仿射(c = 0,🆕);
+ *   4. OPEN + LOAD                           → b = 0 的 Möbius;
+ *   5. 只有 OPEN                             → 平行杂散校正(a = 1,b = 0,
  *                                              c = 1/M_o),标记 FIT_OPEN。
  * 一条都不满足 ⇒ 清掉 FIT,应用时不修正。
+ *
+ * 路径 1/2/4 里的 LOAD 可以是**任意一组**标准板参数:主负载优先标准板 1,
+ * 它未定义时才用标准板 2(见下方 `zl = zl1_ok ? zl1 : zl2`)。
  */
 /**
  * @brief 开路标准在四个挡位上是否讲得通。
@@ -325,9 +365,14 @@ static int open_is_consistent(uint32_t leg, uint32_t freq_idx)
 
 static uint32_t refit_point(CalFilePoint *p)
 {
+    CalZ zl1;
+    CalZ zl2;
     CalZ zl;
+    CalZ ml1, ml2;
     CalZ ml, ms, mo;
     CalZ a, b, c;
+    int zl1_ok = 0;
+    int zl2_ok = 0;
     int have_open;
     int have_short;
     int have_load;
@@ -335,7 +380,7 @@ static uint32_t refit_point(CalFilePoint *p)
     int solved = 0;
     int open_only = 0;
 
-    p->flags &= (uint8_t)~(CAL_F_FIT | CAL_F_FIT_OPEN);
+    p->flags &= (uint16_t)~(CAL_F_FIT | CAL_F_FIT_OPEN);
 
     if ((p->leg >= CAL_LEG_COUNT) ||
         (p->gear >= CAL_GEAR_COUNT) ||
@@ -346,16 +391,30 @@ static uint32_t refit_point(CalFilePoint *p)
     have_open  = ((p->flags & CAL_F_OPEN) != 0u) &&
                  ((p->flags & CAL_F_OPEN_INF) == 0u);
     have_short = (p->flags & CAL_F_SHORT) != 0u;
-    have_load  = (p->flags & CAL_F_LOAD) != 0u;
+
+    /* 负载点:标称值取决于**哪一组**标准板参数,所以两组分开算。 */
+    if ((p->flags & CAL_F_LOAD) != 0u) {
+        zl1_ok = Calibration_StandardZ(p->leg, s_freq_hz[p->freq], &zl1);
+    }
+    if ((p->flags & CAL_F_LOAD2) != 0u) {
+        zl2_ok = Calibration_StandardZ2(p->leg, s_freq_hz[p->freq], &zl2);
+    }
+    have_load = zl1_ok || zl2_ok;
 
     /* 四挡对不上的开路不是夹具阻抗,是通道地板 —— 不能当标准用。 */
     if (have_open && !open_is_consistent(p->leg, p->freq)) {
         have_open = 0;
     }
 
-    ml = cz(p->load_re, p->load_im);
+    ml1 = cz(p->load_re, p->load_im);
+    ml2 = cz(p->load2_re, p->load2_im);
     ms = cz(p->short_re, p->short_im);
     mo = cz(p->open_re, p->open_im);
+
+    /* 单负载路径用"主负载":标准板 1 优先(它的参数是用户先填的那组),
+     * 未定义时才退回标准板 2。 */
+    zl = zl1_ok ? zl1 : zl2;
+    ml = zl1_ok ? ml1 : ml2;
 
     a = cz(0.0, 0.0);
     b = cz(0.0, 0.0);
@@ -378,10 +437,8 @@ static uint32_t refit_point(CalFilePoint *p)
             }
         }
     } else {
-        /* 有负载才需要知道标准板长什么样。 */
-        if (!Calibration_StandardZ(p->leg, s_freq_hz[p->freq], &zl)) {
-            return 0u;
-        }
+        /* 有负载才需要知道标准板长什么样 —— `have_load` 已经保证主负载
+         * 的标称阻抗解出来了,这里不再重复判断。 */
 
         /* 开路必须明显大于负载,否则那点信号在噪声底里,拟合出的 c 不可信。 */
         use_open = have_open &&
@@ -409,7 +466,27 @@ static uint32_t refit_point(CalFilePoint *p)
             solved = 1;
         }
 
-        /* 路径 3:OPEN + LOAD(b = 0) */
+        /* 路径 3:LOAD1 + LOAD2 两点仿射(🆕 2026-10-27)
+         *   两个已知 Z_d 定仿射的两个未知量:
+         *       a = (M2 − M1)/(Z2 − Z1),  b = M1 − a·Z1,  c = 0
+         *   两个负载标称值太接近时**不拟合** —— 见 `CAL_LOAD_SEP_MIN`。 */
+        if (!solved && zl1_ok && zl2_ok) {
+            CalZ dz = csub(zl2, zl1);
+            double scale = cabs_(zl1);
+
+            if (cabs_(zl2) > scale) {
+                scale = cabs_(zl2);
+            }
+            if ((cabs_(dz) > CAL_EPS_REL) &&
+                (cabs_(dz) >= (CAL_LOAD_SEP_MIN * scale))) {
+                a = cdiv(csub(ml2, ml1), dz);
+                b = csub(ml1, cmul(a, zl1));
+                c = cz(0.0, 0.0);
+                solved = 1;
+            }
+        }
+
+        /* 路径 4:OPEN + LOAD(b = 0) */
         if (!solved && use_open) {
             CalZ denom = cmul(zl, csub(mo, ml));
 
@@ -552,6 +629,10 @@ bool Calibration_Init(void)
     s_board.cgd_pf   = 0.0;
     s_board.cds_pf   = 0.0;
     s_board.rg_ohm   = 0.0;
+    s_board.cgs2_pf  = 0.0;
+    s_board.cgd2_pf  = 0.0;
+    s_board.cds2_pf  = 0.0;
+    s_board.rg2_ohm  = 0.0;
     s_board.rating_v = 100.0;
     s_board.bias_v   = 1.0;
     s_enabled        = 1;              /* 有数据就应用;没数据 Apply 自然返回 false */
@@ -603,6 +684,10 @@ bool Calibration_SetBoardField(CalField field, double value)
     case CAL_FIELD_RG:     s_board.rg_ohm   = clampd(value, 0.0, 1.0e6); break;
     case CAL_FIELD_RATING: s_board.rating_v = clampd(value, 0.0, 1000.0); break;
     case CAL_FIELD_BIAS:   s_board.bias_v   = clampd(value, 0.1, 100.0);  break;
+    case CAL_FIELD_CGS2:   s_board.cgs2_pf  = clampd(value, 0.0, 1.0e6); break;
+    case CAL_FIELD_CGD2:   s_board.cgd2_pf  = clampd(value, 0.0, 1.0e6); break;
+    case CAL_FIELD_CDS2:   s_board.cds2_pf  = clampd(value, 0.0, 1.0e6); break;
+    case CAL_FIELD_RG2:    s_board.rg2_ohm  = clampd(value, 0.0, 1.0e6); break;
     default:
         return false;
     }
@@ -629,7 +714,7 @@ bool Calibration_StoreRaw(CalStandard standard,
 {
     int32_t fi = Calibration_FreqIndex(hz);
     CalFilePoint *p;
-    uint8_t weak_flag;
+    uint16_t weak_flag;
 
     if ((leg >= CAL_LEG_COUNT) || (gear >= CAL_GEAR_COUNT) ||
         (fi < 0) || !isfinite(z_re) || !isfinite(z_im)) {
@@ -649,7 +734,7 @@ bool Calibration_StoreRaw(CalStandard standard,
         p->open_re  = z_re;
         p->open_im  = z_im;
         p->flags   |= CAL_F_OPEN;
-        p->flags   &= (uint8_t)~CAL_F_OPEN_INF;
+        p->flags   &= (uint16_t)~CAL_F_OPEN_INF;
         weak_flag   = CAL_F_WEAK_OPEN;
         break;
     case CAL_STD_SHORT:
@@ -664,6 +749,12 @@ bool Calibration_StoreRaw(CalStandard standard,
         p->flags   |= CAL_F_LOAD;
         weak_flag   = CAL_F_WEAK_LOAD;
         break;
+    case CAL_STD_LOAD2:
+        p->load2_re = z_re;
+        p->load2_im = z_im;
+        p->flags   |= CAL_F_LOAD2;
+        weak_flag   = CAL_F_WEAK_LOAD2;
+        break;
     default:
         s_collect_bad++;
         return false;
@@ -673,11 +764,11 @@ bool Calibration_StoreRaw(CalStandard standard,
         if (weak) {
             p->flags |= weak_flag;
         } else {
-            p->flags &= (uint8_t)~weak_flag;
+            p->flags &= (uint16_t)~weak_flag;
         }
     }
 
-    p->flags &= (uint8_t)~CAL_F_FIT;   /* 等 EndStandard 统一重拟合 */
+    p->flags &= (uint16_t)~CAL_F_FIT;  /* 等 EndStandard 统一重拟合 */
     s_collect_ok++;
     (void)standard;
     return true;
@@ -699,8 +790,8 @@ bool Calibration_StoreOpenInfinite(uint32_t leg, uint32_t gear, uint32_t hz)
     p->freq = (uint8_t)fi;
     p->open_re = 0.0;
     p->open_im = 0.0;
-    p->flags |= (uint8_t)(CAL_F_OPEN | CAL_F_OPEN_INF);
-    p->flags &= (uint8_t)~(CAL_F_FIT | CAL_F_WEAK_OPEN);
+    p->flags |= (uint16_t)(CAL_F_OPEN | CAL_F_OPEN_INF);
+    p->flags &= (uint16_t)~(CAL_F_FIT | CAL_F_WEAK_OPEN);
     s_collect_ok++;
     return true;
 }
@@ -719,6 +810,17 @@ static uint32_t open_only_count(void)
     return n;
 }
 
+static const char *cal_std_label(CalStandard standard)
+{
+    switch (standard) {
+    case CAL_STD_OPEN:  return "开路";
+    case CAL_STD_SHORT: return "短接";
+    case CAL_STD_LOAD:  return "标准板1";
+    case CAL_STD_LOAD2: return "标准板2";
+    default:            return "?";
+    }
+}
+
 uint32_t Calibration_EndStandard(CalStandard standard)
 {
     uint32_t fitted;
@@ -732,15 +834,13 @@ uint32_t Calibration_EndStandard(CalStandard standard)
         (void)snprintf(s_message, sizeof(s_message),
                        "%s:采到 %u 点,失败 %u;累计已标定 %u 点"
                        "(其中 %u 点仅开路平行校正)",
-                       (standard == CAL_STD_OPEN)  ? "开路" :
-                       (standard == CAL_STD_SHORT) ? "短接" : "标准板",
+                       cal_std_label(standard),
                        (unsigned)s_collect_ok, (unsigned)s_collect_bad,
                        (unsigned)fitted, (unsigned)open_only);
     } else {
         (void)snprintf(s_message, sizeof(s_message),
                        "%s:采到 %u 点,失败 %u;累计已标定 %u 点",
-                       (standard == CAL_STD_OPEN)  ? "开路" :
-                       (standard == CAL_STD_SHORT) ? "短接" : "标准板",
+                       cal_std_label(standard),
                        (unsigned)s_collect_ok, (unsigned)s_collect_bad,
                        (unsigned)fitted);
     }
@@ -749,8 +849,8 @@ uint32_t Calibration_EndStandard(CalStandard standard)
     return fitted;
 }
 
-uint8_t Calibration_PointFlags(uint32_t leg, uint32_t gear,
-                               uint32_t freq_index)
+uint16_t Calibration_PointFlags(uint32_t leg, uint32_t gear,
+                                uint32_t freq_index)
 {
     if ((leg >= CAL_LEG_COUNT) || (gear >= CAL_GEAR_COUNT) ||
         (freq_index >= CAL_FREQ_COUNT)) {
