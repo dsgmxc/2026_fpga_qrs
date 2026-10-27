@@ -3353,7 +3353,10 @@ static void UI_ShowHome(void)
     {
         lv_obj_t *button = UI_CreateButton(
             screen,
-            "校准\n开路 / 短接 / 标准板三标准标定",
+            /* 2026-10-27:原来写「标准板三标准标定」,加入标准板 2 后已是四个标准。
+             * 实测「开路 / 短接 / 两块标准板」= 216 px,全部字形都在 cn_20 里
+             * (候选「…标准板 1 和 2」里的「和」U+548C 不在字库,已弃用)。 */
+            "校准\n开路 / 短接 / 两块标准板",
             UI_COLOR_SURFACE_LIGHT,
             48,
             button_top + 2 * (button_height + vertical_gap),
@@ -5266,7 +5269,12 @@ static void UI_ShowCalibration(void)
     }
 
     /* ---- 右:4×4 覆盖表 ------------------------------------------------- */
-    /* 右侧收窄到 280(左面板加宽的代价):四列各 50 px,起点 52。 */
+    /* 右侧收窄到 280(左面板加宽的代价)。
+     * ⚠️ 2026-10-27 上板抓帧发现两处**被裁字**,本段几何按实测重排:
+     *   · 腿名标签原来只有 42 px,而实测 CISS = 43 / COSS = 52 / CRSS = 50
+     *     ⇒ 屏上是「CIS」「ЁOS」;现加宽到 54(起点 8,右端 62)。
+     *   · 单元格最多显示「OSL2*」(四个标准全采且已拟合),实测 58 px > 50
+     *     ⇒ 给单元格加 −3 px 字距,5 个字缩到 46 px;字形大小不变。 */
     panel = UI_CreatePanel(screen, 728, 62, 280, 212,
                            UI_COLOR_SURFACE_LIGHT, 14);
     UI_CreateText(panel, "覆盖(按当前激励频率)",
@@ -5276,7 +5284,7 @@ static void UI_ShowCalibration(void)
     {
         UI_CreateText(panel, gear_names[index],
                       &ui_font_cn_20, UI_COLOR_TEXT_MUTED,
-                      52 + (lv_coord_t)index * 54, 40, 50, 24,
+                      62 + (lv_coord_t)index * 52, 40, 50, 24,
                       LV_TEXT_ALIGN_CENTER);
     }
     for (index = 0u; index < 4u; ++index)
@@ -5285,14 +5293,15 @@ static void UI_ShowCalibration(void)
 
         UI_CreateText(panel, leg_names[index],
                       &ui_font_cn_20, UI_COLOR_TEXT_MUTED,
-                      8, y, 42, 28, LV_TEXT_ALIGN_LEFT);
+                      8, y, 54, 28, LV_TEXT_ALIGN_LEFT);
         for (uint32_t gear = 0u; gear < 4u; ++gear)
         {
             lv_obj_t *cell = UI_CreateText(
                 panel, "-", &ui_font_cn_20, UI_COLOR_TEXT_MUTED,
-                52 + (lv_coord_t)gear * 54, y, 50, 28,
+                62 + (lv_coord_t)gear * 52, y, 50, 28,
                 LV_TEXT_ALIGN_CENTER);
 
+            lv_obj_set_style_text_letter_space(cell, -3, LV_PART_MAIN);
             g_cal_cells[index][gear] = cell;
         }
     }

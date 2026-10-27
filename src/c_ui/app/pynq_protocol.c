@@ -1995,7 +1995,10 @@ void DisplayProtocol_Init(void)
                "        ⛔ 不得作为任何测量结论的依据。\n"
                "        关闭:不带 CV_UI_DEMO 重启。\n");
     } else {
-        UI_Demo_SetStatusText("状态:就绪(Cs/Cp/D 取自 ADC,未标定)");
+        /* 2026-10-27 上板抓帧发现:原串 "状态:就绪(Cs/Cp/D 取自 ADC,未标定)" = 323 px,
+         * 而状态栏只有 1024−706 = 318 px ⇒ 末尾「定)」被折到第二行。
+         * 去掉「取自 ADC,」后实测 242 px,留 76 px 余量。 */
+        UI_Demo_SetStatusText("状态:就绪(Cs/Cp/D 未标定)");
     }
 
     /* ⚠️ 激励那一项**从 MeasureConfig 读回**,不照抄常量 ——
