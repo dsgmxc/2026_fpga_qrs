@@ -238,7 +238,7 @@ static void case_save_reload(void)
 {
     uint32_t fitted;
     double zr = 0.0, zi = 0.0;
-    Zc a = {2.0, 0.3};
+    Zc a = {1.05, 0.02};
     Zc b = {15.0, -4.0};
     Zc c = {3e-5, 3e-6};
     Zc m;
@@ -279,7 +279,7 @@ int main(void)
                 Calibration_IsEnabled());
 
     {
-        Zc a   = {2.0, 0.3};
+        Zc a   = {1.05, 0.02};
         Zc b   = {15.0, -4.0};
         /* c 小一点:否则 CRSS 腿(|Zl|≈3.2 kΩ)的开路/负载比只有 3.4 倍,
            会被 CAL_OPEN_MIN_RATIO 守卫拒掉 —— 那是另一个用例专门验的。 */
@@ -302,7 +302,7 @@ int main(void)
        ⇒ 该腿**仍然标记 FIT**,但反演不回真实的非仿射误差 —— 这是已知代价。
        用例把"只有 leg 2 掉精度、其余三腿精确"钉住,免得守卫哪天被悄悄放宽/收紧。 */
     {
-        Zc a = {2.0, 0.3};
+        Zc a = {1.05, 0.02};
         Zc b = {15.0, -4.0};
         Zc c = {1e-4, 1e-5};
 
@@ -323,7 +323,7 @@ int main(void)
      * (这里用 b = 60 Ω ≈ 0.6·R0 构造),**宁可判不可校正**,也不能把
      * CRSS-B 那种 |b| = 3.3·R0 的系数上屏(它会把 Im 推成正值 ⇒ Cs < 0)。 */
     {
-        Zc a = {2.0, 0.3};
+        Zc a = {1.05, 0.02};
         Zc b = {60.0, 0.0};
         Zc c = {3e-5, 3e-6};
         double zr = 0.0, zi = 0.0;
@@ -336,6 +336,26 @@ int main(void)
                     !Calibration_Apply(0u, k_gears[1], k_hz, 10.0, -100.0,
                                        &zr, &zi));
         expect_true("channel: ChannelAvailable false when degenerate",
+                    !Calibration_ChannelAvailable(k_gears[1], k_hz));
+    }
+
+    /* 🆕 2026-10-29 第二道守卫:复增益 a 偏离 1 太远(|a−1| > 0.50)时同样不应用。
+       实测 C 挡 |a−1| = 0.95、D 挡 9.48 —— 它们 |b|/R0 只有 0.001,单看 b 会误判"可用",
+       但 |a| = 1.42 / 9.6 会把噪声原样放大,相位也转了 42°/80°。 */
+    {
+        Zc a = {1.50, 0.95};   /* |a−1| ≈ 1.07 > 0.50 */
+        Zc b = {1.0, 0.0};     /* b 很小 —— 只有 a 守卫能拒掉它 */
+        Zc c = {3e-5, 3e-6};
+        double zr = 0.0, zi = 0.0;
+
+        Calibration_ClearAll();
+        set_board();
+        acquire(a, b, c, 0, 1, 1);
+        (void)Calibration_EndStandard(CAL_STD_LOAD);
+        expect_true("channel: nonphysical gain a is not applied",
+                    !Calibration_Apply(0u, k_gears[1], k_hz, 10.0, -100.0,
+                                       &zr, &zi));
+        expect_true("channel: ChannelAvailable false when |a-1| too big",
                     !Calibration_ChannelAvailable(k_gears[1], k_hz));
     }
 

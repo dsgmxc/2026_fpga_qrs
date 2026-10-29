@@ -236,6 +236,9 @@ const char *Calibration_LastMessage(void);
  *        `Calibration_Apply()` 会返回 true 的充要条件(除反演退化外)。
  *        界面用它区分"已校准"与"部分校准"(2026-10-29:通道级校正后,
  *        某些挡位的标准板在量程外,拟合退化 ⇒ 即使 16 点都存了也不算校准)。
+ *        🆕 2026-10-29 两道物理性守卫:`|a−1| ≤ 0.50` 且 `|b|/R0 ≤ 0.25`。
+ *        用当前校准文件实测,**只有 B 挡能过**;A 挡 b 超限,C/D 挡 a 超限
+ *        (`|a|` 分别是 1.42 / 9.6)⇒ 这三挡一律按未校准显示。
  */
 bool Calibration_ChannelAvailable(uint32_t gear_onehot, uint32_t hz);
 
