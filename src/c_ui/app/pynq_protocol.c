@@ -261,9 +261,15 @@ static double   s_gear_probe_z;         /* 换挡前由比例反推的 |Z|(Ω)  
 static uint32_t s_gear_limit_logged;    /* 已经到 A/D 端仍不匹配时只喊一次      */
 
 /* ---- 校准采集状态机(🆕 2026-10-24) ----------------------------------
- * 一次采集 = 4 条腿 × 4 个挡位 = 16 点。挡位切换是当拍生效的,
- * **继电器每换一条腿才切一次**(每次 ≤200 ms),所以整轮只有 4 次阻塞,
- * 其余点都在同一圈 Process() 里逐拍采 —— 不需要另开线程。
+ * 一次采集 = 4 条腿 × 4 个挡位 = 16 点。
+ * 🔴 **2026-10-29 纠错**:原来这里写「挡位切换是当拍生效的」—— **只对寄存器成立**。
+ *    量程 A/B/C/D 是继电器矩阵板上的**继电器**(`hardware/README.md`:
+ *    「CISS / COSS / CRSS 回路与量程切换」),`0x18` 写进去当拍变的是 `gear_reg`,
+ *    触点还要几毫秒才翻。不等待就采,测到的是**上一挡的触点状态**,
+ *    而 Z 却按新挡的 R0 算 ⇒ 相邻挡差 10 倍。
+ *    实测证据(`LOAD2` 那一轮):CISS 四个挡的 −Im 是 7.58 / 737 / 758 / 794 Ω,
+ *    而同一个器件的真值只有 **75.8 Ω** —— 逐行正好对应「B / A / B / C」,
+ *    即每个点都慢了**一行**。⇒ 现在换挡后也等 `s_dwell_ms` 再采。
  * ⚠️ `s_cal_capture_active` 在采集中为 1:
  *   ① 让 `adc_capture_pair_once()` **跳过 >95% 的挡位硬闸**
  *      (短接 / 开路本来就会被那个闸判"无读数",校准必须拿到原始数);
@@ -279,6 +285,7 @@ static uint32_t s_cal_ok;
 static uint32_t s_cal_bad;
 static uint32_t s_cal_due_ms;
 static uint32_t s_cal_leg_started;      /* 本腿继电器是否已切到目标          */
+static uint32_t s_cal_gear_armed;       /* 本点挡位已切、正在等触点稳定      */
 /* 80 字节装不下中文:每个汉字 3 字节,进度条那行最长的一句约 200 字节
  * (2026-10-27 加两负载提示时 -Wformat-truncation 当场报出来)。
  * UI 的进度标签宽 960 px,256 字节按 20 号字算约 800 px,放得下。 */
@@ -291,6 +298,47 @@ static char     s_cal_text[256];        /* 给界面的一行状态             
 static int sweep_auto_gear_enabled(void)
 {
     return access(SWEEP_AUTO_GEAR_FLAG, F_OK) == 0;
+}
+
+/* 当前激励频率下的校准状态:0 = 没有可用校准点,1 = 部分(有拟合点但不满
+ * 4 腿 × 4 挡),2 = 16 点全有。
+ * ⚠️ 界面与日志都必须用它说「已校准 / 未标定」:
+ *    2026-10-29 上电抓帧发现,校准文件明明载入了 16/48(1 MHz 全亮),
+ *    顶栏却还写「Cs/Cp/D 未标定」—— 与 `[cal] 已载入…拟合 16/48` 自相矛盾,
+ *    而异常检测的中心正是按「已校准」的读数建的。 */
+static uint32_t cal_state_at_current_freq(void)
+{
+    int32_t  fi;
+    uint32_t fitted;
+
+    if (!Calibration_IsEnabled()) {
+        return 0u;
+    }
+    fi = Calibration_FreqIndex(MeasureConfig_GetDdsHz());
+    if (fi < 0) {
+        return 0u;
+    }
+    fitted = Calibration_FittedCount((uint32_t)fi);
+    if (fitted == 0u) {
+        return 0u;
+    }
+    /* 🆕 2026-10-29:校准改成**通道级**(按挡位/频率)后,"16 个点都存了"
+     * 不再等于"当前挡位能用"。A 挡的两块标准板(80–150 Ω)对 10 Ω 挡全是
+     * 外推,1 MHz 下 |b|/R0 最小也有 0.56 ⇒ 判不可校正、原样出原始值。
+     * 这种挡位只能说"部分校准",不能说"已校准"。 */
+    if (!Calibration_ChannelAvailable(cv_reg_read(CV_REG_RANGE_SEL) &
+                                      CV_RANGE_MASK,
+                                      MeasureConfig_GetDdsHz())) {
+        return 1u;
+    }
+    return (fitted >= (CAL_LEG_COUNT * CAL_GEAR_COUNT)) ? 2u : 1u;
+}
+
+static const char *cal_state_text(void)
+{
+    static const char *const texts[3] = {"未标定", "部分校准", "已校准"};
+
+    return texts[cal_state_at_current_freq()];
 }
 
 static uint32_t s_demo_auto_page;       /* CV_UI_DEMO_PAGE:跑完切到这一页 */
@@ -1173,6 +1221,13 @@ static void sweep_measure_point(uint32_t index)
 static void sweep_begin_leg(uint32_t leg)
 {
     s_sweep_leg = leg;
+    /* 🔴 **2026-10-29 补**:这里原来只设 `s_sweep_leg`,漏了 `s_pair_path`。
+     *    `adc_capture_pair_once()` 的日志与 `Calibration_Apply()` 都读
+     *    `s_pair_path`,于是整轮扫压用的是**上一条腿**(实测是"先测 RG 再三路
+     *    扫压"留下的 3 = RG),而单点按本腿取 ⇒ 同一个原始读数在两条路径下
+     *    差成负电容。校准现已改成通道级(见 `Calibration_Apply()`),这条
+     *    不再影响数值,但日志仍要说真话 —— 别再漏。 */
+    s_pair_path = leg;
     /* 🆕 本腿第一点要多等一个驻留再采 —— 偏压要从上一腿的终点降下来。
      * 见 `s_leg_settle_pending` 的说明(2026-10-24 实测)。 */
     s_leg_settle_pending = 1u;
@@ -1227,12 +1282,13 @@ static void sweep_start(uint32_t mask, uint32_t stop_tenths)
 
     printf("[proto] 扫压开始:%s,%.2f V → %.2f V,%u 点/腿,每点 %u ms\n"
            "        %s**逐腿**切换继电器,每条腿各测各的。\n"
-           "        读数:Cs/Cp/D 由同一个复数 Z 出(未标定)\n"
+           "        读数:Cs/Cp/D 由同一个复数 Z 出(%s)\n"
            "        挡位 0x%X(%.0f Ω):%s\n",
            (mask == 0x07u) ? "CISS+COSS+CRSS" : path_name(first),
            (double)SWEEP_START_VOLTS, (double)stop_volts,
            (unsigned)s_sweep_total, (unsigned)s_dwell_ms,
            (mask == 0x07u) ? "三条腿" : "一条腿",
+           cal_state_text(),
            (unsigned)(cv_reg_read(CV_REG_RANGE_SEL) & CV_RANGE_MASK),
            cv_range_ohms(cv_reg_read(CV_REG_RANGE_SEL) & CV_RANGE_MASK),
            sweep_auto_gear_enabled()
@@ -1340,9 +1396,20 @@ static void sweep_finish(void)
     anomaly_evaluate_sweep();
     /* 三路都完整才生成二维码;单路/多点中止会清空传输页(见 cv_qr_live.c)。 */
     CV_QR_Live_OnSweepComplete();
-    UI_Demo_SetStatusText(s_demo_enabled ?
-        "状态:扫压结束(演示读数,偏压已归 0)" :
-        "状态:扫压结束(偏压已归 0,Cs/Cp/D 未标定)");
+    /* 顶栏只有 1024−706 = 318 px(font_cn_20),超了会折到第二行、被 28 px
+     * 高度裁掉。下面几句按 ui_font_cn_20 的真实 adv_w 量过:
+     * 演示 282 px、已校准 279 px、部分校准 299 px、未标定 279 px。
+     * 2026-10-29:原句 384 px,屏上截在「Cs/Cp/D」处。 */
+    if (s_demo_enabled) {
+        UI_Demo_SetStatusText("状态:扫压结束(演示读数,偏压 0)");
+    } else {
+        uint32_t cal_state = cal_state_at_current_freq();
+
+        UI_Demo_SetStatusText(
+            (cal_state == 2u) ? "状态:扫压结束(偏压 0 V,已校准)" :
+            (cal_state == 1u) ? "状态:扫压结束(偏压 0 V,部分校准)" :
+                                "状态:扫压结束(偏压 0 V,未标定)");
+    }
     printf("[proto] 扫压结束:%s,共 %u 点已下发到 DAC\n",
            path_name(s_sweep_leg), (unsigned)s_sweep_index);
 
@@ -1688,6 +1755,16 @@ static const char *cal_std_name(uint32_t std)
     return (std < 4u) ? names[std] : "?";
 }
 
+/* 顶栏状态框只有 ~318 px(font_cn_20 约 15 个汉字),放不下 `cal_std_name()`
+ * 那种带括号说明的全名 —— 2026-10-29 实测整句会截在「点成功 /」处。
+ * 顶栏一律用这里的短名,完整说明只留在校准页。 */
+static const char *cal_std_short(uint32_t std)
+{
+    static const char *const names[4] = {"OPEN", "SHORT", "LOAD1", "LOAD2"};
+
+    return (std < 4u) ? names[std] : "?";
+}
+
 #define CAL_POINTS_PER_STD (CAL_LEG_COUNT * CAL_GEAR_COUNT)
 
 static void cal_ui_progress(void)
@@ -1734,7 +1811,29 @@ static void calibration_finish(void)
     UI_Demo_CalibrationProgress(s_cal_text, s_cal_done,
                                 (uint32_t)CAL_POINTS_PER_STD);
     UI_Demo_RefreshCalibrationViews();
-    UI_Demo_SetStatusText(s_cal_text);
+    {
+        /* 顶栏放摘要,完整句子(s_cal_text)只在校准页。
+         * 318 px 下 "LOAD2(标准板2) 完成:16 点成功 / 0 点失败…" 会被截断。 */
+        char header_text[48];
+
+        if (this_fitted > 0u) {
+            (void)snprintf(header_text, sizeof(header_text),
+                           "标定:%s 拟合 %u/16", cal_std_short(s_cal_std),
+                           (unsigned)this_fitted);
+        } else if ((s_cal_std == (uint32_t)CAL_STD_LOAD) ||
+                   (s_cal_std == (uint32_t)CAL_STD_LOAD2)) {
+            /* 只有一块标准板:缺的是另一块(短接/开路也能补第二个方程)。 */
+            (void)snprintf(header_text, sizeof(header_text),
+                           "标定:%s 完成,待另一块板",
+                           cal_std_short(s_cal_std));
+        } else {
+            /* OPEN/SHORT 采到了但一个点都没拟合上 —— 别写成"待另一块板"。 */
+            (void)snprintf(header_text, sizeof(header_text),
+                           "标定:%s 采集完成,未拟合",
+                           cal_std_short(s_cal_std));
+        }
+        UI_Demo_SetStatusText(header_text);
+    }
 
     printf("[cal] %s\n", Calibration_LastMessage());
     printf("[cal] %s:成功 %u / 失败 %u,本频率拟合 %u/16;全部频率拟合 %u/48\n",
@@ -1743,6 +1842,29 @@ static void calibration_finish(void)
 
     /* 采完把偏压归 0 —— 标准板不必一直带电,也是离开页面后最安全的状态。 */
     (void)bias_apply(0.0f);
+}
+
+/** @brief 一个点结算完(存了、跳过了、或采失败)—— 统一推进到下一点。
+ *  ⚠️ 换腿时把 `s_cal_gear_armed` 清掉:新腿的第一点也要先切挡、再等、再采。 */
+static void cal_advance_point(void)
+{
+    s_cal_done++;
+    s_cal_gear++;
+    s_cal_gear_armed = 0u;
+
+    if (s_cal_gear >= CAL_GEAR_COUNT) {
+        s_cal_gear        = 0u;
+        s_cal_leg++;
+        s_cal_leg_started = 0u;
+    }
+
+    if (s_cal_done >= CAL_POINTS_PER_STD) {
+        calibration_finish();
+        return;
+    }
+
+    s_cal_due_ms = cv_millis();
+    cal_ui_progress();
 }
 
 /** @brief 每圈 `Process()` 调一次:到点就采**一个**点。 */
@@ -1767,16 +1889,33 @@ static void calibration_process(void)
         }
         s_pair_path       = s_cal_leg;
         s_cal_leg_started = 1u;
+        s_cal_gear_armed  = 0u;
         s_cal_due_ms      = cv_millis() + s_dwell_ms;
         return;
     }
 
-    /* ② 切挡(当拍生效,不占稳定窗)再采。挡位没确认就**不存** ——
+    /* ② 切挡 —— **写完寄存器还要等触点翻**(见状态机开头 2026-10-29 那段)。
+     *    因此拆成两圈:本圈只切、下圈才采。挡位没确认就**不存** ——
      *    存了的话这点的 M 是在哪个 R0 下测的说不清,拟合会整段错。 */
     onehot = s_cal_gear_onehot[s_cal_gear];
-    if (RelayView_ApplyGear(onehot)) {
+    if (!s_cal_gear_armed) {
+        if (!RelayView_ApplyGear(onehot)) {
+            s_cal_bad++;
+            printf("[cal] ⛔ %s %s %s:挡位切换未确认 —— 本点不存\n",
+                   cal_std_name(s_cal_std), path_name(s_cal_leg),
+                   gear_name(s_cal_gear));
+            cal_advance_point();
+            return;
+        }
+        s_pair_path      = s_cal_leg;
+        s_cal_gear_armed = 1u;
+        s_cal_due_ms     = cv_millis() + s_dwell_ms;
+        return;
+    }
+
+    /* ③ 采 */
+    {
         hz = MeasureConfig_GetDdsHz();
-        s_pair_path          = s_cal_leg;
         s_cal_capture_active = 1u;
         captured = adc_capture_pair();
         s_cal_capture_active = 0u;
@@ -1813,6 +1952,34 @@ static void calibration_process(void)
                    gear_name(s_cal_gear), 100.0 * s_pair.vl_vh,
                    s_pair.z.z_re_ohm, s_pair.z.z_im_ohm, s_pair.r0_ohm,
                    weak ? " ⚠弱信号" : "");
+
+            /* 🆕 自检:量到的 |Z| 与这块标准板的已知 |Z| 应当接近(挡位不该
+             *    改变 DUT 的阻抗)。差 3 倍以上就是挡位或回路**没真的切过去**
+             *    —— 2026-10-29 那次挡位慢一拍,每个点都差 10 倍,而日志里
+             *    只有这一条能把"不对"当场喊出来。只告警,不改判据。
+             *    ⚠️ RG 腿不比:那条腿物理上是 Rg **串着 Cgs**,|Z| ≈ Xc ≫ Rg。 */
+            if ((s_cal_leg < 3u) &&
+                ((s_cal_std == CAL_STD_LOAD) ||
+                 (s_cal_std == CAL_STD_LOAD2))) {
+                CalZ expect;
+
+                if (((s_cal_std == CAL_STD_LOAD) ?
+                     Calibration_StandardZ(s_cal_leg, hz, &expect) :
+                     Calibration_StandardZ2(s_cal_leg, hz, &expect))) {
+                    double zm = sqrt((s_pair.z.z_re_ohm * s_pair.z.z_re_ohm) +
+                                     (s_pair.z.z_im_ohm * s_pair.z.z_im_ohm));
+                    double zs = sqrt((expect.re * expect.re) +
+                                     (expect.im * expect.im));
+
+                    if ((zs > 1e-9) && ((zm > (3.0 * zs)) || (zs > (3.0 * zm)))) {
+                        printf("[cal] ⚠️ %s %s %s:|Z| = %.1f Ω,标准值 %.1f Ω"
+                               " —— 差 %.1f 倍,查挡位/回路是否真的切过去了\n",
+                               cal_std_name(s_cal_std), path_name(s_cal_leg),
+                               gear_name(s_cal_gear), zm, zs,
+                               (zm > zs) ? (zm / zs) : (zs / zm));
+                    }
+                }
+            }
         } else if (captured && (s_cal_std == CAL_STD_OPEN)) {
             /* 空载连 |VL| 都没有 ⇒ 这才是**理想开路**,按无穷大记,
              * 拟合时走"短接 + 负载"的仿射兜底。 */
@@ -1827,29 +1994,10 @@ static void calibration_process(void)
                    cal_std_name(s_cal_std), path_name(s_cal_leg),
                    gear_name(s_cal_gear));
         }
-    } else {
-        s_cal_bad++;
-        printf("[cal] ⛔ %s %s %s:挡位切换未确认 —— 本点不存\n",
-               cal_std_name(s_cal_std), path_name(s_cal_leg),
-               gear_name(s_cal_gear));
     }
 
-    /* ③ 推进。4 个挡位走完换下一条腿(下一圈先切继电器)。 */
-    s_cal_done++;
-    s_cal_gear++;
-    if (s_cal_gear >= CAL_GEAR_COUNT) {
-        s_cal_gear       = 0u;
-        s_cal_leg++;
-        s_cal_leg_started = 0u;
-    }
-
-    if (s_cal_done >= CAL_POINTS_PER_STD) {
-        calibration_finish();
-        return;
-    }
-
-    s_cal_due_ms = cv_millis();     /* 挡位已生效 ⇒ 下一圈接着采 */
-    cal_ui_progress();
+    /* ④ 推进。4 个挡位走完换下一条腿(下一圈先切继电器)。 */
+    cal_advance_point();
 }
 
 /** @brief 校准时挡住会打架的指令,并说明还剩几点。 */
@@ -1903,8 +2051,8 @@ void DisplayProtocol_Init(void)
     (void)memset(&s_pair, 0, sizeof(s_pair));
 
     /* 🆕 校准(2026-10-24):从 /home/xilinx/cv_calibration.dat 读入。
-     *    读不到不算错误 —— 用默认值(标准板参数全 0、偏压 1 V、耐压 100 V),
-     *    界面里填完标准板参数才开始有用。 */
+     *    读不到不算错误 —— 用内置默认值(两块实测标准板,见 Calibration_Init),
+     *    此时采集即可标定,不必在界面上手输。 */
     s_cal_capture_active = 0u;
     s_cal_active         = 0u;
     s_cal_std            = 0u;
@@ -1919,19 +2067,25 @@ void DisplayProtocol_Init(void)
     if (Calibration_Init()) {
         CalBoard board;
         Calibration_GetBoard(&board);
-        printf("[cal] 已载入校准文件:拟合 %u/%u 点;标准板 Cgs %.3f pF / "
-               "Cgd %.3f pF / Cds %.3f pF / Rg %.3f Ω;耐压 %.1f V,偏压 %.2f V;"
-               "总开关 %s\n",
+        printf("[cal] 已载入校准文件:拟合 %u/%u 点;"
+               "板1 Cgs %.3f pF / Cgd %.3f pF / Cds %.3f pF / Rg %.3f Ω;"
+               "板2 Cgs %.3f pF / Cgd %.3f pF / Cds %.3f pF / Rg %.3f Ω;"
+               "耐压 %.1f V,偏压 %.2f V;总开关 %s\n",
                (unsigned)Calibration_TotalFitted(), (unsigned)CAL_POINT_COUNT,
                board.cgs_pf, board.cgd_pf, board.cds_pf, board.rg_ohm,
+               board.cgs2_pf, board.cgd2_pf, board.cds2_pf, board.rg2_ohm,
                board.rating_v, board.bias_v,
                Calibration_IsEnabled() ? "开" : "关");
     } else {
         CalBoard board;
         Calibration_GetBoard(&board);
-        printf("[cal] 没有可用的校准文件(首次运行或文件损坏)—— 用默认值:"
-               "标准板参数全 0、耐压 %.1f V、偏压 %.2f V。"
-               "测得的 Cs/Cp/D **未校准**\n",
+        printf("[cal] 没有可用的校准文件(首次运行或文件损坏)—— 用内置默认标准板:"
+               "板1 Cgs %.3f pF / Cgd %.3f pF / Cds %.3f pF / Rg %.3f Ω,"
+               "板2 Cgs %.3f pF / Cgd %.3f pF / Cds %.3f pF / Rg %.3f Ω;"
+               "耐压 %.1f V,偏压 %.2f V。"
+               "测得的 Cs/Cp/D **未校准**,采完两块标准板才开始有用\n",
+               board.cgs_pf, board.cgd_pf, board.cds_pf, board.rg_ohm,
+               board.cgs2_pf, board.cgd2_pf, board.cds2_pf, board.rg2_ohm,
                board.rating_v, board.bias_v);
     }
 
@@ -1988,7 +2142,9 @@ void DisplayProtocol_Init(void)
     (void)RelayView_Refresh(1);
 
     if (s_demo_enabled) {
-        UI_Demo_SetStatusText("状态:演示模式(偏压真下发,读数由模型生成)");
+        /* 318 px 顶栏:这句实测 280 px(原句 386 px 会被裁)。
+         * 「偏压真下发」的细节留在下面的 printf 里。 */
+        UI_Demo_SetStatusText("状态:演示模式(读数由模型生成)");
         printf("[proto] ⚠️  演示模式已开启(CV_UI_DEMO=1)\n"
                "        偏压/扫压**是真的**在驱动 DAC;\n"
                "        但 Cs/Cp/D 曲线是**模型生成的假数据**,只用于检查界面。\n"
@@ -1997,8 +2153,17 @@ void DisplayProtocol_Init(void)
     } else {
         /* 2026-10-27 上板抓帧发现:原串 "状态:就绪(Cs/Cp/D 取自 ADC,未标定)" = 323 px,
          * 而状态栏只有 1024−706 = 318 px ⇒ 末尾「定)」被折到第二行。
-         * 去掉「取自 ADC,」后实测 242 px,留 76 px 余量。 */
-        UI_Demo_SetStatusText("状态:就绪(Cs/Cp/D 未标定)");
+         * 去掉「取自 ADC,」后实测 242 px,留 76 px 余量。
+         * 2026-10-29:再按**真实校准状态**分三档(242 / 262 / 242 px)——
+         *           校准文件载入 16/48 时还写「未标定」是在说谎。 */
+        {
+            uint32_t cal_state = cal_state_at_current_freq();
+
+            UI_Demo_SetStatusText(
+                (cal_state == 2u) ? "状态:就绪(Cs/Cp/D 已校准)" :
+                (cal_state == 1u) ? "状态:就绪(Cs/Cp/D 部分校准)" :
+                                    "状态:就绪(Cs/Cp/D 未标定)");
+        }
     }
 
     /* ⚠️ 激励那一项**从 MeasureConfig 读回**,不照抄常量 ——
@@ -2012,11 +2177,11 @@ void DisplayProtocol_Init(void)
            "测量页 A/B/C/D 四颗按钮)。\n"
            "           ⚠️ 开机挡位由 RTL 复位值决定(标称 B = 100 Ω),"
            "但**以 0x18 回读为准** —— 每次测量都现读,不缓存。\n"
-           "           Cs/Cp/D 由同一个复数 Z 出(Z = R0·(VH−VL)/VL,未标定)\n",
+           "           Cs/Cp/D 由同一个复数 Z 出(Z = R0·(VH−VL)/VL,%s)\n",
            (unsigned)MeasureConfig_GetDdsHz(),
            (unsigned)cv_dds_hz_to_code(MeasureConfig_GetDdsHz()),
            (unsigned)cv_bias_tenths_to_code(0u),
-           (unsigned)s_dwell_ms);
+           (unsigned)s_dwell_ms, cal_state_text());
 }
 
 void DisplayProtocol_Process(void)
@@ -2185,9 +2350,10 @@ bool DisplayProtocol_RequestReset(void)
     /* 这次刷新是**必须**的:上面 `ClearAllResults()` 内部那次刷新发生在
      * 清波形**之前**,不重刷的话图上还留着旧点。 */
     UI_Demo_RefreshResultViews();
+    /* 318 px 顶栏:成功句 299 px、失败句 260 px(原句 427 / 386 px 都会被裁)。 */
     UI_Demo_SetStatusText(ok ?
-        "状态:已复位(偏压 0 V,激励 1 MHz,采样率回默认)" :
-        "状态:复位已下发,但参数回读不一致(查日志)");
+        "状态:已复位(偏压 0 V,采样回默认)" :
+        "状态:复位已下发(回读不一致)");
 
     printf("[proto] 复位:0x14 ← 0x%05X(0.0 V);激励/采样率/相位回默认见上面 [mc] 那行\n"
            "        ⚠️ 0x84(CV_CTRL)未动 —— DAC 放行权归 Python 侧\n",
@@ -2595,6 +2761,7 @@ bool DisplayProtocol_RequestCalibration(uint32_t standard)
     s_cal_ok          = 0u;
     s_cal_bad         = 0u;
     s_cal_leg_started = 0u;
+    s_cal_gear_armed  = 0u;
     s_cal_due_ms      = cv_millis() + s_dwell_ms;
 
     (void)bias_apply((float)board.bias_v);
@@ -2605,7 +2772,7 @@ bool DisplayProtocol_RequestCalibration(uint32_t standard)
 
     printf("[cal] 开始 %s:4 腿 × 4 挡 = 16 点;偏压 %.2f V(耐压 %.1f V),"
            "激励 %u Hz。\n"
-           "      继电器只在换腿时切(等 %u ms),挡位当拍换;\n"
+           "      换腿、换挡各等 %u ms(挡位是量程继电器,触点要翻);\n"
            "      挡位一律按 0x18 回读记 —— 不假设切换成功。\n",
            cal_std_name(standard), (double)s_bias_volts, board.rating_v,
            (unsigned)hz, (unsigned)s_dwell_ms);

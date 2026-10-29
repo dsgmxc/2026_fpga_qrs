@@ -8,7 +8,9 @@
     f3 = log10(V75 / V25)           拐点宽度(对数量程 25%~75% 的电压比)
 
 健康总体 = 10 颗 TK9J90T 的中位曲线(TH521 原始数据);
-平台基线 = 本机健康件一次完整扫压(默认 2026-10-24 那次);
+平台基线 = 本机健康件一次完整扫压(默认 2026-10-29 已校准那次);
+         ⚠️ 平台基线日期从 CSV 文件名前缀读,**不要写死** —— 校准开关一变,
+            本机读数就会整体平移,中心必须跟着重采(2026-10-29 踩过);
 中心 = 总体均值 + (本机基线 - 总体均值) = 本机基线的特征。
 协方差 = 10 颗器件的收缩协方差(reg = 0.1),代表"健康器件之间允许多大差异"。
 
@@ -24,7 +26,9 @@ from __future__ import annotations
 
 import argparse
 import csv
+import datetime
 import math
+import re
 import sys
 import zipfile
 from pathlib import Path
@@ -33,7 +37,7 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_ZIP = ROOT / "report/measurements/artifacts/20261023_th521_reference/th521_source.zip"
-DEFAULT_PLATFORM = ROOT / "report/measurements/artifacts/20261024_leg_settle_sweep.csv"
+DEFAULT_PLATFORM = ROOT / "report/measurements/artifacts/20261029_leg_settle_sweep_cal_v2.csv"
 DEFAULT_OUTPUT = ROOT / "src/c_ui/app/anomaly_model_data.h"
 
 LEGS = ("Ciss", "Coss", "Crss")
@@ -245,6 +249,14 @@ def injected_scores(platform_points, model):
 # ---------------------------------------------------------------------------
 # 输出
 # ---------------------------------------------------------------------------
+def baseline_date(platform_path: Path) -> str:
+    """平台基线 CSV 的文件名前缀 YYYYMMDD → `YYYY-MM-DD`;没有前缀就用今天。"""
+    m = re.match(r"(\d{4})(\d{2})(\d{2})", platform_path.name)
+    if m is not None:
+        return f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
+    return datetime.date.today().isoformat()
+
+
 def write_header(path, model, zip_path, platform_path):
     center = ",\n".join(
         "    { " + ", ".join(f"{v:.8e}f" for v in model["center"][leg]) + " }"
@@ -260,7 +272,7 @@ def write_header(path, model, zip_path, platform_path):
 
     text = f"""/* ⚠️ 自动生成,勿手改 —— src/c_ui/tools/fit_anomaly_model.py
  *
- * 生成日期: 2026-10-24
+ * 生成日期: {datetime.date.today().isoformat()}
  * 健康总体: {zip_path.name} 中 10 颗 TK9J90T 的中位曲线(TH521 实测)
  * 平台基线: {platform_path.name}(本机健康件完整扫压,0.1–100 V,60 点/腿)
  * 特征:     [log10 Cs@0.3V, log10 Cs@100V, log10 V50, log10(V75/V25)]
@@ -276,7 +288,7 @@ def write_header(path, model, zip_path, platform_path):
 #define ANOMALY_MODEL_FEATURE_COUNT   4u
 #define ANOMALY_MODEL_THRESHOLD       {THRESHOLD:.1f}f
 #define ANOMALY_MODEL_FAULT_THRESHOLD {FAULT_THRESHOLD:.1f}f
-#define ANOMALY_MODEL_BASELINE_LABEL  "2026-10-24 / 10 颗 TK9J90T"
+#define ANOMALY_MODEL_BASELINE_DATE   "{baseline_date(platform_path)}"
 
 /* 模型中心(平台健康基线的 4 维特征),行序 CISS / COSS / CRSS */
 static const float g_anomaly_model_center[3][4] = {{

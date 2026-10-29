@@ -68,7 +68,10 @@
  *   · 校准偏压只有一个 —— 误差网络假定**与偏压无关**(继电器/DAC/ADC
  *     通路不随 Vds 变),被测件的变化才是信号;
  *   · 标准板按数据手册定义折算成每腿的负载阻抗:
- *       CISS = Cgs + Cgd(+ Rg 串联),COSS = Cds + Cgd,CRSS = Cgd,RG = Rg。
+ *       CISS = Cgs + Cgd(+ Rg 串联),COSS = Cds + Cgd,CRSS = Cgd,
+ *       RG   = Rg 串联 Cgs   ← 2026-10-29 改:本夹具 RG 腿走的是 G-S 通路,
+ *                              不再假定"纯电阻"。两块板都没有 Rg 时,靠 Cgs 不同
+ *                              仍能把两条 RG 负载拉开(见 calibration.c 的注释)。
  *     若测试盒的继电器拓扑与此不同,以实测等效值为准并在报告里说明。
  * ────────────────────────────────────────────────────────────────────────
  */
@@ -229,9 +232,22 @@ const char *Calibration_LastMessage(void);
 /* ---- 应用 ------------------------------------------------------------ */
 
 /**
+ * @brief 该 (挡位, 频率) 现在有没有**可应用**的通道拟合。
+ *        `Calibration_Apply()` 会返回 true 的充要条件(除反演退化外)。
+ *        界面用它区分"已校准"与"部分校准"(2026-10-29:通道级校正后,
+ *        某些挡位的标准板在量程外,拟合退化 ⇒ 即使 16 点都存了也不算校准)。
+ */
+bool Calibration_ChannelAvailable(uint32_t gear_onehot, uint32_t hz);
+
+/**
  * @brief 把实测 Z 反演成被测件 Z。
+ * @param leg         仅作范围校验。🆕 2026-10-29 起**不再按腿取系数** ——
+ *                    系数按 (挡位, 频率) 选一条"通道"拟合(见 calibration.c
+ *                    的 `cal_channel_point()`):扫压与单点必须同一口径,
+ *                    且 CRSS 在两挡的标准板不在量程内、自身拟合退化。
  * @param gear_onehot `0x18` 回读值(0x1/0x2/0x4/0x8)
- * @return true = 已应用(校准开、该点已拟合、反演结果有限);false = 原样使用
+ * @return true = 已应用(校准开、该挡位/频率有可用通道拟合、反演结果有限);
+ *         false = 原样使用
  */
 bool Calibration_Apply(uint32_t leg, uint32_t gear_onehot, uint32_t hz,
                        double z_re_in, double z_im_in,

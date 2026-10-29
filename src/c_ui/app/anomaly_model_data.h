@@ -1,8 +1,8 @@
 /* ⚠️ 自动生成,勿手改 —— src/c_ui/tools/fit_anomaly_model.py
  *
- * 生成日期: 2026-10-24
+ * 生成日期: 2026-10-29
  * 健康总体: th521_source.zip 中 10 颗 TK9J90T 的中位曲线(TH521 实测)
- * 平台基线: 20261024_leg_settle_sweep.csv(本机健康件完整扫压,0.1–100 V,60 点/腿)
+ * 平台基线: 20261029_leg_settle_sweep_cal_v2.csv(本机健康件完整扫压,0.1–100 V,60 点/腿)
  * 特征:     [log10 Cs@0.3V, log10 Cs@100V, log10 V50, log10(V75/V25)]
  * 中心:     平台健康基线的特征(= 总体均值 + 平台偏移,偏移已吸收)
  * 协方差:   10 颗器件收缩协方差(reg = 0.1)的逆
@@ -16,13 +16,13 @@
 #define ANOMALY_MODEL_FEATURE_COUNT   4u
 #define ANOMALY_MODEL_THRESHOLD       25.0f
 #define ANOMALY_MODEL_FAULT_THRESHOLD 100.0f
-#define ANOMALY_MODEL_BASELINE_LABEL  "2026-10-24 / 10 颗 TK9J90T"
+#define ANOMALY_MODEL_BASELINE_DATE   "2026-10-29"
 
 /* 模型中心(平台健康基线的 4 维特征),行序 CISS / COSS / CRSS */
 static const float g_anomaly_model_center[3][4] = {
-    { 3.52080916e+00f, 3.30579103e+00f, 4.89711060e-01f, 7.92958474e-01f },
-    { 3.51834998e+00f, 1.92342019e+00f, 9.67474438e-01f, 4.40134680e-01f },
-    { 3.22791222e+00f, 9.78180517e-01f, 9.59415528e-01f, 2.69298037e-01f }
+    { 3.51182286e+00f, 3.30592353e+00f, 4.93747395e-01f, 8.09148667e-01f },
+    { 3.50771407e+00f, 1.93055172e+00f, 9.66503876e-01f, 4.31496571e-01f },
+    { 3.16392143e+00f, 9.77723605e-01f, 9.60214281e-01f, 2.45080056e-01f }
 };
 
 /* 收缩协方差的逆矩阵,行序同上 */

@@ -31,8 +31,12 @@
 #define CAL_MAGIC       0x5143414Cu   /* "QCAL" */
 /* v2(2026-10-27):标准板 2 的四个字段 + 每点的 flags 扩到 16 位 + load2 实测。
  * v1 文件会被拒(版本号不符),旧校准数据需要重采 —— 这是有意的:
- * 布局变了却"尽量兼容"比直接拒更危险。 */
-#define CAL_VERSION     2u
+ * 布局变了却"尽量兼容"比直接拒更危险。
+ * v3(2026-10-29):布局未变,但**语义变了** ——
+ *   ① 内置默认值改成两块实测标准板(见 `Calibration_Init`);
+ *   ② RG 腿的标称阻抗从"纯 Rg"改成"Rg 串联 Cgs"(见 `standard_z_from`);
+ *   旧文件里的标准板参数和 48 个拟合点都按老模型算的,留着只会误导 ⇒ 一样作废。 */
+#define CAL_VERSION     3u
 
 /* 开路实测与负载实测至少差这么多倍,才把开路当作有效标准;
  * 否则开路那点信号已接近噪声,拟合出的 c 会把噪声放大。 */
@@ -272,11 +276,19 @@ static bool standard_z_from(double cgs_pf, double cgd_pf, double cds_pf,
         }
         *out = cz(0.0, -1e12 / (w * c_pf));
         return true;
-    case 3u:   /* RG = Rg */
-        if (rg_ohm <= 0.0) {
+    case 3u:   /* RG:本夹具的 RG 腿就是 G-S 通路 ⇒ **Rg 与 Cgs 串联**。
+                *
+                * 2026-10-29 实测:板 1(无栅极电阻)RG 腿 Z = 6.675 − 79.502 j Ω,
+                * 而 Cgs = 1986 pF @ 1 MHz 正是 −j80.1 Ω —— 虚部是 Cgs,实部是夹具
+                * 的线阻/接触电阻。原来这里返回纯实数 `Rg`,与实测差一整条电抗。
+                *
+                * 好处:两块板都没有 Rg(都填 0)时,**只要 Cgs 不同,两条 RG 负载
+                * 仍然拉得开**(1 nF vs 1.986 nF ⇒ 间隔 50 %),两点仿射照样成立;
+                * 拟合出来的 b 就把那 ~6.7 Ω 零偏减掉 —— 这正是"去掉零偏"。 */
+        if (cgs_pf <= 0.0) {
             return false;
         }
-        *out = cz(rg_ohm, 0.0);
+        *out = cz(rg_ohm, -1e12 / (w * cgs_pf));
         return true;
     default:
         return false;
@@ -625,18 +637,29 @@ static bool load_file(void)
 bool Calibration_Init(void)
 {
     (void)memset(s_points, 0, sizeof(s_points));
-    s_board.cgs_pf   = 0.0;
-    s_board.cgd_pf   = 0.0;
-    s_board.cds_pf   = 0.0;
+
+    /* 🆕 2026-10-29 内置默认:两块实测标准板,免得每次上电都要在界面上手输。
+     *
+     *   板 1 = 2 nF(Cgs) + 10 pF(Cgd) + 100 pF(Cds),无栅极电阻
+     *   板 2 = 1 nF(Cgs) + 100 pF(Cgd) + 100 pF(Cds),无栅极电阻
+     *
+     * 来源:用户用 LCR 在 **10 kHz** 下量三个引脚配对(G-S / G-D / D-S,第三脚悬空),
+     * 再按 `M_gs = Cgs + Cgd·Cds/(Cgd+Cds)` 等三式反解出单只电容值;
+     * 与夹具 1 MHz 原始单点交叉核对在 +0.3 … +4.3 % 内(残差是夹具并联杂散)。
+     * ⚠️ 这是**标称值**,不是每块板逐只量出来的个体真值 —— 用户仍可在界面里改。
+     * 取 0.1 V 偏压 / 0.1 V 耐压:与板上原有设置一致,防止不小心给标准板上高压。 */
+    s_board.cgs_pf   = 1986.0;
+    s_board.cgd_pf   = 10.0;
+    s_board.cds_pf   = 104.0;
     s_board.rg_ohm   = 0.0;
-    s_board.cgs2_pf  = 0.0;
-    s_board.cgd2_pf  = 0.0;
-    s_board.cds2_pf  = 0.0;
+    s_board.cgs2_pf  = 1000.0;
+    s_board.cgd2_pf  = 104.0;
+    s_board.cds2_pf  = 98.0;
     s_board.rg2_ohm  = 0.0;
-    s_board.rating_v = 100.0;
-    s_board.bias_v   = 1.0;
+    s_board.rating_v = 0.1;
+    s_board.bias_v   = 0.1;
     s_enabled        = 1;              /* 有数据就应用;没数据 Apply 自然返回 false */
-    (void)snprintf(s_message, sizeof(s_message), "未设置标准板参数");
+    (void)snprintf(s_message, sizeof(s_message), "内置默认标准板参数(尚未采集)");
 
     if (load_file()) {
         refit_all();
@@ -895,11 +918,87 @@ const char *Calibration_LastMessage(void)
     return s_message;
 }
 
+/* ---- 通道级校正(2026-10-29) -----------------------------------------------
+ * 🔴 **应用校准时不再按"腿"取系数,而是按 (挡位, 频率) 取一条通道系数。**
+ *
+ * 为什么改(实测,见 report/llm-log/):
+ *   · `sweep_begin_leg()` 从不设 `s_pair_path`,整轮扫压用的是**上一条腿**
+ *     的系数(实测三腿全套了 RG 的 B 挡系数);单点却按本腿取 ⇒ 同一个原始
+ *     读数在两条路径下差成"负电容"。两条路径必须用同一个口径。
+ *   · 更根本的是:CRSS 的两块标准板(10 pF / 104 pF)在 100 Ω 挡上原始 |Z|
+ *     是 13.2 kΩ / 1.6 kΩ,VL/VH 只有 0.6% / 6.5% —— 拟合是外推,
+ *     得到 b = 73.6−319.9j(= 3.3×R0),把正常原始点数推成**正虚部**
+ *     (Cs < 0,物理上不可能)。这种系数不能上屏。
+ *
+ * 选取规则(数据驱动,不写死腿号):
+ *   在已拟合的腿里挑 **|b|/R0 最小**的一条;它必须 ≤ `CAL_B_REL_MAX`(0.25),
+ *   否则该 (挡位, 频率) 判"不可校正",返回未校准(原样使用原始 Z)。
+ *   · b 是**串联偏移**(接触/线阻/继电器),量级应与 R0 无关且很小;
+ *     |b| 大到 R0 的几倍 ⇒ 拟合不是"串联偏移"能解释的,是退化拟合。
+ *   · 实测(2026-10-29 校准文件,1 MHz):B 挡 CISS 0.009 / COSS 0.048 /
+ *     RG 0.057 / CRSS 3.28;C 挡 CISS 0.001;D 挡 CISS 0.001
+ *     ⇒ 三条腿都取 CISS 的那条。A 挡最好的也只有 0.56 ⇒ 判不可校正
+ *     (标准板 80–150 Ω 对 10 Ω 挡全是外推),宁可显示原始值。
+ *
+ * ⛔ 各腿自己的拟合结果**仍原样存盘** —— 那是标定数据,不是应用口径;
+ *    换判据或重标后仍可追溯。 */
+#define CAL_B_REL_MAX   0.25
+
+static const double s_gear_ohms[CAL_GEAR_COUNT] = {10.0, 100.0, 1000.0, 10000.0};
+
+/** @return 该 (挡位, 频率) 应采用的点下标;不可校正返回 -1。 */
+static int cal_channel_point(uint32_t gear_idx, uint32_t freq_idx)
+{
+    int      best = -1;
+    double   best_rel = 0.0;
+    uint32_t leg;
+
+    for (leg = 0u; leg < CAL_LEG_COUNT; ++leg) {
+        const CalFilePoint *p = &s_points[point_index(leg, gear_idx, freq_idx)];
+        double bmag;
+        double rel;
+
+        if ((p->flags & CAL_F_FIT) == 0u) {
+            continue;
+        }
+        bmag = sqrt((p->b_re * p->b_re) + (p->b_im * p->b_im));
+        if (!isfinite(bmag)) {
+            continue;
+        }
+        rel = bmag / s_gear_ohms[gear_idx];
+        if ((best < 0) || (rel < best_rel)) {
+            best = (int)point_index(leg, gear_idx, freq_idx);
+            best_rel = rel;
+        }
+    }
+    if ((best < 0) || (best_rel > CAL_B_REL_MAX)) {
+        return -1;
+    }
+    return best;
+}
+
+bool Calibration_ChannelAvailable(uint32_t gear_onehot, uint32_t hz)
+{
+    int gi;
+    int32_t fi;
+
+    if (!s_enabled) {
+        return false;
+    }
+    gi = gear_index(gear_onehot);
+    fi = Calibration_FreqIndex(hz);
+    if ((gi < 0) || (fi < 0)) {
+        return false;
+    }
+    return (cal_channel_point((uint32_t)gi, (uint32_t)fi) >= 0) ? true : false;
+}
+
 bool Calibration_Apply(uint32_t leg, uint32_t gear_onehot, uint32_t hz,
                        double z_re_in, double z_im_in,
                        double *z_re_out, double *z_im_out)
 {
     int gi;
+    int pi;
     int32_t fi;
     const CalFilePoint *p;
     CalZ m, a, b, c, den, z;
@@ -914,10 +1013,12 @@ bool Calibration_Apply(uint32_t leg, uint32_t gear_onehot, uint32_t hz,
         return false;
     }
 
-    p = &s_points[point_index(leg, (uint32_t)gi, (uint32_t)fi)];
-    if ((p->flags & CAL_F_FIT) == 0u) {
+    /* 通道级:按挡位/频率取,不按腿(理由见 `cal_channel_point()`)。 */
+    pi = cal_channel_point((uint32_t)gi, (uint32_t)fi);
+    if (pi < 0) {
         return false;
     }
+    p = &s_points[pi];
 
     m = cz(z_re_in, z_im_in);
     a = cz(p->a_re, p->a_im);

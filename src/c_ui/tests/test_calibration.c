@@ -311,8 +311,32 @@ int main(void)
         acquire(a, b, c, 0, 1, 1);
         expect_true("guard: weak-open leg still recorded (16/48)",
                     Calibration_EndStandard(CAL_STD_LOAD) == 16u);
-        expect_true("guard: only the weak-open leg loses accuracy",
-                    invert_and_compare(a, b, c, "guard", 2) == 0);
+        /* 🆕 2026-10-29:校准改成**通道级**(按挡位/频率取最好那条腿)后,
+         * 这条退化腿的拟合**不再被应用** —— 四条腿都取良态那条的系数,
+         * 所以 leg 2 现在也能精确反演。原来的期望("只有 leg 2 掉精度")
+         * 是"按腿取系数"时代的结论,已随口径一起作废。 */
+        expect_true("guard: channel fit makes every leg accurate",
+                    invert_and_compare(a, b, c, "guard", -1) == 0);
+    }
+
+    /* 🆕 2026-10-29 通道级校正的守卫:所有腿的拟合都退化时
+     * (这里用 b = 60 Ω ≈ 0.6·R0 构造),**宁可判不可校正**,也不能把
+     * CRSS-B 那种 |b| = 3.3·R0 的系数上屏(它会把 Im 推成正值 ⇒ Cs < 0)。 */
+    {
+        Zc a = {2.0, 0.3};
+        Zc b = {60.0, 0.0};
+        Zc c = {3e-5, 3e-6};
+        double zr = 0.0, zi = 0.0;
+
+        Calibration_ClearAll();
+        set_board();
+        acquire(a, b, c, 0, 1, 1);
+        (void)Calibration_EndStandard(CAL_STD_LOAD);
+        expect_true("channel: degenerate fit is not applied",
+                    !Calibration_Apply(0u, k_gears[1], k_hz, 10.0, -100.0,
+                                       &zr, &zi));
+        expect_true("channel: ChannelAvailable false when degenerate",
+                    !Calibration_ChannelAvailable(k_gears[1], k_hz));
     }
 
     /* 只有 OPEN(没有负载):走平行杂散校正 a=1,b=0,c=1/M_o。
@@ -465,6 +489,32 @@ int main(void)
                     (Calibration_PointFlags(0u, 1u, 2u) & CAL_F_LOAD2) != 0u);
         bad = invert_and_compare(a0, b0, z0, "two loads", -1);
         expect_true("two loads: inversion is exact", bad == 0);
+    }
+
+    /* 🆕 2026-10-29:两块板都**没有**栅极电阻(Rg = 0),但 Cgs 不同
+     * (1 nF vs 1.986 nF)⇒ RG 腿的标称阻抗是 −j/(ωCgs),照样拉得开。
+     * 这条锁住"RG 腿 = Rg **串联 Cgs**"的新模型:旧模型(RG = 纯 Rg)下两块板
+     * 的 RG 腿都是 0 Ω,间隔判据直接判死,总拟合只有 12/16。 */
+    {
+        Zc a0 = {1.05, 0.02};
+        Zc b0 = {3.0, -1.0};
+        Zc z0 = {0.0, 0.0};
+        uint32_t fitted;
+
+        Calibration_ClearAll();
+        Calibration_SetBoardField(CAL_FIELD_CGS, 1986.0);
+        Calibration_SetBoardField(CAL_FIELD_CGD, 10.0);
+        Calibration_SetBoardField(CAL_FIELD_CDS, 104.0);
+        Calibration_SetBoardField(CAL_FIELD_RG, 0.0);
+        set_board2(1000.0, 104.0, 98.0, 0.0);
+        acquire_two_loads(a0, b0, z0);
+        fitted = Calibration_EndStandard(CAL_STD_LOAD2);
+        printf("--   %-28s fitted=%u/48 (want 16)\n",
+               "two loads, Rg = 0 on both", fitted);
+        expect_true("RG leg fits without any Rg", fitted == 16u);
+        expect_true("RG leg defined when Rg = 0",
+                    Calibration_LegDefined(3u) &&
+                    Calibration_LegDefined2(3u));
     }
 
     /* 两块板标称值只差 1% ⇒ 判据不许拟合:两个方程几乎重合,
