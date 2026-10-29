@@ -2850,6 +2850,12 @@ static void UI_CreateCommonStatusHeader(lv_obj_t *screen)
                       UI_COLOR_TEXT_MUTED, 696, 12,
                       (lv_coord_t)LCD_PIXEL_WIDTH - 706, 28,
                       LV_TEXT_ALIGN_RIGHT);
+    /* 兜底:顶栏只有 318 px × 28 px(一行 font_cn_20)。`UI_CreateText()` 默认
+     * 用 LV_LABEL_LONG_WRAP,超长句会折到第二行、被高度裁掉,看起来就是
+     * "话说一半"(2026-10-29 的「…完成:16 点成功 /」)。
+     * 这里改成 DOT 模式:真超了就用省略号收尾。**调用点仍应给短句** ——
+     * 省略号只是不让截断更难看的兜底,不是允许无限长。 */
+    lv_label_set_long_mode(g_header_operation_label, LV_LABEL_LONG_DOT);
     g_status_label = g_header_operation_label;
     UI_UpdateCommonStatus();
 }
@@ -7314,10 +7320,16 @@ static void UI_ShowResults(void)
         UI_CreateText(panel, "AI 异常检测", &ui_font_cn_28,
                       UI_COLOR_TEXT, 20, 14, 600, 38,
                       LV_TEXT_ALIGN_LEFT);
-        UI_CreateText(panel,
-                      "健康基线:10 颗 TK9J90T 中位曲线 · 本机 2026-10-24",
-                      &ui_font_cn_20, UI_COLOR_TEXT_MUTED,
-                      20, 56, 936, 26, LV_TEXT_ALIGN_LEFT);
+        {
+            char baseline_line[96];
+
+            snprintf(baseline_line, sizeof(baseline_line),
+                     "健康基线:10 颗 TK9J90T 中位曲线 · 本机 %s",
+                     Anomaly_BaselineDate());
+            UI_CreateText(panel, baseline_line,
+                          &ui_font_cn_20, UI_COLOR_TEXT_MUTED,
+                          20, 56, 936, 26, LV_TEXT_ALIGN_LEFT);
+        }
 
         for (leg = 0u; leg < ANOMALY_LEG_COUNT; ++leg)
         {
@@ -8227,25 +8239,88 @@ void UI_Demo_UpdateAllCapacitance(uint32_t path,
                                 LV_PART_MAIN);
 }
 
+/* 从 "12.34 Ω" 这样的显示串里取出纯数字部分。
+ *
+ * 🔴 2026-10-29 实测:协议层传进来的是带单位的 "3.11 Ω",而
+ *    UI_ParseNonnegativeDecimal() 只接受纯数字 —— 它遇到空格就返回 false。
+ *    失败是**静默**的:测量页那张 RG 卡在解析失败分支之外更新,看起来正常;
+ *    但 g_latest_rg_valid 永远不会置位 ⇒ 结果汇总的 RG 卡、工程参数卡的 Rg、
+ *    二维码里的 Rg 全部拿不到值。用户报的「rg 测量结果没有在汇总页显示」
+ *    就是这一条。
+ *    ⇒ 在这里把单位与空白剥掉,数字部分交给严格解析器;同时避免界面
+ *      显示成 "3.11 Ω Ω"(本函数自己会补 Ω)。 */
+static bool UI_ExtractDecimalText(const char *text,
+                                  char *out, size_t capacity)
+{
+    size_t read = 0u;
+    size_t write = 0u;
+
+    if ((text == NULL) || (out == NULL) || (capacity == 0u))
+    {
+        return false;
+    }
+    while ((text[read] == ' ') || (text[read] == '\t'))
+    {
+        ++read;
+    }
+    while (text[read] != '\0')
+    {
+        char character = text[read];
+
+        if (((character < '0') || (character > '9')) &&
+            (character != '.'))
+        {
+            break;
+        }
+        if ((write + 1u) >= capacity)
+        {
+            return false;
+        }
+        out[write++] = character;
+        ++read;
+    }
+    if (write == 0u)
+    {
+        return false;
+    }
+    /* 数字之后只允许空白(例如 "3.11 Ω");"3.11abc" 不算合法数字串 */
+    if ((text[read] != '\0') && (text[read] != ' ') && (text[read] != '\t'))
+    {
+        return false;
+    }
+    out[write] = '\0';
+    return true;
+}
+
 void UI_Demo_UpdateResistance(const char *resistance_text, uint32_t valid)
 {
+    char number[24];
+    bool have_number;
+
     if (resistance_text == NULL)
     {
         return;
     }
-    if (valid != 0u)
+    have_number = UI_ExtractDecimalText(resistance_text, number,
+                                        sizeof(number));
+    if ((valid != 0u) && have_number)
     {
         float resistance;
 
-        if (UI_ParseNonnegativeDecimal(resistance_text, &resistance) &&
+        if (UI_ParseNonnegativeDecimal(number, &resistance) &&
             isfinite(resistance) &&
             (resistance >= 0.0f))
         {
             g_latest_rg_ohm = resistance;
             g_latest_rg_valid = 1u;
-            UI_ResultRecord(3u, resistance_text, NULL, NULL, valid);
+            UI_ResultRecord(3u, number, NULL, NULL, valid);
             /* 结果页的 Rg 参数卡与曲线摘要立即跟上。 */
             UI_UpdateSweepAnalysisCard();
+        }
+        else
+        {
+            printf("[ui] Rg 文本无法解析:\"%s\" —— 汇总页/二维码将保持 --\n",
+                   resistance_text);
         }
     }
     if ((g_single_result_label == NULL) ||
@@ -8253,7 +8328,8 @@ void UI_Demo_UpdateResistance(const char *resistance_text, uint32_t valid)
     {
         return;
     }
-    lv_label_set_text_fmt(g_single_result_label, "RG\n%s Ω", resistance_text);
+    lv_label_set_text_fmt(g_single_result_label, "RG\n%s Ω",
+                          have_number ? number : resistance_text);
     if (g_single_result_note_label != NULL)
     {
         lv_label_set_text(g_single_result_note_label,

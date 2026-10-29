@@ -77,6 +77,9 @@ void UI_Demo_UpdateAllCapacitance(uint32_t path,
                                   const char *cp_text,
                                   const char *d_text,
                                   uint32_t valid);
+/* @p resistance_text 可带单位(如 "3.11 Ω")—— 界面剥掉单位后解析,
+   显示时自己补 Ω。⛔ 别把单位当成会重复显示:2026-10-29「RG 结果不进
+   汇总页」的根因就是解析器只收纯数字,而调用方传了带单位的串。 */
 void UI_Demo_UpdateResistance(const char *resistance_text, uint32_t valid);
 /* 调试波形(结果页的「单点波形」/「扫压波形」两页)。
    kind: 0 = 单点测量过程   1 = 扫压过程(电压/电流包络)
