@@ -57,6 +57,11 @@ int Anomaly_Evaluate(uint32_t leg,
 const char *Anomaly_LevelText(uint32_t level);
 const char *Anomaly_FeatureText(uint32_t feature);
 
+/* @brief 平台健康基线的采集日期(`YYYY-MM-DD`,来自生成的模型头文件)。
+ *        界面用它显示"本机 YYYY-MM-DD",不要再把日期写死在 UI 里 ——
+ *        校准开关一变,基线就得重采,日期也必须跟着变。 */
+const char *Anomaly_BaselineDate(void);
+
 #ifdef __cplusplus
 }
 #endif

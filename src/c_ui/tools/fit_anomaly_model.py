@@ -11,16 +11,25 @@
 平台基线 = 本机健康件一次完整扫压(默认 2026-10-29 已校准那次);
          ⚠️ 平台基线日期从 CSV 文件名前缀读,**不要写死** —— 校准开关一变,
             本机读数就会整体平移,中心必须跟着重采(2026-10-29 踩过);
-中心 = 总体均值 + (本机基线 - 总体均值) = 本机基线的特征。
-协方差 = 10 颗器件的收缩协方差(reg = 0.1),代表"健康器件之间允许多大差异"。
+重复性   = 同一块健康板的多次完整扫压(默认 2026-10-29 的 4 轮,当前通道级校准);
+中心 = 重复扫压特征均值(没有 --repeat 时才退回单次平台基线);
+协方差 = 10 颗器件的收缩协方差(reg = 0.1)
+         + diag(平台重复性方差)  ← 这一项不能省
+         器件协方差只描述"健康器件之间差多少",不包含**本机自己的重复性**。
+         平台在两次扫压之间会因校准周期、继电器状态等整体平移 ~1 %,而 f3
+         会把平移放大成 ~5 %;只用器件协方差时,健康件会被判成"异常"
+         (2026-10-29 CISS 117 分)。重复性项就是给这种平台漂移留出的预算。
 
 判据:马氏距离平方 score = d^T P d。
-阈值 25 ≈ 健康样本最大得分(留一法 8.99 / 两两 9.07)的 2.8 倍;
-score >= 100 判"异常"(对应注入 +10% 电平、8% 电压偏移、30% 拐点拓宽量级)。
+阈值 25 / 100 见下方常数;健康重复扫压的得分应远低于 25。
+         score >= 100 判"异常"(对应注入 +10% 电平、8% 电压偏移、30% 拐点拓宽量级)。
 
 用法:
     python3 src/c_ui/tools/fit_anomaly_model.py                    # 写 src/c_ui/app/anomaly_model_data.h
     python3 src/c_ui/tools/fit_anomaly_model.py --check            # 只打印健康/注入分数,不写文件
+    python3 src/c_ui/tools/fit_anomaly_model.py --no-repeat        # 旧行为(只含器件协方差,不推荐)
+
+    重复性 CSV 由 `extract_platform_repeats.py` 从板上日志导出。
 """
 from __future__ import annotations
 
@@ -36,8 +45,24 @@ from pathlib import Path
 import numpy as np
 
 ROOT = Path(__file__).resolve().parents[3]
-DEFAULT_ZIP = ROOT / "report/measurements/artifacts/20261023_th521_reference/th521_source.zip"
-DEFAULT_PLATFORM = ROOT / "report/measurements/artifacts/20261029_leg_settle_sweep_cal_v2.csv"
+
+
+def _data_dir() -> Path:
+    """数据目录:工作区是 `report/measurements/artifacts/`,交付仓库是 `board/measurements/artifacts/`。
+
+    两棵树的源码相同、数据位置不同;写死其中一个,另一棵树里默认参数会指到不存在的路径
+    (而且报错发生在 `load_*` 里,看起来像"数据丢了")。按存在性选,两个都保留。
+    """
+    for rel in ("report/measurements/artifacts", "board/measurements/artifacts"):
+        if (ROOT / rel).is_dir():
+            return ROOT / rel
+    return ROOT / "report/measurements/artifacts"
+
+
+DATA = _data_dir()
+DEFAULT_ZIP = DATA / "20261023_th521_reference/th521_source.zip"
+DEFAULT_PLATFORM = DATA / "20261029_leg_settle_sweep_cal_v2.csv"
+DEFAULT_REPEAT = DATA / "20261029_platform_repeat_cal_v2.csv"
 DEFAULT_OUTPUT = ROOT / "src/c_ui/app/anomaly_model_data.h"
 
 LEGS = ("Ciss", "Coss", "Crss")
@@ -158,6 +183,51 @@ def load_platform(path):
     return out
 
 
+def load_repeats(path):
+    """读多次完整扫压,返回 {run: {leg: [(v, cs), ...]}}。
+
+    CSV 列 `run,leg,bias_v,Cs_pF`,由 `extract_platform_repeats.py` 从板上日志导出。
+    一轮必须三条腿齐全、每腿至少 8 点、电压严格递增;否则整轮丢弃并提示 ——
+    不拿半截曲线估计方差。
+    """
+    runs = {}
+    with open(path, newline="", encoding="utf-8-sig") as f:
+        for row in csv.DictReader(f):
+            leg = (row.get("leg") or "").strip().upper()
+            run = (row.get("run") or "").strip()
+            try:
+                bias = float(row["bias_v"])
+                cs = float(row["Cs_pF"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if not run or leg not in CSV_LEGS or not (bias > 0.0) or not (cs > 0.0):
+                continue
+            runs.setdefault(run, {}).setdefault(leg, []).append((bias, cs))
+
+    good = {}
+    for run, legs in runs.items():
+        if any(leg not in legs for leg in CSV_LEGS):
+            print(f"跳过重复扫压 {run}:缺腿", file=sys.stderr)
+            continue
+        ok = True
+        for leg in CSV_LEGS:
+            pts = sorted(legs[leg])
+            if len(pts) < 8 or any(
+                pts[k][0] >= pts[k + 1][0] for k in range(len(pts) - 1)
+            ):
+                ok = False
+                break
+            legs[leg] = pts
+        if not ok:
+            print(f"跳过重复扫压 {run}:点数不足或电压不递增", file=sys.stderr)
+            continue
+        good[run] = legs
+
+    if len(good) < 3:
+        raise SystemExit(f"重复扫压不足 3 轮(实际 {len(good)}):{path}")
+    return good
+
+
 def shrink_cov(x, reg=SHRINKAGE):
     cov = np.cov(x.T, ddof=1)
     return (1.0 - reg) * cov + reg * np.eye(x.shape[1]) * np.trace(cov) / x.shape[1]
@@ -166,7 +236,7 @@ def shrink_cov(x, reg=SHRINKAGE):
 # ---------------------------------------------------------------------------
 # 模型
 # ---------------------------------------------------------------------------
-def build(cohort_points, platform_points):
+def build(cohort_points, platform_points, repeat_points=None):
     cohort = np.array(
         [[features(dev[leg]) for leg in LEGS] for dev in cohort_points]
     )  # [device][leg][feature]
@@ -174,10 +244,38 @@ def build(cohort_points, platform_points):
         [features(platform_points[leg]) for leg in CSV_LEGS]
     )  # [leg][feature]
 
-    mu = cohort.mean(axis=0)
-    center = platform.copy()  # 平台健康基线 = 模型中心
+    run_ids = []
+    if repeat_points:
+        run_ids = list(repeat_points)
+        repeat = np.array(
+            [[features(repeat_points[run][leg]) for leg in CSV_LEGS]
+             for run in run_ids]
+        )  # [run][leg][feature]
+        bad = [
+            (run_ids[r], CSV_LEGS[leg])
+            for r in range(repeat.shape[0])
+            for leg in range(len(CSV_LEGS))
+            if not np.isfinite(repeat[r, leg, :]).all()
+        ]
+        if bad:
+            raise SystemExit(
+                "重复扫压特征无效(曲线不单调/穿越点缺失): "
+                + ", ".join(f"{run}/{leg}" for run, leg in bad)
+            )
+        center = repeat.mean(axis=0)  # [leg][feature] 健康重复扫压的特征均值
+        repeat_var = np.var(repeat, axis=0, ddof=1)  # [leg][feature]
+    else:
+        repeat = None
+        center = platform.copy()  # 旧行为:单次平台基线 = 模型中心
+        repeat_var = np.zeros_like(platform)
+
+    # 器件协方差描述"健康器件之间差多少";加上平台重复性,才描述"同一块健康板
+    # 今天再扫一遍能差多少"。两者缺一,健康重复扫压就会撞上阈值。
     inv_cov = np.stack(
-        [np.linalg.inv(shrink_cov(cohort[:, leg, :])) for leg in range(len(LEGS))]
+        [
+            np.linalg.inv(shrink_cov(cohort[:, leg, :]) + np.diag(repeat_var[leg]))
+            for leg in range(len(LEGS))
+        ]
     )
 
     loo = []
@@ -185,13 +283,15 @@ def build(cohort_points, platform_points):
         worst = 0.0
         for k in range(cohort.shape[0]):
             tr = np.delete(cohort[:, leg, :], k, axis=0)
+            eff = shrink_cov(tr) + np.diag(repeat_var[leg])
             d = cohort[k, leg, :] - tr.mean(axis=0)
-            worst = max(worst, float(d @ np.linalg.inv(shrink_cov(tr)) @ d))
+            worst = max(worst, float(d @ np.linalg.inv(eff) @ d))
         loo.append(worst)
 
     pairwise = []
     for leg in range(len(LEGS)):
-        p = np.linalg.inv(shrink_cov(cohort[:, leg, :]))
+        eff = shrink_cov(cohort[:, leg, :]) + np.diag(repeat_var[leg])
+        p = np.linalg.inv(eff)
         worst = 0.0
         for a in range(cohort.shape[0]):
             for b in range(cohort.shape[0]):
@@ -200,12 +300,24 @@ def build(cohort_points, platform_points):
                     worst = max(worst, float(d @ p @ d))
         pairwise.append(worst)
 
+    repeat_scores = []
+    if repeat is not None:
+        repeat_scores = [
+            [float(d @ inv_cov[leg] @ d) for d in (repeat[:, leg, :] - center[leg])]
+            for leg in range(len(LEGS))
+        ]
+
     return {
         "cohort": cohort,
-        "mu": mu,
+        "platform": platform,
+        "repeat": repeat,
+        "repeat_var": repeat_var,
+        "repeat_scores": repeat_scores,
+        "run_ids": run_ids,
+        "mu": cohort.mean(axis=0),
         "center": center,
         "inv_cov": inv_cov,
-        "offset": platform - mu,
+        "offset": center - cohort.mean(axis=0),
         "loo": loo,
         "pairwise": pairwise,
     }
@@ -257,7 +369,7 @@ def baseline_date(platform_path: Path) -> str:
     return datetime.date.today().isoformat()
 
 
-def write_header(path, model, zip_path, platform_path):
+def write_header(path, model, zip_path, platform_path, repeat_path=None):
     center = ",\n".join(
         "    { " + ", ".join(f"{v:.8e}f" for v in model["center"][leg]) + " }"
         for leg in range(3)
@@ -270,17 +382,58 @@ def write_header(path, model, zip_path, platform_path):
         inv_rows.append("    {\n" + ",\n".join(rows) + "\n    }")
     inv_cov = ",\n".join(inv_rows)
 
+    center_comment = (
+        "健康重复扫压的特征均值" if repeat_path is not None
+        else "平台健康基线的 4 维特征"
+    )
+    if repeat_path is not None:
+        center_desc = (
+            f"{len(model['run_ids'])} 次本机健康扫压的特征均值"
+            f"({repeat_path.name})"
+        )
+        cov_desc = (
+            "10 颗器件收缩协方差(reg = 0.1) + diag(平台重复性方差)\n"
+            " *           重复性 σ: " + " / ".join(
+                f"{CSV_LEGS[leg]} ["
+                + ", ".join(f"{v:.4f}" for v in np.sqrt(model['repeat_var'][leg]))
+                + "]"
+                for leg in range(3)
+            )
+        )
+        repeat_line = (
+            f" * 重复扫压: {repeat_path.name}("
+            f"{len(model['run_ids'])} 轮同配置扫压,用于估计本机重复性)\n"
+        )
+        date_src = repeat_path
+        healthy_max = max(
+            (s for scores in model["repeat_scores"] for s in scores), default=0.0
+        )
+        healthy_line = (
+            f"健康样本最大得分:留一法 {max(model['loo']):.2f} / "
+            f"两两 {max(model['pairwise']):.2f} / "
+            f"重复扫压 {healthy_max:.2f}"
+        )
+    else:
+        center_desc = "平台健康基线的特征(= 总体均值 + 平台偏移,偏移已吸收)"
+        cov_desc = "10 颗器件收缩协方差(reg = 0.1)的逆(未含平台重复性)"
+        repeat_line = ""
+        date_src = platform_path
+        healthy_line = (
+            f"健康样本最大得分:留一法 {max(model['loo']):.2f} / "
+            f"两两 {max(model['pairwise']):.2f}"
+        )
+
     text = f"""/* ⚠️ 自动生成,勿手改 —— src/c_ui/tools/fit_anomaly_model.py
  *
  * 生成日期: {datetime.date.today().isoformat()}
  * 健康总体: {zip_path.name} 中 10 颗 TK9J90T 的中位曲线(TH521 实测)
  * 平台基线: {platform_path.name}(本机健康件完整扫压,0.1–100 V,60 点/腿)
- * 特征:     [log10 Cs@0.3V, log10 Cs@100V, log10 V50, log10(V75/V25)]
- * 中心:     平台健康基线的特征(= 总体均值 + 平台偏移,偏移已吸收)
- * 协方差:   10 颗器件收缩协方差(reg = 0.1)的逆
+{repeat_line} * 特征:     [log10 Cs@0.3V, log10 Cs@100V, log10 V50, log10(V75/V25)]
+ * 中心:     {center_desc}
+ * 协方差:   {cov_desc}
  * 阈值:     score < {THRESHOLD:.0f} 正常;{THRESHOLD:.0f}–{FAULT_THRESHOLD:.0f} 可疑;≥ {FAULT_THRESHOLD:.0f} 异常
- *           健康样本最大得分:留一法 {max(model['loo']):.2f} / 两两 {max(model['pairwise']):.2f}
- * ⚠️ 只对**当前固定配置**有效(1 MHz、32.5 MSPS、自动挡位)。
+ *           {healthy_line}
+ * ⚠️ 只对**当前固定配置**有效(1 MHz、32.5 MSPS、B 挡 100 Ω、通道级校准)。
  */
 #ifndef ANOMALY_MODEL_DATA_H
 #define ANOMALY_MODEL_DATA_H
@@ -288,14 +441,14 @@ def write_header(path, model, zip_path, platform_path):
 #define ANOMALY_MODEL_FEATURE_COUNT   4u
 #define ANOMALY_MODEL_THRESHOLD       {THRESHOLD:.1f}f
 #define ANOMALY_MODEL_FAULT_THRESHOLD {FAULT_THRESHOLD:.1f}f
-#define ANOMALY_MODEL_BASELINE_DATE   "{baseline_date(platform_path)}"
+#define ANOMALY_MODEL_BASELINE_DATE   "{baseline_date(date_src)}"
 
-/* 模型中心(平台健康基线的 4 维特征),行序 CISS / COSS / CRSS */
+/* 模型中心({center_comment}),行序 CISS / COSS / CRSS */
 static const float g_anomaly_model_center[3][4] = {{
 {center}
 }};
 
-/* 收缩协方差的逆矩阵,行序同上 */
+/* 有效协方差的逆(器件协方差 + 平台重复性),行序同上 */
 static const float g_anomaly_model_inv_cov[3][4][4] = {{
 {inv_cov}
 }};
@@ -309,21 +462,37 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--zip", type=Path, default=DEFAULT_ZIP)
     ap.add_argument("--platform", type=Path, default=DEFAULT_PLATFORM)
+    ap.add_argument("--repeat", type=Path, default=DEFAULT_REPEAT,
+                    help="多次健康扫压 CSV(extract_platform_repeats.py 导出)")
+    ap.add_argument("--no-repeat", action="store_true",
+                    help="不读重复性数据(旧行为;健康件会被平台漂移误报)")
     ap.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     ap.add_argument("--check", action="store_true", help="只打印分数,不写头文件")
     args = ap.parse_args()
 
     devices = load_cohort(args.zip)
     platform = load_platform(args.platform)
-    model = build(devices, platform)
+    repeats = None if args.no_repeat else load_repeats(args.repeat)
+    model = build(devices, platform, repeats)
 
-    print(f"器件数 {len(devices)};中心 = 平台基线")
+    source = "重复扫压均值" if repeats is not None else "单次平台基线"
+    print(f"器件数 {len(devices)};中心 = {source}")
     print("留一法最大健康分 : " + " ".join(f"{v:6.2f}" for v in model["loo"]))
     print("两两最大健康分   : " + " ".join(f"{v:6.2f}" for v in model["pairwise"]))
-    print("平台基线自评分   : " + " ".join(f"{score(model['center'][leg], model, leg):6.2f}" for leg in range(3)))
+    print("平台基线得分     : " + " ".join(
+        f"{score(model['platform'][leg], model, leg):6.2f}" for leg in range(3)))
     print("平台偏移(log10)  : " + " ".join(
         f"{CSV_LEGS[leg]}[{', '.join(f'{v:+.3f}' for v in model['offset'][leg])}]"
         for leg in range(3)))
+    if repeats is not None:
+        for leg in range(3):
+            print(f"重复性 σ {CSV_LEGS[leg]:4s} : " + " ".join(
+                f"{FEATURE_NAMES[k]}={model['repeat_var'][leg][k] ** 0.5:.4f}"
+                for k in range(4)))
+        print("重复扫压得分(应 < 阈值):")
+        for r, run in enumerate(model["run_ids"]):
+            vals = [model["repeat_scores"][leg][r] for leg in range(3)]
+            print(f"  run {run:>6s}  CISS {vals[0]:6.2f}  COSS {vals[1]:6.2f}  CRSS {vals[2]:6.2f}")
     print("注入异常得分:")
     for (kind, mag), vals in injected_scores(platform, model).items():
         print(f"  {kind:<5} x{mag:<4}  CISS {vals[0]:8.1f}  COSS {vals[1]:8.1f}  CRSS {vals[2]:8.1f}")
@@ -331,7 +500,8 @@ def main():
     if args.check:
         return
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    write_header(args.output, model, args.zip, args.platform)
+    write_header(args.output, model, args.zip, args.platform,
+                 None if repeats is None else args.repeat)
     print(f"\n已写入 {args.output}")
 
 

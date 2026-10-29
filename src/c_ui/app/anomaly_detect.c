@@ -263,6 +263,11 @@ int Anomaly_Evaluate(uint32_t leg,
     return 1;
 }
 
+const char *Anomaly_BaselineDate(void)
+{
+    return ANOMALY_MODEL_BASELINE_DATE;
+}
+
 const char *Anomaly_LevelText(uint32_t level)
 {
     return (level < 3u) ? s_level_text[level] : "?";

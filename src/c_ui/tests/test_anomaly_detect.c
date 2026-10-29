@@ -9,8 +9,10 @@
  * (本机健康件完整扫压,**已应用三标准校准**,60 点/腿)。**它是生成模型时用的同一份数据** ——
  * v2 与 v1 的差别:2026-10-29 起校准改成**通道级**(按挡位/频率选一条拟合,
  * 不再按腿),v1 那次扫压三腿都套的是 RG 腿系数,CRSS 曲线是错的 ⇒ 已废弃。
- * 所以基线得分必须≈0;这不是"自己考自己":电平乘 1.05 / 1.10 的注入样本
- * 完全不在建模数据里,检测它们才是模型有效性的证据。
+ * 基线得分不再是 0:模型中心取的是 **4 轮**重复扫压的特征均值
+ * (`20261029_platform_repeat_cal_v2.csv`),这份基线只是其中一轮 ⇒ 得分 1–2,
+ * 仍远低于阈值 25。电平乘 1.05 / 1.10 的注入样本完全不在建模数据里,
+ * 检测它们才是模型有效性的证据。
  *
  * 电压网格由固件生成:0.1 V → 100 V,60 点对数等分(3 decade / 59 间隔)。
  */
@@ -93,7 +95,7 @@ static void fill_voltage(float *v)
 int main(void)
 {
     static const float *const curves[3] = {g_ciss_pf, g_coss_pf, g_crss_pf};
-    static const double expect_score[3] = {1709.2, 712.0, 53.2};
+    static const double expect_score[3] = {443.0, 265.8, 13.6};
     static const double expect_feat[3][4] =
     {
         {3.5118, 3.3059, 0.4938, 0.8091},
@@ -110,14 +112,14 @@ int main(void)
     fill_voltage(v);
     memset(valid, 1, sizeof(valid));
 
-    /* ① 平台基线:得分必须≈0,特征必须等于模型常数 */
+    /* ① 平台基线(4 轮重复扫压里的一轮):得分必须远低于阈值,特征对上曲线 */
     for (leg = 0u; leg < 3u; ++leg)
     {
         memcpy(c, curves[leg], sizeof(c));
         check("baseline evaluate", Anomaly_Evaluate(leg, v, c, valid,
                                                     POINT_COUNT, &r) == 1,
               1.0, 1.0);
-        check("baseline score < 0.05", r.score < 0.05f, (double)r.score, 0.0);
+        check("baseline score < 5", r.score < 5.0f, (double)r.score, 0.0);
         check("baseline level NORMAL", r.level == ANOMALY_LEVEL_NORMAL,
               (double)r.level, 0.0);
         for (i = 0u; i < 4u; ++i)
@@ -128,7 +130,7 @@ int main(void)
         }
     }
 
-    /* ② 电平 x1.10:三条腿都必须离开"正常" */
+    /* ② 电平 x1.10:CISS/COSS 必须离开"正常";CRSS 只到 13.6(见 ④),如实断言 */
     for (leg = 0u; leg < 3u; ++leg)
     {
         memcpy(c, curves[leg], sizeof(c));
@@ -142,11 +144,47 @@ int main(void)
         check("x1.10 score", fabs((double)r.score - expect_score[leg]) /
                               expect_score[leg] < 0.02,
               (double)r.score, expect_score[leg]);
-        check("x1.10 not NORMAL", r.level != ANOMALY_LEVEL_NORMAL,
-              (double)r.level, 1.0);
+        if (leg != 2u)
+        {
+            check("x1.10 CISS/COSS not NORMAL", r.level != ANOMALY_LEVEL_NORMAL,
+                  (double)r.level, 1.0);
+        }
+        else
+        {
+            /* 平台自身的 CRSS 重复性 σ ≈ 2 %(4 轮里有 ~3.7 % 的重新校准台阶),
+               ⇒ 纯增益 10 % 只有 ~3.7σ。想要 25 分必须到 ~15 %。
+               **这是有意接受的代价**,不是漏判 bug:旧模型把这里算成 53.2,
+               代价是健康板被误报(2026-10-29 CISS 117 分)。 */
+            check("x1.10 CRSS now NORMAL(有意)", r.level == ANOMALY_LEVEL_NORMAL,
+                  (double)r.level, 0.0);
+        }
     }
 
-    /* ③ 电平 x1.05:CISS/COSS 仍能抓到,CRSS 在 25 以下(如实测统计) */
+    /* ③ CRSS 的大偏差仍要分级报出:取代 ② 里被平台重复性吃掉的灵敏度 */
+    {
+        static const double crss_score[2] = {62.9, 140.1};
+        static const double crss_mag[2] = {1.20, 1.30};
+        static const int crss_level[2] = {ANOMALY_LEVEL_SUSPECT, ANOMALY_LEVEL_FAULT};
+        uint32_t k;
+
+        for (k = 0u; k < 2u; ++k)
+        {
+            memcpy(c, curves[2], sizeof(c));
+            for (i = 0u; i < POINT_COUNT; ++i)
+            {
+                c[i] *= (float)crss_mag[k];
+            }
+            check("CRSS big-level evaluate",
+                  Anomaly_Evaluate(2u, v, c, valid, POINT_COUNT, &r) == 1, 1.0, 1.0);
+            check("CRSS big-level score", fabs((double)r.score - crss_score[k]) /
+                                          crss_score[k] < 0.02,
+                  (double)r.score, crss_score[k]);
+            check("CRSS big-level level", (int)r.level == crss_level[k],
+                  (double)r.level, (double)crss_level[k]);
+        }
+    }
+
+    /* ④ 电平 x1.05:CISS/COSS 仍能抓到,CRSS 在 25 以下(如实测统计) */
     for (leg = 0u; leg < 3u; ++leg)
     {
         memcpy(c, curves[leg], sizeof(c));
@@ -163,7 +201,7 @@ int main(void)
               (double)r.level, (leg == 2u) ? 0.0 : 2.0);
     }
 
-    /* ④ 数据不足 / 全无效:必须拒绝,不能给分数 */
+    /* ⑤ 数据不足 / 全无效:必须拒绝,不能给分数 */
     check("5 points rejected",
           Anomaly_Evaluate(0u, v, curves[0], valid, 5u, &r) == 0, 0.0, 0.0);
     check("rejected -> valid 0", r.valid == 0u, (double)r.valid, 0.0);
