@@ -1,64 +1,16 @@
 `timescale 1ns / 1ps
 //=============================================================================
-//  cv_sys.v  ——  PL 侧顶层容器(设计清单 R1)
+//  cv_sys.v —— PL 侧顶层容器
 //
-//  【职责】只做「例化 + 引线」。不含任何逻辑,不含任何寄存器。
-//
-//  【为什么要这一层】
-//    PS 和 LCD 必须在【同一个顶层】里才能连起来。现状是两个世界:
-//      · cv_axi_lite_slave 活在 BD 生成的 system_wrapper 里
-//      · lcd_driver/lcd_display 活在手写顶层 qrs.v 里
-//    一个工程只有一个顶层,二者互斥。
-//    把两边一起包进 cv_sys,BD 里只挂 cv_sys 这一个 module_ref 即可。
-//
-//  【v1 —— 纯搬运,零新逻辑】(2026-10-01 上午)
-//    · cv_axi_lite_slave        原样例化,一行未改
-//    · lcd_driver / lcd_display 原样例化,一行未改(搬自 qrs.v)
-//    · 两者之间【刻意没有任何信号连接】—— 只证明「进了同一个顶层,谁也没坏」
-//    ✅ 已达成:上板彩条照旧 且 SCRATCH 回环通过
-//
-//  【v2 —— 接上 PS 控制】(2026-10-01 下午,当前版本)
-//    · slave 新增 0x50 LCD_CTRL / 0x54 LCD_FILL,并引出 cfg_lcd_ctrl / cfg_lcd_fill
-//    · cv_sys 内加一级像素源 mux:厂商彩条 ↔ 整屏填充
-//    · lcd_display / lcd_driver 【仍然一行未改】
-//    ✅ 验收判据:PS 写 0x54 换色、写 0x50 切源 → 整屏变色;
-//                复位默认 cfg_lcd_ctrl = 0 → 上电仍是彩条,v1 那次回归自动保留
-//
-//  【时钟域】
-//    clk_axi = PS FCLK_CLK0 = 50 MHz,同时直接用作 LCD 的 PCLK。
-//    两域同频 ⇒ 不需要 cdc_sync、不需要额外 MMCM、不需要双口 BRAM 的独立写时钟。
-//    (D22 附带说明:clk_axi 定为 50 MHz 后,clk_lcd 就是 clk_axi —— 这是净简化)
-//
-//  【复位】
-//    qrs.v 里用的是 rst_n & locked;BD 里 s_axi_aresetn 来自 rst_ps7_0_50M,
-//    该 IP 已经把 locked 与同步释放处理掉了,所以这里直接用 s_axi_aresetn。
-//
-//  【v3 —— 换掉厂商时序件,补显示寄存器端口】(2026-10-02,当前版本)
-//    · 新增 lcd_timing.v 取代厂商 lcd_driver 的【时序】角色
-//        — 输出级(lcd_rgb/de/clk/bl/rst)搬到本文件,五行 assign
-//        — ★ 修掉厂商 pixel_ypos 的 off-by-one(y ∈ 1..600 → 0..599),
-//          画彩条看不出来,但帧缓存按行取数会整体错一行(详见 lcd_timing.v 头部)
-//        — HS/VS 默认仍恒高,保持已验证配置(要开脉冲见 lcd_timing.v 参数说明)
-//        — 新增 line_start / frame_start / vblank 三个节拍输出,本版【还没人用】,
-//          是给 Chunk B 的 lcd_fb_reader / lcd_vblank_ctrl 预留的
-//    · lcd_display(厂商彩条)【保留且一行未改】—— 它是 src_sel=0 的测试图源,
-//      也是"换掉时序件后屏没坏"的回归证据
-//    · slave 新增 7 个寄存器(0x58~0x70)并引出 cfg_/sts_ 端口;
-//      本版 sts_* 【全部接 0】—— 因为产生它们的模块(fb_reader / vblank_ctrl /
-//      gt911_ctrl)属于 Chunk B,尚不存在。读 0x64~0x70 读到 0 是预期行为。
-//    · src_sel 由 1 位扩到 2 位:0=彩条 / 1=整屏填充 / 2=DDR 帧缓存(本版恒黑)
-//
-//  ⚠️ 【本版验收判据】与 v2 逐条对照,老功能一项都不能少:
-//      ① 上电仍是厂商彩条            (src_sel 复位 = 0)
-//      ② PS 写 0x54 换色 + 0x50 切源 → 整屏变色
-//      ③ PS 写 0x58/0x5C 基址、读回  → 读写通(回环,不依赖任何数据通路)
-//      ④ PS 读 0x60 → 读到 0         (无 vblank_ctrl,预期值)
-//      ★ 判据 ③ 是本次新增的**独立可测点**:不碰 DDR、不碰 BD,就能证明
-//        新寄存器译码对 —— 这是整条显示通路里第一个能被单独验证的环节。
-//
-//  【再下一版(Chunk B,需要你在 Vivado 里动 BD)】
-//    新增 lcd_fb_reader(AXI4 读主机)+ lcd_vblank_ctrl,并把 sts_* 接上;
-//    BD 侧:axi_smc 加一个从口(NUM_SI 1→2),并决定走 GP0 还是开 HP0 口。
+//  【职责】只做例化与引线,不含逻辑与寄存器。
+//  【结构】
+//    · AXI4-Lite 从机位于 BD 的 system_wrapper 内;LCD、采集、继电器、DDS、触摸
+//      等模块统一收进本层,BD 只挂 cv_sys 一个 module_ref。
+//    · 显示通路:lcd_display(彩条测试源)→ lcd_timing(时序)→ lcd_fb_reader
+//      (DDR 取行)→ lcd_vblank_ctrl(VBlank 换址,防撕裂)。
+//    · 时钟:clk_axi = FCLK_CLK0 = 50 MHz,同时作为 PCLK;ADC 由 MMCM 出 130 MHz,
+//      内部整数分频得到 32.50 MSPS。
+//    · 复位:s_axi_aresetn 来自 rst_ps7_0_50M,已包含 locked 与同步释放处理。
 //=============================================================================
 
 module cv_sys #(
